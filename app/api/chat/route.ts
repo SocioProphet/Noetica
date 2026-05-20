@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { models } from '@/config/models'
 import { evidenceHash } from '@/lib/evidence/hash'
 import type { ChatMessage } from '@/lib/types/message'
+import type { ModelConfig } from '@/lib/types/model'
 import type { SteeringConfig } from '@/lib/types/steering'
 import { streamAnthropic } from '@/lib/providers/anthropic'
 import { streamOpenAI } from '@/lib/providers/openai'
@@ -68,10 +69,12 @@ export async function POST(request: Request) {
     )
   }
 
+  const providerModelId = resolveProviderModelId(model)
   const run_id = crypto.randomUUID()
   const timestamp = new Date().toISOString()
   const request_hash = evidenceHash({
     model_id: model.id,
+    provider_model_id: providerModelId,
     prompt: latest.content,
     timestamp
   })
@@ -89,7 +92,7 @@ export async function POST(request: Request) {
       send('meta', {
         governance: {
           run_id,
-          model_routed: model.id,
+          model_routed: providerModelId,
           provider: model.provider,
           policy_admitted: true,
           memory_written: false,
@@ -101,8 +104,8 @@ export async function POST(request: Request) {
 
       try {
         const providerStream = model.provider === 'openai'
-          ? streamOpenAI({ model: model.id, messages })
-          : streamAnthropic({ model: model.id, messages })
+          ? streamOpenAI({ model: providerModelId, messages })
+          : streamAnthropic({ model: providerModelId, messages })
 
         for await (const delta of providerStream) {
           content += delta
@@ -112,6 +115,7 @@ export async function POST(request: Request) {
         const latency_ms = Date.now() - started
         const evidence_hash = evidenceHash({
           model_id: model.id,
+          provider_model_id: providerModelId,
           prompt: latest.content,
           response: content,
           timestamp
@@ -121,7 +125,7 @@ export async function POST(request: Request) {
           result: {
             run_id,
             content,
-            model_routed: model.id,
+            model_routed: providerModelId,
             provider: model.provider,
             policy_admitted: true,
             memory_written: false,
@@ -148,4 +152,16 @@ export async function POST(request: Request) {
       connection: 'keep-alive'
     }
   })
+}
+
+function resolveProviderModelId(model: ModelConfig): string {
+  if (model.provider === 'anthropic') {
+    return process.env.ANTHROPIC_MODEL_ID?.trim() || model.id
+  }
+
+  if (model.provider === 'openai') {
+    return process.env.OPENAI_MODEL_ID?.trim() || model.id
+  }
+
+  return model.id
 }
