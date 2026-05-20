@@ -27,9 +27,16 @@ export async function POST(request: Request) {
 
   const model = models.find((candidate) => candidate.id === body.model_id) ?? models[0]
 
-  if (body.steering && !model.steering_eligible) {
+  if (body.steering && model.steering === 'none') {
     return NextResponse.json(
-      { error: 'model_not_steering_eligible', model_id: model.id },
+      { error: 'model_not_steering_capable', model_id: model.id, steering: model.steering },
+      { status: 400 }
+    )
+  }
+
+  if (body.steering && model.steering === 'local' && mode === 'standalone') {
+    return NextResponse.json(
+      { error: 'local_steering_requires_sourceos', model_id: model.id, steering: model.steering },
       { status: 400 }
     )
   }

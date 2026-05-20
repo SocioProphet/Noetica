@@ -23,10 +23,34 @@ It sits at the same tier as TurtleTerm, BearBrowser, and AgentTerm.
 - standalone: direct provider API calls, no Superconscious dependency
 - sourceos: submit NoeticaTaskInput to Superconscious adapter
 
-## Steering
+## Model steering capability tiers
 
-SAE steering via Neuronpedia applies to steering_eligible models only.
-Always show steered vs baseline diff. Never hide what was changed.
+Do not use a boolean steering abstraction. Model steering is a three-tier capability:
+
+- `full`: full white-box SAE steering. The model has activation access and a usable SAE source, such as Neuronpedia. The UI may show feature search, layer selection, strength controls, and baseline-vs-steered diff.
+- `local`: open-weight / partial white-box path. SAE steering may be possible through Agent Machine local inference or a custom SAE, but not through a hosted blackbox API. In standalone mode this must render as unavailable or pending.
+- `none`: blackbox provider path. Claude, OpenAI, Gemini, Grok, and similar APIs do not expose activations. Noetica must not claim SAE steering. Show governed provenance, route, latency, policy, and evidence/tamper state instead.
+
+Never represent prompt engineering, system prompts, or few-shot examples as SAE steering. Those are behavioral controls, not mechanistic activation steering.
+
+## Steering result states
+
+`SteeringResult.status` must be explicit:
+
+- `applied`: a real steering backend applied the requested steering.
+- `not_configured`: required steering credentials or backend are absent.
+- `noop`: the adapter accepted steering intent but deliberately applied no runtime intervention.
+
+No silent steering failure is allowed.
+
+## M2 milestone split
+
+M2a is live standalone chat and must not require `NEURONPEDIA_API_KEY`.
+M2b is real steering diff and requires a configured steering backend capable of returning `status: "applied"`.
+
+## Feature search
+
+M2b should include a feature-search path for Neuronpedia or another SAE source where available. This is a SHOULD, not a blocker for the first `status: "applied"` demonstration.
 
 ## Palette
 
