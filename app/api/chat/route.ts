@@ -50,12 +50,20 @@ export async function POST(request: Request) {
   if (mode === 'sourceos') {
     const timestamp = new Date().toISOString()
     const toolGrantRefs = inferToolGrantRefs(model, body.steering)
+    const steeringHintForHash = body.steering
+      ? {
+          feature_id: body.steering.feature_id,
+          layer: body.steering.layer,
+          preset: body.steering.preset ?? null,
+          strength: body.steering.strength
+        }
+      : null
     const requestHash = evidenceHash({
       agent_id: 'noetica',
       mode,
       model_hint: model.id,
       prompt: latest.content,
-      steering_hint: body.steering ?? null,
+      steering_hint: steeringHintForHash,
       tool_grant_refs: toolGrantRefs,
       timestamp
     })
