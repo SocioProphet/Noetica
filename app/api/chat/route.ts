@@ -1,10 +1,13 @@
 import { NextResponse } from 'next/server'
 import { models } from '@/config/models'
+import { evidenceHash } from '@/lib/evidence/hash'
 import type { ChatMessage } from '@/lib/types/message'
 import type { SteeringConfig } from '@/lib/types/steering'
-import { callAnthropic } from '@/lib/providers/anthropic'
-import { callOpenAI } from '@/lib/providers/openai'
+import { streamAnthropic } from '@/lib/providers/anthropic'
+import { streamOpenAI } from '@/lib/providers/openai'
 import { submitTask } from '@/lib/superconscious/adapter'
+
+export const runtime = 'nodejs'
 
 type ChatRequest = {
   session_id?: string
@@ -54,22 +57,95 @@ export async function POST(request: Request) {
     return NextResponse.json({ result })
   }
 
-  if (model.provider === 'openai') {
-    const result = await callOpenAI({ model: model.id, messages })
-    return NextResponse.json({ result })
+  if (model.provider !== 'openai' && model.provider !== 'anthropic') {
+    return NextResponse.json(
+      {
+        error: 'provider_not_implemented_in_m2a',
+        provider: model.provider,
+        model_id: model.id
+      },
+      { status: 501 }
+    )
   }
 
-  if (model.provider === 'anthropic') {
-    const result = await callAnthropic({ model: model.id, messages })
-    return NextResponse.json({ result })
-  }
+  const run_id = crypto.randomUUID()
+  const timestamp = new Date().toISOString()
+  const request_hash = evidenceHash({
+    model_id: model.id,
+    prompt: latest.content,
+    timestamp
+  })
 
-  return NextResponse.json(
-    {
-      error: 'provider_not_implemented_in_m1',
-      provider: model.provider,
-      model_id: model.id
-    },
-    { status: 501 }
-  )
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const encoder = new TextEncoder()
+      const started = Date.now()
+      let content = ''
+
+      function send(event: string, data: unknown) {
+        controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
+      }
+
+      send('meta', {
+        governance: {
+          run_id,
+          model_routed: model.id,
+          provider: model.provider,
+          policy_admitted: true,
+          memory_written: false,
+          request_hash,
+          timestamp,
+          latency_ms: 0
+        }
+      })
+
+      try {
+        const providerStream = model.provider === 'openai'
+          ? streamOpenAI({ model: model.id, messages })
+          : streamAnthropic({ model: model.id, messages })
+
+        for await (const delta of providerStream) {
+          content += delta
+          send('delta', { delta })
+        }
+
+        const latency_ms = Date.now() - started
+        const evidence_hash = evidenceHash({
+          model_id: model.id,
+          prompt: latest.content,
+          response: content,
+          timestamp
+        })
+
+        send('done', {
+          result: {
+            run_id,
+            content,
+            model_routed: model.id,
+            provider: model.provider,
+            policy_admitted: true,
+            memory_written: false,
+            request_hash,
+            evidence_hash,
+            timestamp,
+            latency_ms
+          }
+        })
+      } catch (error) {
+        send('error', {
+          error: error instanceof Error ? error.message : 'unknown_provider_error'
+        })
+      } finally {
+        controller.close()
+      }
+    }
+  })
+
+  return new Response(stream, {
+    headers: {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive'
+    }
+  })
 }
