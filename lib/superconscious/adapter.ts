@@ -21,6 +21,9 @@ export interface NoeticaTaskResult {
   latency_ms: number
 }
 
+// Authority boundary: Noetica owns this adapter interface only. Real routing and
+// task execution belong to github.com/SocioProphet/superconscious and model
+// selection belongs to github.com/SocioProphet/model-router.
 export async function submitTask(input: NoeticaTaskInput): Promise<NoeticaTaskResult> {
   const started = Date.now()
 
@@ -33,6 +36,7 @@ export async function submitTask(input: NoeticaTaskInput): Promise<NoeticaTaskRe
     memory_written: false,
     steering_applied: input.steering
       ? {
+          status: 'noop',
           baseline: input.message,
           steered: input.message,
           diff_summary: 'SourceOS adapter stub records steering intent but applies no runtime intervention.',

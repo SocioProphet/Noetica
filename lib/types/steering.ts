@@ -1,3 +1,5 @@
+export type SteeringStatus = 'applied' | 'not_configured' | 'noop'
+
 export interface SteeringConfig {
   feature_id: string
   layer: string
@@ -6,6 +8,7 @@ export interface SteeringConfig {
 }
 
 export interface SteeringResult {
+  status: SteeringStatus
   baseline: string
   steered: string
   diff_summary: string

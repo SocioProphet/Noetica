@@ -4,6 +4,8 @@ export interface MemoryScopeRef {
   writable: boolean
 }
 
+// Authority boundary: Noetica may display and request a memory scope, but memory
+// persistence and policy belong to github.com/SocioProphet/memory-mesh.
 export async function listMemoryScopes(): Promise<MemoryScopeRef[]> {
   return [
     {

@@ -13,6 +13,7 @@ export async function runNeuronpediaSteering(input: SteeringInput): Promise<Stee
 
   if (!apiKey) {
     return {
+      status: 'not_configured',
       baseline: input.prompt,
       steered: input.prompt,
       diff_summary: 'Neuronpedia API key not configured; returning explicit no-op steering result.',
@@ -36,5 +37,12 @@ export async function runNeuronpediaSteering(input: SteeringInput): Promise<Stee
     throw new Error(`Neuronpedia steering request failed: ${response.status} ${details}`)
   }
 
-  return (await response.json()) as SteeringResult
+  const result = (await response.json()) as Omit<SteeringResult, 'status'> & {
+    status?: SteeringResult['status']
+  }
+
+  return {
+    ...result,
+    status: result.status ?? 'applied'
+  }
 }
