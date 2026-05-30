@@ -1,4 +1,4 @@
-import { evidenceHash } from '@/lib/evidence/hash'
+import { evidenceHash, type EvidencePayload } from '@/lib/evidence/hash'
 import type { ExternalModelProviderRouteEvidence } from '@/lib/types/agentplane'
 import type { SourceOSInteractionEvent, SourceOSSteeringKind, SourceOSSteeringStatus } from '@/lib/types/sourceos-interaction'
 import type { GrantResolutionRefs, NoeticaTaskMode, NoeticaTaskResult, NoeticaTaskStatus } from '@/lib/types/task'
@@ -261,17 +261,21 @@ function interactionEventId(sessionId: string, runId: string, eventClass: Source
 }
 
 function withIntegrity(event: SourceOSInteractionEvent): SourceOSInteractionEvent {
-  const unsigned = {
+  const unsigned: SourceOSInteractionEvent = {
     ...event,
     integrity: null
   }
   return {
     ...event,
     integrity: {
-      eventHash: `sha256:${evidenceHash(unsigned)}`,
+      eventHash: `sha256:${evidenceHash(toEvidencePayload(unsigned))}`,
       signature: null
     }
   }
+}
+
+function toEvidencePayload(value: unknown): EvidencePayload {
+  return JSON.parse(JSON.stringify(value)) as EvidencePayload
 }
 
 function safeUrnTail(value: string): string {
