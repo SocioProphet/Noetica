@@ -50,9 +50,23 @@ jobs:
       - name: Tauri Rust lockfile
         working-directory: src-tauri
         run: cargo generate-lockfile
-      - name: Tauri Rust check
+      - name: Tauri Rust check diagnostics
         working-directory: src-tauri
-        run: cargo check --locked --quiet
+        run: |
+          set +e
+          cargo check --locked > ../tauri-rust-check.log 2>&1
+          status=$?
+          echo "cargo-check-exit=$status"
+          echo "--- tauri-rust-check-tail ---"
+          tail -n 80 ../tauri-rust-check.log
+          echo "--- end-tauri-rust-check-tail ---"
+          exit $status
+      - name: Upload Tauri Rust check log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-rust-check-log
+          path: tauri-rust-check.log
 
   tauri-macos:
     runs-on: macos-latest
