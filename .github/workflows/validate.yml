@@ -33,8 +33,29 @@ jobs:
       - name: Build
         run: npm run build
 
+  tauri-rust-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Materialize Tauri icon without Node
+        run: |
+          mkdir -p src-tauri/icons
+          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=' | base64 --decode > src-tauri/icons/icon.png
+          file src-tauri/icons/icon.png
+      - name: Tauri Rust lockfile
+        working-directory: src-tauri
+        run: cargo generate-lockfile
+      - name: Tauri Rust check
+        working-directory: src-tauri
+        run: cargo check --locked --quiet
+
   tauri-macos:
     runs-on: macos-latest
+    needs:
+      - tauri-rust-macos
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -58,6 +79,6 @@ jobs:
         run: cargo generate-lockfile
       - name: Tauri Rust check
         working-directory: src-tauri
-        run: cargo check --locked
+        run: cargo check --locked --quiet
       - name: Tauri build feasibility
         run: npm run tauri:build
