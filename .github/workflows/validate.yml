@@ -46,5 +46,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Install dependencies
         run: npm install
+      - name: Tauri icon materializer
+        run: |
+          npm run tauri:icon
+          test -f src-tauri/icons/icon.png
+          file src-tauri/icons/icon.png
+      - name: Next build for Tauri
+        run: npm run build
+      - name: Tauri Rust check
+        working-directory: src-tauri
+        run: cargo check --locked
       - name: Tauri build feasibility
         run: npm run tauri:build
