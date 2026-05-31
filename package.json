@@ -14,7 +14,8 @@
     "smoke:standalone": "node scripts/smoke-standalone.mjs",
     "cli": "node cli/noetica.mjs",
     "cli:doctor": "node cli/noetica.mjs doctor --json",
-    "cli:smoke": "node cli/noetica.mjs smoke --dry-run"
+    "cli:smoke": "node cli/noetica.mjs smoke --dry-run",
+    "release:artifact": "node scripts/build-release-artifact.mjs"
   },
   "dependencies": {
     "next": "^14.2.23",
