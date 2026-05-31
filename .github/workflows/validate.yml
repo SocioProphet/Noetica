@@ -28,3 +28,10 @@ jobs:
         run: npm run lint
       - name: Build
         run: npm run build
+      - name: Release artifact
+        run: npm run release:artifact
+      - name: Inspect release artifact
+        run: |
+          test -f dist/release/noetica-0.1.0-node.tar.gz
+          test -f dist/release/noetica-0.1.0-node.tar.gz.sha256
+          test -f dist/release/noetica-0.1.0-node.tar.gz.receipt.json
