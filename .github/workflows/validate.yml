@@ -22,6 +22,10 @@ jobs:
         run: npm run cli:doctor
       - name: CLI smoke
         run: npm run cli:smoke
+      - name: Tauri icon materializer
+        run: |
+          npm run tauri:icon
+          node -e "const fs=require('fs'); const b=fs.readFileSync('src-tauri/icons/icon.png'); const sig='89504e470d0a1a0a'; if (b.subarray(0,8).toString('hex') !== sig) { throw new Error('src-tauri/icons/icon.png is not a PNG'); }"
       - name: Typecheck
         run: npm run typecheck
       - name: Lint
