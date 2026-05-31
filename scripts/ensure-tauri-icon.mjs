@@ -4,11 +4,11 @@ import { dirname, resolve } from 'node:path';
 
 const iconPath = resolve('src-tauri/icons/icon.png');
 
-// 1x1 transparent PNG. This is a feasibility placeholder only.
+// 1x1 transparent 8-bit RGBA PNG. This is a feasibility placeholder only.
 // The production packaging tranche must replace this with the real icon set.
-const transparentPngBase64 =
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
+const transparentRgbaPngBase64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=';
 
 await mkdir(dirname(iconPath), { recursive: true });
-await writeFile(iconPath, Buffer.from(transparentPngBase64, 'base64'));
-console.log(`Ensured Tauri feasibility icon at ${iconPath}`);
+await writeFile(iconPath, Buffer.from(transparentRgbaPngBase64, 'base64'));
+console.log(`Ensured Tauri feasibility RGBA icon at ${iconPath}`);
