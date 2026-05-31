@@ -32,3 +32,19 @@ jobs:
         run: npm run lint
       - name: Build
         run: npm run build
+
+  tauri-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: npm install
+      - name: Tauri build feasibility
+        run: npm run tauri:build
