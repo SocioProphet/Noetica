@@ -53,6 +53,9 @@ jobs:
           file src-tauri/icons/icon.png
       - name: Next build for Tauri
         run: npm run build
+      - name: Tauri Rust lockfile
+        working-directory: src-tauri
+        run: cargo generate-lockfile
       - name: Tauri Rust check
         working-directory: src-tauri
         run: cargo check --locked
