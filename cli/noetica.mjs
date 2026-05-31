@@ -13,6 +13,7 @@ import {
   readConfig,
   writeDefaultConfig,
 } from './noetica-config.mjs'
+import { service as serviceCommand } from './noetica-service.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const repoRoot = resolve(dirname(__filename), '..')
@@ -56,7 +57,7 @@ Commands:
   start [-- ...]                       Start Noetica in foreground mode
   open                                 Open the configured local Noetica URL
   smoke [--dry-run|--provider <id>]    Run dry-run or provider smoke checks
-  service <action>                     OS-native service lifecycle command stubs
+  service <action>                     OS-native service lifecycle commands
 
 Service actions:
   install | start | status | stop | uninstall
@@ -70,7 +71,7 @@ function version() {
     private: packageJson.private === true,
     installRoot: repoRoot,
     configPath: CONFIG_PATH,
-    phase: 'phase-1-start-open',
+    phase: 'phase-1-service-adapters',
   }, null, 2))
 }
 
@@ -98,7 +99,7 @@ async function doctor(args = []) {
   const result = {
     kind: 'NoeticaDoctor',
     status: checks.every((candidate) => candidate.required !== true || candidate.ok) ? 'ok' : 'degraded',
-    phase: 'phase-1-start-open',
+    phase: 'phase-1-service-adapters',
     config: {
       path: configState.path,
       exists: configState.exists,
@@ -347,16 +348,7 @@ function service(args = []) {
     process.exit(2)
   }
 
-  console.log(JSON.stringify({
-    kind: 'NoeticaServiceCommand',
-    action,
-    status: 'not_implemented',
-    reason: 'OS-native service adapters are reserved for Phase 1 Turn 6.',
-    expectedBackends: {
-      darwin: 'launchctl LaunchAgent',
-      linux: 'systemd --user or SourceOS-compatible user service',
-    },
-  }, null, 2))
+  console.log(JSON.stringify(serviceCommand(action), null, 2))
 }
 
 function check(name, ok, detail, required = false) {
