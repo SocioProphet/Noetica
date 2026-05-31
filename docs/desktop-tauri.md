@@ -11,6 +11,8 @@ npm run tauri:dev
 npm run tauri:build
 ```
 
+Both commands first run `npm run tauri:icon`, which materializes a minimal placeholder at `src-tauri/icons/icon.png` for Tauri context generation.
+
 ## Current boundary
 
 This tranche intentionally uses the existing Next.js development server as the Tauri dev URL:
@@ -20,6 +22,12 @@ http://127.0.0.1:3737
 ```
 
 That is a feasibility bridge, not the final product architecture.
+
+## Feasibility icon
+
+Tauri context generation may resolve `src-tauri/icons/icon.png` even when production bundling is disabled. This tranche therefore creates a minimal transparent placeholder icon before `tauri dev` and `tauri build`.
+
+The placeholder is not a production asset. Real app icons, ICNS/ICO generation, signing, notarization, cask/app packaging, and branding belong to the packaging hardening tranche.
 
 ## Next tranche
 
