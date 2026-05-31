@@ -40,11 +40,13 @@ jobs:
         uses: actions/checkout@v4
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-      - name: Materialize Tauri icon without Node
+      - name: Materialize Tauri context inputs without Node
         run: |
-          mkdir -p src-tauri/icons
+          mkdir -p src-tauri/icons .next
           printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=' | base64 --decode > src-tauri/icons/icon.png
+          touch .next/.ci-tauri-rust-check-placeholder
           file src-tauri/icons/icon.png
+          test -d .next
       - name: Tauri Rust lockfile
         working-directory: src-tauri
         run: cargo generate-lockfile
