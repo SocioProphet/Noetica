@@ -53,4 +53,21 @@ Run dry-run smoke:
 noetica smoke --dry-run
 ```
 
-Missing provider keys, missing Agent Machine, and missing Prophet Mesh are non-fatal in Phase 1.
+Run provider smoke after enabling a provider route and exporting the referenced key:
+
+```bash
+noetica smoke --provider openai-compatible
+noetica smoke --provider anthropic
+```
+
+Provider smoke is explicit. Missing keys remain non-fatal for `doctor` and `smoke --dry-run`, but an explicitly requested provider smoke fails closed when the provider is disabled, missing, deferred, unsupported, or missing its configured credential environment variable.
+
+## Provider smoke behavior
+
+`openai-compatible` probes `GET /models` against the configured base URL.
+
+`anthropic` probes `GET /v1/models` against the configured base URL using `anthropic-version: 2023-06-01` and `x-api-key`.
+
+Provider smoke output redacts URL query secrets, summarizes returned model lists, and does not print provider API keys.
+
+Missing provider keys, missing Agent Machine, and missing Prophet Mesh are non-fatal in Phase 1 unless the user explicitly asks to smoke that provider.
