@@ -4,6 +4,13 @@ import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+  CONFIG_PATH,
+  localUrl,
+  providerStatuses,
+  readConfig,
+  writeDefaultConfig,
+} from './noetica-config.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const repoRoot = resolve(dirname(__filename), '..')
@@ -41,13 +48,13 @@ Usage:
   noetica <command> [options]
 
 Commands:
-  version              Print version and installation metadata
-  doctor [--json]      Report local readiness
-  configure            Prepare user configuration (stub in Phase 1 Turn 2)
-  start [-- ...]       Start Noetica in foreground mode
-  open                 Open the configured local Noetica URL
-  smoke [--dry-run]    Run a dry-run smoke check
-  service <action>     OS-native service lifecycle command stubs
+  version                 Print version and installation metadata
+  doctor [--json]         Report local readiness
+  configure [--force]     Create SourceOS-aligned user configuration
+  start [-- ...]          Start Noetica in foreground mode
+  open                    Open the configured local Noetica URL
+  smoke [--dry-run]       Run a dry-run smoke check
+  service <action>        OS-native service lifecycle command stubs
 
 Service actions:
   install | start | status | stop | uninstall
@@ -60,24 +67,39 @@ function version() {
     version: packageJson.version,
     private: packageJson.private === true,
     installRoot: repoRoot,
-    phase: 'phase-1-cli-lifecycle',
+    configPath: CONFIG_PATH,
+    phase: 'phase-1-config-provider',
   }, null, 2))
 }
 
 function doctor(args = []) {
   const json = args.includes('--json')
+  const configState = readConfig()
+  const config = configState.config
+  const providers = providerStatuses(config)
+  const configOk = configState.exists && configState.errors.length === 0
   const checks = [
-    check('package_json', existsSync(packagePath), packagePath),
-    check('next_config', existsSync(join(repoRoot, 'next.config.js')) || existsSync(join(repoRoot, 'next.config.mjs')), 'optional'),
-    check('app_directory', existsSync(join(repoRoot, 'app')), join(repoRoot, 'app')),
+    check('package_json', existsSync(packagePath), packagePath, true),
+    check('app_directory', existsSync(join(repoRoot, 'app')), join(repoRoot, 'app'), true),
+    check('config_file', configState.exists, configState.path),
+    check('config_valid', configOk, configState.errors.length ? configState.errors.join(',') : 'ok'),
+    check('provider_routes', providers.length > 0, `${providers.length} route(s)`),
     check('agent_machine', commandExists('agent-machine'), 'optional in Phase 1'),
-    check('prophet_mesh', false, 'deferred in Phase 1'),
+    check('prophet_mesh', providerStatus(providers, 'prophet-mesh') === 'deferred', 'deferred in Phase 1'),
   ]
 
   const result = {
     kind: 'NoeticaDoctor',
     status: checks.every((candidate) => candidate.required !== true || candidate.ok) ? 'ok' : 'degraded',
-    phase: 'phase-1-cli-lifecycle',
+    phase: 'phase-1-config-provider',
+    config: {
+      path: configState.path,
+      exists: configState.exists,
+      errors: configState.errors,
+      warnings: configState.warnings,
+      localUrl: config ? localUrl(config) : null,
+    },
+    providers,
     checks,
   }
 
@@ -88,16 +110,32 @@ function doctor(args = []) {
 
   console.log('Noetica doctor')
   console.log(`status: ${result.status}`)
+  console.log(`config: ${configState.path}`)
+  if (config) console.log(`local_url: ${localUrl(config)}`)
   for (const item of checks) {
     const marker = item.ok ? 'ok' : item.required ? 'missing' : 'not_configured'
     console.log(`- ${item.name}: ${marker} (${item.detail})`)
   }
+  if (providers.length > 0) {
+    console.log('providers:')
+    for (const provider of providers) {
+      const key = provider.apiKeyEnv ? ` key=${provider.keyPresent ? 'present' : 'missing'} env=${provider.apiKeyEnv}` : ''
+      console.log(`- ${provider.id}: ${provider.status} kind=${provider.kind}${key}`)
+    }
+  }
 }
 
-function configure() {
-  console.log('Noetica configure is reserved for Phase 1 Turn 3.')
-  console.log('Target config path: ~/.config/sourceos/noetica/config.json')
-  console.log('No config was written by this skeleton command.')
+function configure(args = []) {
+  const force = args.includes('--force')
+  const result = writeDefaultConfig({ force })
+
+  console.log(JSON.stringify({
+    kind: 'NoeticaConfigure',
+    path: result.path,
+    status: result.status,
+    wrote: result.wrote,
+    secretPolicy: 'raw provider secrets are not written; env var references only',
+  }, null, 2))
 }
 
 async function start(args = []) {
@@ -106,7 +144,8 @@ async function start(args = []) {
 }
 
 async function openNoetica() {
-  const url = process.env.NOETICA_URL ?? 'http://127.0.0.1:3000'
+  const config = readConfig().config
+  const url = process.env.NOETICA_URL ?? localUrl(config)
   const platform = process.platform
 
   if (platform === 'darwin') {
@@ -125,17 +164,29 @@ async function openNoetica() {
 function smoke(args = []) {
   const dryRun = args.length === 0 || args.includes('--dry-run')
   if (!dryRun) {
-    console.error('Only --dry-run smoke is implemented in Phase 1 Turn 2.')
+    console.error('Only --dry-run smoke is implemented in Phase 1 Turn 3.')
     process.exit(2)
   }
+
+  const configState = readConfig()
+  const config = configState.config
+  const providers = providerStatuses(config)
 
   console.log(JSON.stringify({
     kind: 'NoeticaSmoke',
     mode: 'dry_run',
     status: 'ok',
+    config: {
+      path: configState.path,
+      exists: configState.exists,
+      valid: configState.errors.length === 0,
+      localUrl: config ? localUrl(config) : null,
+    },
+    providers,
     checks: [
       { name: 'cli_loaded', ok: true },
       { name: 'package_json', ok: existsSync(packagePath) },
+      { name: 'config_readable_or_absent', ok: configState.errors.length === 0 },
     ],
   }, null, 2))
 }
@@ -163,6 +214,10 @@ function service(args = []) {
 
 function check(name, ok, detail, required = false) {
   return { name, ok, detail, required }
+}
+
+function providerStatus(providers, id) {
+  return providers.find((provider) => provider.id === id)?.status ?? 'not_configured'
 }
 
 function commandExists(name) {
