@@ -15,8 +15,9 @@
     "cli": "node cli/noetica.mjs",
     "cli:doctor": "node cli/noetica.mjs doctor --json",
     "cli:smoke": "node cli/noetica.mjs smoke --dry-run",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:icon": "node scripts/ensure-tauri-icon.mjs",
+    "tauri:dev": "npm run tauri:icon && tauri dev",
+    "tauri:build": "npm run tauri:icon && tauri build"
   },
   "dependencies": {
     "next": "^14.2.23",
