@@ -2,10 +2,12 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
+import { createConnection } from 'node:net'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   CONFIG_PATH,
+  defaultConfig,
   localUrl,
   providerStatuses,
   readConfig,
@@ -68,22 +70,25 @@ function version() {
     private: packageJson.private === true,
     installRoot: repoRoot,
     configPath: CONFIG_PATH,
-    phase: 'phase-1-provider-smoke',
+    phase: 'phase-1-start-open',
   }, null, 2))
 }
 
-function doctor(args = []) {
+async function doctor(args = []) {
   const json = args.includes('--json')
   const configState = readConfig()
   const config = configState.config
+  const effectiveConfig = config ?? defaultConfig()
   const providers = providerStatuses(config)
   const configOk = configState.exists && configState.errors.length === 0
   const configuredProviders = providers.filter((provider) => provider.status === 'configured').length
+  const portProbe = await probePort(effectiveConfig.server.host, effectiveConfig.server.port)
   const checks = [
     check('package_json', existsSync(packagePath), packagePath, true),
     check('app_directory', existsSync(join(repoRoot, 'app')), join(repoRoot, 'app'), true),
     check('config_file', configState.exists, configState.path),
     check('config_valid', configOk, configState.errors.length ? configState.errors.join(',') : 'ok'),
+    check('local_port_available', portProbe.available, `${effectiveConfig.server.host}:${effectiveConfig.server.port}`),
     check('provider_routes', providers.length > 0, `${providers.length} route(s)`),
     check('provider_configured', configuredProviders > 0, `${configuredProviders} configured provider(s)`),
     check('agent_machine', commandExists('agent-machine'), 'optional in Phase 1'),
@@ -93,13 +98,19 @@ function doctor(args = []) {
   const result = {
     kind: 'NoeticaDoctor',
     status: checks.every((candidate) => candidate.required !== true || candidate.ok) ? 'ok' : 'degraded',
-    phase: 'phase-1-provider-smoke',
+    phase: 'phase-1-start-open',
     config: {
       path: configState.path,
       exists: configState.exists,
       errors: configState.errors,
       warnings: configState.warnings,
-      localUrl: config ? localUrl(config) : null,
+      localUrl: localUrl(effectiveConfig),
+    },
+    runtime: {
+      host: effectiveConfig.server.host,
+      port: effectiveConfig.server.port,
+      portAvailable: portProbe.available,
+      portState: portProbe.state,
     },
     providers,
     checks,
@@ -113,7 +124,7 @@ function doctor(args = []) {
   console.log('Noetica doctor')
   console.log(`status: ${result.status}`)
   console.log(`config: ${configState.path}`)
-  if (config) console.log(`local_url: ${localUrl(config)}`)
+  console.log(`local_url: ${localUrl(effectiveConfig)}`)
   for (const item of checks) {
     const marker = item.ok ? 'ok' : item.required ? 'missing' : 'not_configured'
     console.log(`- ${item.name}: ${marker} (${item.detail})`)
@@ -141,12 +152,43 @@ function configure(args = []) {
 }
 
 async function start(args = []) {
-  const nextArgs = args[0] === '--' ? args.slice(1) : args
+  const configState = readConfig()
+  const config = configState.config ?? defaultConfig()
+  const passThrough = args[0] === '--' ? args.slice(1) : args
+  const hasExplicitPort = passThrough.includes('--port') || passThrough.includes('-p')
+  const hasExplicitHostname = passThrough.includes('--hostname') || passThrough.includes('-H')
+  const nextArgs = [
+    ...(hasExplicitHostname ? [] : ['--hostname', config.server.host]),
+    ...(hasExplicitPort ? [] : ['--port', String(config.server.port)]),
+    ...passThrough,
+  ]
+
+  const portProbe = await probePort(config.server.host, config.server.port)
+  if (!hasExplicitPort && !portProbe.available) {
+    console.error(JSON.stringify({
+      kind: 'NoeticaStartRefused',
+      status: 'port_unavailable',
+      host: config.server.host,
+      port: config.server.port,
+      detail: portProbe.state,
+      hint: 'Use noetica doctor --json for diagnostics, free the port, update config, or pass -- --port <port>.',
+    }, null, 2))
+    process.exit(1)
+  }
+
+  console.log(JSON.stringify({
+    kind: 'NoeticaStart',
+    mode: 'foreground',
+    url: localUrl(config),
+    configPath: configState.path,
+    nextArgs,
+  }, null, 2))
+
   await run('npm', ['run', 'dev', '--', ...nextArgs], { cwd: repoRoot })
 }
 
 async function openNoetica() {
-  const config = readConfig().config
+  const config = readConfig().config ?? defaultConfig()
   const url = process.env.NOETICA_URL ?? localUrl(config)
   const platform = process.platform
 
@@ -168,7 +210,7 @@ async function smoke(args = []) {
   const dryRun = !providerId && (args.length === 0 || args.includes('--dry-run'))
 
   if (dryRun) {
-    smokeDryRun()
+    await smokeDryRun()
     return
   }
 
@@ -185,10 +227,11 @@ async function smoke(args = []) {
   }
 }
 
-function smokeDryRun() {
+async function smokeDryRun() {
   const configState = readConfig()
-  const config = configState.config
-  const providers = providerStatuses(config)
+  const config = configState.config ?? defaultConfig()
+  const providers = providerStatuses(configState.config)
+  const portProbe = await probePort(config.server.host, config.server.port)
 
   console.log(JSON.stringify({
     kind: 'NoeticaSmoke',
@@ -198,13 +241,20 @@ function smokeDryRun() {
       path: configState.path,
       exists: configState.exists,
       valid: configState.errors.length === 0,
-      localUrl: config ? localUrl(config) : null,
+      localUrl: localUrl(config),
+    },
+    runtime: {
+      host: config.server.host,
+      port: config.server.port,
+      portAvailable: portProbe.available,
+      portState: portProbe.state,
     },
     providers,
     checks: [
       { name: 'cli_loaded', ok: true },
       { name: 'package_json', ok: existsSync(packagePath) },
       { name: 'config_readable_or_absent', ok: configState.errors.length === 0 },
+      { name: 'local_port_available', ok: portProbe.available },
     ],
   }, null, 2))
 }
@@ -383,6 +433,27 @@ function joinUrl(baseUrl, path) {
 
 function redactUrl(url) {
   return url.replace(/([?&](?:key|token|api_key)=)[^&]+/gi, '$1<redacted>')
+}
+
+async function probePort(host, port) {
+  return new Promise((resolvePromise) => {
+    const socket = createConnection({ host, port, timeout: 1000 })
+    socket.on('connect', () => {
+      socket.destroy()
+      resolvePromise({ available: false, state: 'in_use' })
+    })
+    socket.on('timeout', () => {
+      socket.destroy()
+      resolvePromise({ available: true, state: 'no_listener_timeout' })
+    })
+    socket.on('error', (error) => {
+      if (error.code === 'ECONNREFUSED') {
+        resolvePromise({ available: true, state: 'available' })
+        return
+      }
+      resolvePromise({ available: false, state: error.code ?? 'probe_error' })
+    })
+  })
 }
 
 function commandExists(name) {
