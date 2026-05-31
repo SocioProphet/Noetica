@@ -48,13 +48,13 @@ Usage:
   noetica <command> [options]
 
 Commands:
-  version                 Print version and installation metadata
-  doctor [--json]         Report local readiness
-  configure [--force]     Create SourceOS-aligned user configuration
-  start [-- ...]          Start Noetica in foreground mode
-  open                    Open the configured local Noetica URL
-  smoke [--dry-run]       Run a dry-run smoke check
-  service <action>        OS-native service lifecycle command stubs
+  version                              Print version and installation metadata
+  doctor [--json]                      Report local readiness
+  configure [--force]                  Create SourceOS-aligned user configuration
+  start [-- ...]                       Start Noetica in foreground mode
+  open                                 Open the configured local Noetica URL
+  smoke [--dry-run|--provider <id>]    Run dry-run or provider smoke checks
+  service <action>                     OS-native service lifecycle command stubs
 
 Service actions:
   install | start | status | stop | uninstall
@@ -68,7 +68,7 @@ function version() {
     private: packageJson.private === true,
     installRoot: repoRoot,
     configPath: CONFIG_PATH,
-    phase: 'phase-1-config-provider',
+    phase: 'phase-1-provider-smoke',
   }, null, 2))
 }
 
@@ -78,12 +78,14 @@ function doctor(args = []) {
   const config = configState.config
   const providers = providerStatuses(config)
   const configOk = configState.exists && configState.errors.length === 0
+  const configuredProviders = providers.filter((provider) => provider.status === 'configured').length
   const checks = [
     check('package_json', existsSync(packagePath), packagePath, true),
     check('app_directory', existsSync(join(repoRoot, 'app')), join(repoRoot, 'app'), true),
     check('config_file', configState.exists, configState.path),
     check('config_valid', configOk, configState.errors.length ? configState.errors.join(',') : 'ok'),
     check('provider_routes', providers.length > 0, `${providers.length} route(s)`),
+    check('provider_configured', configuredProviders > 0, `${configuredProviders} configured provider(s)`),
     check('agent_machine', commandExists('agent-machine'), 'optional in Phase 1'),
     check('prophet_mesh', providerStatus(providers, 'prophet-mesh') === 'deferred', 'deferred in Phase 1'),
   ]
@@ -91,7 +93,7 @@ function doctor(args = []) {
   const result = {
     kind: 'NoeticaDoctor',
     status: checks.every((candidate) => candidate.required !== true || candidate.ok) ? 'ok' : 'degraded',
-    phase: 'phase-1-config-provider',
+    phase: 'phase-1-provider-smoke',
     config: {
       path: configState.path,
       exists: configState.exists,
@@ -161,13 +163,29 @@ async function openNoetica() {
   console.log(url)
 }
 
-function smoke(args = []) {
-  const dryRun = args.length === 0 || args.includes('--dry-run')
-  if (!dryRun) {
-    console.error('Only --dry-run smoke is implemented in Phase 1 Turn 3.')
+async function smoke(args = []) {
+  const providerId = valueAfter(args, '--provider')
+  const dryRun = !providerId && (args.length === 0 || args.includes('--dry-run'))
+
+  if (dryRun) {
+    smokeDryRun()
+    return
+  }
+
+  if (!providerId) {
+    console.error('Usage: noetica smoke --dry-run | --provider <provider-id>')
     process.exit(2)
   }
 
+  const result = await smokeProvider(providerId)
+  console.log(JSON.stringify(result, null, 2))
+
+  if (result.status !== 'ok') {
+    process.exit(1)
+  }
+}
+
+function smokeDryRun() {
   const configState = readConfig()
   const config = configState.config
   const providers = providerStatuses(config)
@@ -189,6 +207,85 @@ function smoke(args = []) {
       { name: 'config_readable_or_absent', ok: configState.errors.length === 0 },
     ],
   }, null, 2))
+}
+
+async function smokeProvider(providerId) {
+  const configState = readConfig()
+  const config = configState.config
+  const route = config?.providers?.routes?.find((candidate) => candidate.id === providerId)
+
+  if (configState.errors.length > 0) {
+    return providerSmokeResult(providerId, 'config_invalid', { errors: configState.errors })
+  }
+
+  if (!route) {
+    return providerSmokeResult(providerId, 'provider_not_found')
+  }
+
+  if (route.phase === 'deferred') {
+    return providerSmokeResult(providerId, 'provider_deferred', { phase: route.phase })
+  }
+
+  if (route.enabled !== true) {
+    return providerSmokeResult(providerId, 'provider_disabled')
+  }
+
+  if (route.apiKeyEnv && !process.env[route.apiKeyEnv]) {
+    return providerSmokeResult(providerId, 'missing_key', { apiKeyEnv: route.apiKeyEnv })
+  }
+
+  if (route.kind === 'openai-compatible') {
+    return smokeOpenAICompatible(route)
+  }
+
+  if (route.kind === 'anthropic') {
+    return smokeAnthropic(route)
+  }
+
+  return providerSmokeResult(providerId, 'provider_kind_not_supported', { kind: route.kind })
+}
+
+async function smokeOpenAICompatible(route) {
+  const startedAt = Date.now()
+  const url = joinUrl(route.baseUrl, '/models')
+  const response = await fetchWithTimeout(url, {
+    headers: route.apiKeyEnv ? { Authorization: `Bearer ${process.env[route.apiKeyEnv]}` } : {},
+  })
+
+  const body = await safeBody(response)
+  return {
+    kind: 'NoeticaProviderSmoke',
+    providerId: route.id,
+    providerKind: route.kind,
+    status: response.ok ? 'ok' : 'provider_error',
+    endpoint: redactUrl(url),
+    httpStatus: response.status,
+    latencyMs: Date.now() - startedAt,
+    evidence: summarizeBody(body),
+  }
+}
+
+async function smokeAnthropic(route) {
+  const startedAt = Date.now()
+  const url = joinUrl(route.baseUrl, '/v1/models')
+  const response = await fetchWithTimeout(url, {
+    headers: {
+      'anthropic-version': '2023-06-01',
+      'x-api-key': process.env[route.apiKeyEnv],
+    },
+  })
+
+  const body = await safeBody(response)
+  return {
+    kind: 'NoeticaProviderSmoke',
+    providerId: route.id,
+    providerKind: route.kind,
+    status: response.ok ? 'ok' : 'provider_error',
+    endpoint: redactUrl(url),
+    httpStatus: response.status,
+    latencyMs: Date.now() - startedAt,
+    evidence: summarizeBody(body),
+  }
 }
 
 function service(args = []) {
@@ -218,6 +315,74 @@ function check(name, ok, detail, required = false) {
 
 function providerStatus(providers, id) {
   return providers.find((provider) => provider.id === id)?.status ?? 'not_configured'
+}
+
+function providerSmokeResult(providerId, status, extra = {}) {
+  return {
+    kind: 'NoeticaProviderSmoke',
+    providerId,
+    status,
+    ...extra,
+  }
+}
+
+async function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 10000)
+  try {
+    return await fetch(url, { ...options, signal: controller.signal })
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      text: async () => JSON.stringify({ error: error.message }),
+    }
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+async function safeBody(response) {
+  try {
+    const text = await response.text()
+    if (!text) return null
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+function summarizeBody(body) {
+  if (!body || typeof body !== 'object') return null
+  if (Array.isArray(body.data)) {
+    return {
+      object: body.object ?? null,
+      count: body.data.length,
+      firstIds: body.data.slice(0, 5).map((item) => item.id).filter(Boolean),
+    }
+  }
+  if (body.error) {
+    return {
+      error: typeof body.error === 'string' ? body.error : body.error.message ?? body.error.type ?? 'provider_error',
+    }
+  }
+  return {
+    keys: Object.keys(body).slice(0, 10),
+  }
+}
+
+function valueAfter(args, name) {
+  const index = args.indexOf(name)
+  if (index < 0) return null
+  return args[index + 1] ?? null
+}
+
+function joinUrl(baseUrl, path) {
+  return `${baseUrl.replace(/\/$/, '')}/${path.replace(/^\//, '')}`
+}
+
+function redactUrl(url) {
+  return url.replace(/([?&](?:key|token|api_key)=)[^&]+/gi, '$1<redacted>')
 }
 
 function commandExists(name) {
