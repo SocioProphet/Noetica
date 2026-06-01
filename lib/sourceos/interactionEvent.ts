@@ -164,7 +164,7 @@ export function buildNoeticaChatCompletionInteractionEvent(
       policyAdmitted: result.policy_admitted,
       policyRef: result.policy_ref ?? null,
       policyDecisionRefs: result.policy_ref ? [`urn:srcos:decision:${eventSlug}`] : [],
-      grantRefs: result.grant_refs ?? [],
+      grantRefs: result.grant_refs?.resolved ?? [],
       memoryScopeRef,
       memoryWritten: result.memory_written,
       contextPackRefs: [],
