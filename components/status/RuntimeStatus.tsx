@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { loadNoeticaStatus, type NoeticaStatusState } from '@/lib/client/noeticaStatus'
-import { buildRuntimeRemediations } from '@/lib/client/remediation'
+import { buildRuntimeRemediations, type RemediationItem } from '@/lib/client/remediation'
 import type { NoeticaServiceCapabilityStatus } from '@/lib/contracts/noeticaService'
 
 const badgeClassByStatus: Record<NoeticaServiceCapabilityStatus | 'loading' | 'error', string> = {
@@ -86,13 +86,7 @@ function StatusShell({
   title: string
   items: Array<[string, string]>
   tone?: NoeticaServiceCapabilityStatus | 'loading' | 'error'
-  remediations?: Array<{
-    key: string
-    label: string
-    status: string
-    summary: string
-    command?: string
-  }>
+  remediations?: RemediationItem[]
 }) {
   const toneClass = badgeClassByStatus[tone] ?? badgeClassByStatus.loading
   const visibleRemediations = remediations.slice(0, 3)
