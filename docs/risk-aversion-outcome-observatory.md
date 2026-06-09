@@ -26,6 +26,8 @@ The first slice is deterministic and local:
 
 - `lib/risk/riskAversion.ts` defines the contracts.
 - `lib/risk/riskAversionScorer.mjs` scores a turn or corpus.
+- `lib/risk/riskAversionRuntime.ts` builds a runtime `TurnRiskTrace` from completed chat interactions.
+- `lib/risk/riskAversionArtifact.ts` writes runtime risk traces as bounded local artifacts.
 - `lib/risk/riskAversionLive.ts` derives a live UI readout from current chat messages.
 - `lib/risk/riskAversionDemo.ts` provides fixture-backed fallback readout data.
 - `scripts/score-risk-aversion.mjs` exposes scoring through npm.
@@ -36,6 +38,7 @@ The first slice is deterministic and local:
 - `scripts/export-risk-aversion-traces.mjs` exports bounded risk traces and a manifest.
 - `scripts/risk-aversion-export-path.mjs` resolves development and production trace export paths.
 - `examples/risk-aversion/` contains bounded corpus and counterfactual replay fixtures.
+- `lib/sourceos/interaction.ts` attaches runtime risk trace refs to standalone SourceOS interaction events.
 - `lib/sourceos/interactionEvent.ts` can attach a bounded `riskAversionTrace` to exported `SourceOSInteractionEvent` payloads.
 - `components/risk/RiskAversionPanel.tsx` renders the live or fallback readout in the Noetica side panel.
 
@@ -130,6 +133,42 @@ The right-side Outcome Observatory card displays:
 
 If no user/assistant pair exists yet, the card falls back to the bounded fixture-backed readout.
 
+## Runtime trace persistence
+
+For standalone provider completions, the chat API now builds a runtime `TurnRiskTrace` after the provider response completes.
+
+The runtime path is best-effort and bounded:
+
+```text
+completed response -> runtime risk trace -> local artifact write -> SourceOS interaction event refs
+```
+
+The default runtime artifact path is:
+
+```text
+.noetica/risk-aversion/runtime-traces
+```
+
+Override with:
+
+```text
+NOETICA_RUNTIME_RISK_TRACE_DIR
+```
+
+The completed SourceOS interaction event receives:
+
+- `payload.outcomeObservatoryRef`
+- `payload.riskAssessmentVersion`
+- `payload.riskAversionTraceRef`
+- `payload.riskAversionTracePath`
+- `payload.riskAversionTraceHash`
+- `steeringIntent.featureRef`
+- `steeringIntent.strength`
+- `governanceTrace.evidenceRefs`
+- `sourceEventRefs`
+
+Failure to write the local artifact does not fail the provider completion. In that case, the event still carries the local risk-trace URN and aggregate score, but the artifact path/hash remain null.
+
 ## SourceOS interaction payload bridge
 
 The SourceOS interaction schema already permits bounded `payload` records. Noetica now attaches risk evidence without editing the pinned generated SourceOS type.
@@ -200,6 +239,6 @@ Avoid this language unless direct evidence exists:
 
 ## Next implementation slices
 
-1. Persist live risk traces from runtime interactions in bounded local artifacts.
-2. Promote counterfactual replay report generation into graph artifacts.
-3. Add CI wiring once the repository workflow lane is present.
+1. Promote counterfactual replay report generation into graph artifacts.
+2. Add a CI workflow lane when the repository workflow surface is present.
+3. Add a runtime UI affordance for exported risk trace refs and hashes.
