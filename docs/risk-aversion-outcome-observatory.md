@@ -30,10 +30,11 @@ The first slice is deterministic and local:
 - `lib/risk/riskAversionDemo.ts` provides fixture-backed fallback readout data.
 - `scripts/score-risk-aversion.mjs` exposes scoring through npm.
 - `scripts/validate-risk-aversion-fixtures.mjs` validates accepted/rejected fixtures.
+- `scripts/validate-counterfactual-risk-replay.mjs` validates counterfactual replay ordering.
 - `scripts/generate-risk-aversion-graph.mjs` exports graph and matrix artifacts.
 - `scripts/export-risk-aversion-traces.mjs` exports bounded risk traces and a manifest.
 - `scripts/risk-aversion-export-path.mjs` resolves development and production trace export paths.
-- `examples/risk-aversion/` contains the first bounded corpus fixtures.
+- `examples/risk-aversion/` contains bounded corpus and counterfactual replay fixtures.
 - `lib/sourceos/interactionEvent.ts` can attach a bounded `riskAversionTrace` to exported `SourceOSInteractionEvent` payloads.
 - `components/risk/RiskAversionPanel.tsx` renders the live or fallback readout in the Noetica side panel.
 
@@ -49,6 +50,12 @@ Validate fixtures:
 
 ```bash
 npm run risk:validate-fixtures
+```
+
+Validate counterfactual replay ordering:
+
+```bash
+npm run risk:validate-counterfactual
 ```
 
 Generate local graph artifacts:
@@ -83,6 +90,18 @@ The trace export command emits:
 - `risk-aversion-export-manifest.json`;
 - per-trace SHA-256 hashes;
 - local `urn:noetica:risk-trace:*` refs.
+
+## Counterfactual replay
+
+Counterfactual replay holds the technical substrate constant while changing the user frame.
+
+The first fixture validates this ordering:
+
+```text
+neutral -> forensic -> culpability -> attribution
+```
+
+The validator scores each variant and enforces non-decreasing aggregate risk pressure. It also checks that the culpability variant separates proof from hypothesis and the attribution variant avoids direct attribution.
 
 ## Live UI readout
 
@@ -166,7 +185,7 @@ Avoid this language unless direct evidence exists:
 
 ## Next implementation slices
 
-1. Add counterfactual replay fixtures for neutral, forensic, culpability-framed, and attribution-framed prompts.
-2. Attach exported trace refs into generated SourceOS event fixtures.
-3. Persist live risk traces from runtime interactions in bounded local artifacts.
+1. Attach exported trace refs into generated SourceOS event fixtures.
+2. Persist live risk traces from runtime interactions in bounded local artifacts.
+3. Promote counterfactual replay report generation into graph artifacts.
 4. Add CI wiring once the repository workflow lane is present.
