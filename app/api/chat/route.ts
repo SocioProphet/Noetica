@@ -346,14 +346,26 @@ function streamTaskResult(result: NoeticaTaskResult): Response {
   })
 }
 
-function resolveProviderModelId(model: ModelConfig): string {
-  return model.provider_model_id ?? model.id
+function inferToolGrantRefs(model: ModelConfig, steering?: SteeringConfig): string[] {
+  const refs: string[] = []
+
+  if (model.provider === 'anthropic') refs.push('call:anthropic')
+  if (model.provider === 'openai') refs.push('call:openai')
+  if (model.provider === 'neuronpedia' || steering) refs.push('call:neuronpedia:steer')
+
+  return Array.from(new Set(refs))
 }
 
-function inferToolGrantRefs(model: ModelConfig, steering?: SteeringConfig): string[] {
-  const refs = [`urn:srcos:grant:model:${model.id}`]
-  if (steering) refs.push(`urn:srcos:grant:steering:${model.steering}`)
-  return refs
+function resolveProviderModelId(model: ModelConfig): string {
+  if (model.provider === 'anthropic') {
+    return process.env.ANTHROPIC_MODEL_ID?.trim() || model.id
+  }
+
+  if (model.provider === 'openai') {
+    return process.env.OPENAI_MODEL_ID?.trim() || model.id
+  }
+
+  return model.id
 }
 
 function providerRouteEvidenceRef(evidence: ReturnType<typeof buildExternalModelProviderRouteEvidence>, runId: string): string {
