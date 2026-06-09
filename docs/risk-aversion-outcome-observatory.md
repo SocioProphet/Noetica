@@ -26,11 +26,14 @@ The first slice is deterministic and local:
 
 - `lib/risk/riskAversion.ts` defines the contracts.
 - `lib/risk/riskAversionScorer.mjs` scores a turn or corpus.
+- `lib/risk/riskAversionLive.ts` derives a live UI readout from current chat messages.
+- `lib/risk/riskAversionDemo.ts` provides fixture-backed fallback readout data.
 - `scripts/score-risk-aversion.mjs` exposes scoring through npm.
 - `scripts/validate-risk-aversion-fixtures.mjs` validates accepted/rejected fixtures.
 - `scripts/generate-risk-aversion-graph.mjs` exports graph and matrix artifacts.
 - `examples/risk-aversion/` contains the first bounded corpus fixtures.
 - `lib/sourceos/interactionEvent.ts` can attach a bounded `riskAversionTrace` to exported `SourceOSInteractionEvent` payloads.
+- `components/risk/RiskAversionPanel.tsx` renders the live or fallback readout in the Noetica side panel.
 
 ## Commands
 
@@ -59,6 +62,26 @@ The graph command emits:
 - `risk-aversion-graph.mmd`
 - `risk-aversion-matrix.json`
 - `risk-aversion-matrix.csv`
+
+## Live UI readout
+
+The Noetica shell derives a live risk-aversion readout from the current `ChatMessage[]` state:
+
+```text
+messages -> latest user/assistant pair -> risk dimensions -> aggregate score -> steering modes -> outcome label
+```
+
+The right-side Outcome Observatory card displays:
+
+- source: `live` or `fallback`;
+- latest turn label;
+- aggregate risk-aversion pressure;
+- dominant risk dimensions;
+- observed steering modes;
+- directness delta;
+- caution delta.
+
+If no user/assistant pair exists yet, the card falls back to the bounded fixture-backed readout.
 
 ## SourceOS interaction payload bridge
 
@@ -122,7 +145,7 @@ Avoid this language unless direct evidence exists:
 
 ## Next implementation slices
 
-1. Add a Noetica UI card for turn-level risk vectors and deflection deltas.
-2. Add counterfactual replay fixtures for neutral, forensic, culpability-framed, and attribution-framed prompts.
-3. Add a runtime export path that writes scored risk traces alongside SourceOS interaction events.
+1. Add counterfactual replay fixtures for neutral, forensic, culpability-framed, and attribution-framed prompts.
+2. Add a runtime export path that writes scored risk traces alongside SourceOS interaction events.
+3. Persist live risk traces in bounded local artifacts.
 4. Add CI wiring once the repository workflow lane is present.
