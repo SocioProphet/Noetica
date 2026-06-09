@@ -21,6 +21,8 @@
     "risk:score": "node scripts/score-risk-aversion.mjs",
     "risk:validate-fixtures": "node scripts/validate-risk-aversion-fixtures.mjs",
     "risk:graph": "node scripts/generate-risk-aversion-graph.mjs",
+    "risk:path": "node scripts/risk-aversion-export-path.mjs --json",
+    "risk:export": "node scripts/export-risk-aversion-traces.mjs",
     "smoke:standalone": "node scripts/smoke-standalone.mjs",
     "cli": "node cli/noetica.mjs",
     "cli:doctor": "node cli/noetica.mjs doctor --json",
