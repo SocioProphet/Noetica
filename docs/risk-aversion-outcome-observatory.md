@@ -28,7 +28,9 @@ The first slice is deterministic and local:
 - `lib/risk/riskAversionScorer.mjs` scores a turn or corpus.
 - `scripts/score-risk-aversion.mjs` exposes scoring through npm.
 - `scripts/validate-risk-aversion-fixtures.mjs` validates accepted/rejected fixtures.
+- `scripts/generate-risk-aversion-graph.mjs` exports graph and matrix artifacts.
 - `examples/risk-aversion/` contains the first bounded corpus fixtures.
+- `lib/sourceos/interactionEvent.ts` can attach a bounded `riskAversionTrace` to exported `SourceOSInteractionEvent` payloads.
 
 ## Commands
 
@@ -43,6 +45,32 @@ Validate fixtures:
 ```bash
 npm run risk:validate-fixtures
 ```
+
+Generate local graph artifacts:
+
+```bash
+npm run risk:graph -- --file examples/risk-aversion/chatgpt-crash-corpus.accepted.json --out-dir .noetica/risk-aversion
+```
+
+The graph command emits:
+
+- `risk-aversion-graph.json`
+- `risk-aversion-graph.dot`
+- `risk-aversion-graph.mmd`
+- `risk-aversion-matrix.json`
+- `risk-aversion-matrix.csv`
+
+## SourceOS interaction payload bridge
+
+The SourceOS interaction schema already permits bounded `payload` records. Noetica now attaches risk evidence without editing the pinned generated SourceOS type.
+
+When a `TurnRiskTrace` is supplied to `buildNoeticaChatCompletionInteractionEvent`, the event payload includes:
+
+- `outcomeObservatoryRef`
+- `riskAversionTrace`
+- `riskAssessmentVersion`
+
+The same risk score also maps to `steeringIntent.strength`, and the turn trace maps to `steeringIntent.featureRef` as a local Noetica risk-trace URN.
 
 ## Risk dimensions
 
@@ -94,7 +122,7 @@ Avoid this language unless direct evidence exists:
 
 ## Next implementation slices
 
-1. Add graph generation for risk-aversion transition graphs.
-2. Attach risk traces to exported `SourceOSInteractionEvent` payloads.
-3. Add a Noetica UI card for turn-level risk vectors and deflection deltas.
-4. Add counterfactual replay fixtures for neutral, forensic, culpability-framed, and attribution-framed prompts.
+1. Add a Noetica UI card for turn-level risk vectors and deflection deltas.
+2. Add counterfactual replay fixtures for neutral, forensic, culpability-framed, and attribution-framed prompts.
+3. Add a runtime export path that writes scored risk traces alongside SourceOS interaction events.
+4. Add CI wiring once the repository workflow lane is present.
