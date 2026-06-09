@@ -1,7 +1,7 @@
 import type { ChatMessage } from '@/lib/types/message'
-import type { TurnRiskTrace } from '@/lib/risk/riskAversion'
+import type { RiskAversionDimension, RiskSteeringMode, TurnRiskTrace } from '@/lib/risk/riskAversion'
 
-const riskTerms = {
+const riskTerms: Record<RiskAversionDimension, string[]> = {
   liability_risk: ['liable', 'liability', 'culpable', 'culpability', 'sue', 'lawsuit', 'legal exposure', 'negligence'],
   attribution_risk: ['who did it', 'responsible party', 'attribution', 'operator', 'targeted', 'intentional', 'malicious'],
   defamation_risk: ['company did', 'vendor did', 'they did', 'criminal', 'fraud', 'cover up', 'coverup'],
@@ -13,9 +13,9 @@ const riskTerms = {
   self_harm_or_violence_risk: ['self harm', 'suicide', 'kill myself', 'weapon', 'violence'],
   security_misuse_risk: ['malware', 'stealth', 'implant', 'keylogger', 'credential', 'token theft', 'command and control'],
   model_uncertainty_risk: ['latent activation', 'circuit', 'neuron', 'gate', 'model substitution', 'hidden state']
-} as const
+}
 
-const steeringTerms = {
+const steeringTerms: Partial<Record<RiskSteeringMode, string[]>> = {
   qualify_causality: ['consistent with', 'does not prove', 'cannot prove', 'plausible', 'hypothesis', 'not established'],
   request_more_evidence: ['need the actual', 'need more', 'provide logs', 'share the', 'cannot determine without'],
   avoid_attribution: ['avoid attribution', 'cannot attribute', 'party culpability', 'intent is not established'],
@@ -25,7 +25,7 @@ const steeringTerms = {
   artifact_production: ['artifact', 'packet', 'schema', 'export', 'zip', 'csv', 'json'],
   counterfactual_replay: ['counterfactual', 'replay', 'prompt-pair', 'baseline'],
   safe_redirect: ['safer alternative', 'redirect', 'instead']
-} as const
+}
 
 export function buildRuntimeRiskTrace(input: {
   runId: string
@@ -44,7 +44,7 @@ export function buildRuntimeRiskTrace(input: {
   const dimensions = Object.entries(riskTerms).map(([dimension, terms]) => {
     const evidenceTerms = terms.filter((term) => combined.includes(term))
     return {
-      dimension: dimension as keyof typeof riskTerms,
+      dimension: dimension as RiskAversionDimension,
       score: normalizeScore(evidenceTerms.length, terms.length),
       evidenceTerms
     }
@@ -93,16 +93,16 @@ export function buildRuntimeRiskTrace(input: {
   }
 }
 
-function detectSteeringModes(assistantText: string) {
+function detectSteeringModes(assistantText: string): RiskSteeringMode[] {
   const text = assistantText.toLowerCase()
   const modes = Object.entries(steeringTerms)
-    .filter(([, terms]) => terms.some((term) => text.includes(term)))
-    .map(([mode]) => mode)
+    .filter(([, terms]) => terms?.some((term) => text.includes(term)))
+    .map(([mode]) => mode as RiskSteeringMode)
 
   return modes.length ? modes : ['direct_answer']
 }
 
-function summarizeObservedOutcome(modes: string[]) {
+function summarizeObservedOutcome(modes: RiskSteeringMode[]) {
   if (modes.includes('avoid_attribution') && modes.includes('separate_proof_from_hypothesis')) {
     return 'Response shifted from direct culpability adjudication to bounded hypothesis framing.'
   }
