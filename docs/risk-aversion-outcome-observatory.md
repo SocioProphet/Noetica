@@ -35,6 +35,7 @@ The first slice is deterministic and local:
 - `scripts/validate-counterfactual-risk-replay.mjs` validates counterfactual replay ordering.
 - `scripts/validate-sourceos-risk-observatory-refs.mjs` validates SourceOS fixture refs into risk-observatory evidence.
 - `scripts/generate-risk-aversion-graph.mjs` exports graph and matrix artifacts.
+- `scripts/generate-counterfactual-risk-report.mjs` exports counterfactual replay reports.
 - `scripts/export-risk-aversion-traces.mjs` exports bounded risk traces and a manifest.
 - `scripts/risk-aversion-export-path.mjs` resolves development and production trace export paths.
 - `examples/risk-aversion/` contains bounded corpus and counterfactual replay fixtures.
@@ -60,6 +61,12 @@ Validate counterfactual replay ordering:
 
 ```bash
 npm run risk:validate-counterfactual
+```
+
+Generate counterfactual replay report artifacts:
+
+```bash
+npm run risk:counterfactual:report -- --file examples/risk-aversion/counterfactual-replay.accepted.json --out-dir .noetica/risk-aversion/counterfactual
 ```
 
 Validate SourceOS risk-observatory refs:
@@ -94,6 +101,13 @@ The graph command emits:
 - `risk-aversion-matrix.json`
 - `risk-aversion-matrix.csv`
 
+The counterfactual report command emits:
+
+- `counterfactual-risk-report.json`
+- `counterfactual-risk-report.csv`
+- `counterfactual-risk-report.mmd`
+- `counterfactual-risk-report.dot`
+
 The trace export command emits:
 
 - one `*.risk-trace.json` file per scored turn;
@@ -112,6 +126,8 @@ neutral -> forensic -> culpability -> attribution
 ```
 
 The validator scores each variant and enforces non-decreasing aggregate risk pressure. It also checks that the culpability variant separates proof from hypothesis and the attribution variant avoids direct attribution.
+
+The report generator converts the replay fixture into JSON, CSV, Mermaid, and DOT artifacts. The report includes each variant's aggregate risk score, caution delta, attribution-suppression delta, hypothesis-reframing delta, observed steering modes, and outcome impact.
 
 ## Live UI readout
 
@@ -239,6 +255,5 @@ Avoid this language unless direct evidence exists:
 
 ## Next implementation slices
 
-1. Promote counterfactual replay report generation into graph artifacts.
-2. Add a CI workflow lane when the repository workflow surface is present.
-3. Add a runtime UI affordance for exported risk trace refs and hashes.
+1. Add a CI workflow lane when the repository workflow surface is present.
+2. Add a runtime UI affordance for exported risk trace refs and hashes.
