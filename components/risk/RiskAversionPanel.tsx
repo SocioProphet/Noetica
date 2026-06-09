@@ -1,13 +1,25 @@
 'use client'
 
 import { riskAversionDemoDimensions, riskAversionDemoTurns } from '@/lib/risk/riskAversionDemo'
+import type { RiskAversionLiveReadout } from '@/lib/risk/riskAversionLive'
 
-export function RiskAversionPanel() {
-  const latest = riskAversionDemoTurns[riskAversionDemoTurns.length - 1]
+type RiskAversionPanelProps = {
+  readout?: RiskAversionLiveReadout | null
+}
+
+export function RiskAversionPanel({ readout }: RiskAversionPanelProps) {
+  const latest = readout?.latestTurn ?? riskAversionDemoTurns[riskAversionDemoTurns.length - 1]
+  const dimensions = readout?.dimensions ?? riskAversionDemoDimensions
+  const source = readout?.source ?? 'fallback'
 
   return (
     <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Outcome Observatory</div>
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Outcome Observatory</div>
+        <div className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-600">
+          {source}
+        </div>
+      </div>
       <h2 className="mt-2 text-lg font-semibold text-slate-950">Risk Aversion</h2>
       <p className="mt-2 text-sm leading-6 text-slate-600">
         Noetica measures turn-level risk pressure and the response-mode shift it produces. This is behavioral evidence,
@@ -32,7 +44,7 @@ export function RiskAversionPanel() {
 
       <div className="mt-4 space-y-3">
         <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Dominant dimensions</div>
-        {riskAversionDemoDimensions.map((dimension) => (
+        {dimensions.map((dimension) => (
           <Meter key={dimension.label} value={dimension.value} label={dimension.label} />
         ))}
       </div>
