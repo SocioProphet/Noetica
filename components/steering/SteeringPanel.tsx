@@ -1,5 +1,6 @@
 'use client'
 
+import { RiskAversionPanel } from '@/components/risk/RiskAversionPanel'
 import type { ModelConfig } from '@/lib/types/model'
 import type { SteeringConfig } from '@/lib/types/steering'
 
@@ -76,6 +77,7 @@ export function SteeringPanel({ model, steering, onChange }: SteeringPanelProps)
           <div className="text-xs text-slate-500">Strength: {steering?.strength ?? 0}</div>
         </div>
       </div>
+      <RiskAversionPanel />
     </aside>
   )
 }
