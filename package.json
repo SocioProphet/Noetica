@@ -22,6 +22,7 @@
     "risk:score": "node scripts/score-risk-aversion.mjs",
     "risk:validate-fixtures": "node scripts/validate-risk-aversion-fixtures.mjs",
     "risk:validate-counterfactual": "node scripts/validate-counterfactual-risk-replay.mjs",
+    "risk:counterfactual:report": "node scripts/generate-counterfactual-risk-report.mjs",
     "risk:graph": "node scripts/generate-risk-aversion-graph.mjs",
     "risk:path": "node scripts/risk-aversion-export-path.mjs --json",
     "risk:export": "node scripts/export-risk-aversion-traces.mjs",
