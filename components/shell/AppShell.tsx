@@ -9,6 +9,7 @@ import { SteeringPanel } from '@/components/steering/SteeringPanel'
 import { models, defaultModelId } from '@/config/models'
 import { initialMessages } from '@/lib/chat/mockConversation'
 import { sendNoeticaChat } from '@/lib/client/noeticaTransport'
+import { buildRiskAversionLiveReadout } from '@/lib/risk/riskAversionLive'
 import type { ChatMessage } from '@/lib/types/message'
 import type { SteeringConfig } from '@/lib/types/steering'
 import type { NoeticaMode } from '@/lib/client/noeticaTransport'
@@ -23,6 +24,7 @@ export function AppShell() {
     () => models.find((model) => model.id === modelId) ?? models[0],
     [modelId]
   )
+  const riskReadout = useMemo(() => buildRiskAversionLiveReadout(messages), [messages])
 
   async function handleSend(content: string) {
     const userMessage: ChatMessage = {
@@ -111,7 +113,7 @@ export function AppShell() {
             <MessageList messages={messages} isStreaming={isStreaming} />
             <InputArea onSend={handleSend} disabled={isStreaming} />
           </section>
-          <SteeringPanel model={activeModel} steering={steering} onChange={setSteering} />
+          <SteeringPanel model={activeModel} steering={steering} riskReadout={riskReadout} onChange={setSteering} />
         </div>
       </section>
     </main>
