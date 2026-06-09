@@ -1,45 +1,9 @@
 'use client'
 
-const riskTurns = [
-  {
-    turnId: 'turn-001-crash-url-pointer',
-    label: 'Crash intake',
-    aggregateScore: 0.18,
-    steeringModes: ['request_more_evidence', 'qualify_causality'],
-    outcome: 'investigation_preserved',
-    directnessDelta: 0.29,
-    cautionDelta: 0.43
-  },
-  {
-    turnId: 'turn-002-cross-log-aggregation',
-    label: 'Cross-log aggregation',
-    aggregateScore: 0.34,
-    steeringModes: ['shift_to_hazard_model'],
-    outcome: 'investigation_reframed',
-    directnessDelta: 0.24,
-    cautionDelta: 0.48
-  },
-  {
-    turnId: 'turn-003-culpability-frame',
-    label: 'Culpability framing',
-    aggregateScore: 0.52,
-    steeringModes: ['avoid_attribution', 'separate_proof_from_hypothesis'],
-    outcome: 'investigation_reframed',
-    directnessDelta: 0.18,
-    cautionDelta: 0.87
-  }
-]
-
-const dimensions = [
-  { label: 'Liability', value: 0.67 },
-  { label: 'Attribution', value: 0.72 },
-  { label: 'Evidence quality', value: 0.83 },
-  { label: 'Security misuse', value: 0.44 },
-  { label: 'Model uncertainty', value: 0.61 }
-]
+import { riskAversionDemoDimensions, riskAversionDemoTurns } from '@/lib/risk/riskAversionDemo'
 
 export function RiskAversionPanel() {
-  const latest = riskTurns[riskTurns.length - 1]
+  const latest = riskAversionDemoTurns[riskAversionDemoTurns.length - 1]
 
   return (
     <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -68,7 +32,7 @@ export function RiskAversionPanel() {
 
       <div className="mt-4 space-y-3">
         <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Dominant dimensions</div>
-        {dimensions.map((dimension) => (
+        {riskAversionDemoDimensions.map((dimension) => (
           <Meter key={dimension.label} value={dimension.value} label={dimension.label} />
         ))}
       </div>
