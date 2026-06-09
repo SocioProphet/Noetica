@@ -31,6 +31,8 @@ The first slice is deterministic and local:
 - `scripts/score-risk-aversion.mjs` exposes scoring through npm.
 - `scripts/validate-risk-aversion-fixtures.mjs` validates accepted/rejected fixtures.
 - `scripts/generate-risk-aversion-graph.mjs` exports graph and matrix artifacts.
+- `scripts/export-risk-aversion-traces.mjs` exports bounded risk traces and a manifest.
+- `scripts/risk-aversion-export-path.mjs` resolves development and production trace export paths.
 - `examples/risk-aversion/` contains the first bounded corpus fixtures.
 - `lib/sourceos/interactionEvent.ts` can attach a bounded `riskAversionTrace` to exported `SourceOSInteractionEvent` payloads.
 - `components/risk/RiskAversionPanel.tsx` renders the live or fallback readout in the Noetica side panel.
@@ -55,6 +57,18 @@ Generate local graph artifacts:
 npm run risk:graph -- --file examples/risk-aversion/chatgpt-crash-corpus.accepted.json --out-dir .noetica/risk-aversion
 ```
 
+Export bounded risk traces:
+
+```bash
+npm run risk:export -- --file examples/risk-aversion/chatgpt-crash-corpus.accepted.json
+```
+
+Show the risk-trace export path:
+
+```bash
+npm run risk:path
+```
+
 The graph command emits:
 
 - `risk-aversion-graph.json`
@@ -62,6 +76,13 @@ The graph command emits:
 - `risk-aversion-graph.mmd`
 - `risk-aversion-matrix.json`
 - `risk-aversion-matrix.csv`
+
+The trace export command emits:
+
+- one `*.risk-trace.json` file per scored turn;
+- `risk-aversion-export-manifest.json`;
+- per-trace SHA-256 hashes;
+- local `urn:noetica:risk-trace:*` refs.
 
 ## Live UI readout
 
@@ -146,6 +167,6 @@ Avoid this language unless direct evidence exists:
 ## Next implementation slices
 
 1. Add counterfactual replay fixtures for neutral, forensic, culpability-framed, and attribution-framed prompts.
-2. Add a runtime export path that writes scored risk traces alongside SourceOS interaction events.
-3. Persist live risk traces in bounded local artifacts.
+2. Attach exported trace refs into generated SourceOS event fixtures.
+3. Persist live risk traces from runtime interactions in bounded local artifacts.
 4. Add CI wiring once the repository workflow lane is present.
