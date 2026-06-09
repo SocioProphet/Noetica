@@ -1,16 +1,18 @@
 'use client'
 
 import { RiskAversionPanel } from '@/components/risk/RiskAversionPanel'
+import type { RiskAversionLiveReadout } from '@/lib/risk/riskAversionLive'
 import type { ModelConfig } from '@/lib/types/model'
 import type { SteeringConfig } from '@/lib/types/steering'
 
 type SteeringPanelProps = {
   model: ModelConfig
   steering?: SteeringConfig
+  riskReadout?: RiskAversionLiveReadout | null
   onChange: (config: SteeringConfig | undefined) => void
 }
 
-export function SteeringPanel({ model, steering, onChange }: SteeringPanelProps) {
+export function SteeringPanel({ model, steering, riskReadout, onChange }: SteeringPanelProps) {
   const enabled = Boolean(steering)
   const canConfigureSteering = model.steering === 'full'
 
@@ -77,7 +79,7 @@ export function SteeringPanel({ model, steering, onChange }: SteeringPanelProps)
           <div className="text-xs text-slate-500">Strength: {steering?.strength ?? 0}</div>
         </div>
       </div>
-      <RiskAversionPanel />
+      <RiskAversionPanel readout={riskReadout} />
     </aside>
   )
 }
