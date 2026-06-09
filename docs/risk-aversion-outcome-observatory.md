@@ -31,6 +31,7 @@ The first slice is deterministic and local:
 - `scripts/score-risk-aversion.mjs` exposes scoring through npm.
 - `scripts/validate-risk-aversion-fixtures.mjs` validates accepted/rejected fixtures.
 - `scripts/validate-counterfactual-risk-replay.mjs` validates counterfactual replay ordering.
+- `scripts/validate-sourceos-risk-observatory-refs.mjs` validates SourceOS fixture refs into risk-observatory evidence.
 - `scripts/generate-risk-aversion-graph.mjs` exports graph and matrix artifacts.
 - `scripts/export-risk-aversion-traces.mjs` exports bounded risk traces and a manifest.
 - `scripts/risk-aversion-export-path.mjs` resolves development and production trace export paths.
@@ -56,6 +57,12 @@ Validate counterfactual replay ordering:
 
 ```bash
 npm run risk:validate-counterfactual
+```
+
+Validate SourceOS risk-observatory refs:
+
+```bash
+npm run sourceos:events:risk-refs:check
 ```
 
 Generate local graph artifacts:
@@ -135,6 +142,14 @@ When a `TurnRiskTrace` is supplied to `buildNoeticaChatCompletionInteractionEven
 
 The same risk score also maps to `steeringIntent.strength`, and the turn trace maps to `steeringIntent.featureRef` as a local Noetica risk-trace URN.
 
+The fixture validator enforces that SourceOS interaction artifacts keep these refs consistent across:
+
+- payload risk trace refs;
+- `steeringIntent.featureRef`;
+- `governanceTrace.evidenceRefs`;
+- `governanceTrace.replayRef`;
+- `sourceEventRefs`.
+
 ## Risk dimensions
 
 The first scorer tracks:
@@ -185,7 +200,6 @@ Avoid this language unless direct evidence exists:
 
 ## Next implementation slices
 
-1. Attach exported trace refs into generated SourceOS event fixtures.
-2. Persist live risk traces from runtime interactions in bounded local artifacts.
-3. Promote counterfactual replay report generation into graph artifacts.
-4. Add CI wiring once the repository workflow lane is present.
+1. Persist live risk traces from runtime interactions in bounded local artifacts.
+2. Promote counterfactual replay report generation into graph artifacts.
+3. Add CI wiring once the repository workflow lane is present.
