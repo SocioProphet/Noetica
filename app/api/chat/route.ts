@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server'
 import { models } from '@/config/models'
 import { buildExternalModelProviderRouteEvidence } from '@/lib/evidence/agentplane'
 import { evidenceHash } from '@/lib/evidence/hash'
+import { buildRuntimeRiskTrace } from '@/lib/risk/riskAversionRuntime'
+import { writeRuntimeRiskTraceArtifact } from '@/lib/risk/riskAversionArtifact'
 import { buildSourceOSTaskInteractionEvent, buildStandaloneInteractionEvent } from '@/lib/sourceos/interaction'
 import type { ChatMessage } from '@/lib/types/message'
 import type { ModelConfig } from '@/lib/types/model'
@@ -192,6 +194,26 @@ export async function POST(request: Request) {
           latencyMs: latency_ms,
           status: 'success'
         })
+        const riskTrace = buildRuntimeRiskTrace({
+          runId: run_id,
+          messages,
+          assistantText: content,
+          occurredAt: timestamp,
+          evidenceRefs: [providerRouteEvidenceRef(provider_route_evidence, run_id)],
+          runtimeEventRefs: [`urn:srcos:interaction-event:standalone-provider-run:${run_id}`]
+        })
+        const riskArtifact = riskTrace ? await writeRuntimeRiskTraceArtifact(riskTrace).catch(() => null) : null
+        const riskObservatoryRef = riskTrace
+          ? {
+              traceRef: riskArtifact?.traceRef ?? `urn:noetica:risk-trace:${riskTrace.turnId}`,
+              traceHash: riskArtifact?.traceHash ?? null,
+              outputPath: riskArtifact?.outputPath ?? null,
+              assessmentVersion: riskTrace.schemaVersion,
+              outcomeObservatoryRef: 'urn:noetica:outcome-observatory:risk-aversion-v0.1',
+              counterfactualReplayRef: null,
+              aggregateScore: riskTrace.riskVector.aggregateScore
+            }
+          : null
         const sourceos_interaction_event = buildStandaloneInteractionEvent({
           sessionId,
           mode,
@@ -209,6 +231,7 @@ export async function POST(request: Request) {
           evidenceHashValue: evidence_hash,
           providerRouteEvidence: provider_route_evidence,
           steeringConfig: body.steering,
+          riskObservatoryRef,
           status: 'success',
           payloadSummary: 'Noetica completed a standalone provider call and emitted a SourceOS interaction event.'
         })
@@ -323,24 +346,17 @@ function streamTaskResult(result: NoeticaTaskResult): Response {
   })
 }
 
-function inferToolGrantRefs(model: ModelConfig, steering?: SteeringConfig): string[] {
-  const refs: string[] = []
-
-  if (model.provider === 'anthropic') refs.push('call:anthropic')
-  if (model.provider === 'openai') refs.push('call:openai')
-  if (model.provider === 'neuronpedia' || steering) refs.push('call:neuronpedia:steer')
-
-  return Array.from(new Set(refs))
+function resolveProviderModelId(model: ModelConfig): string {
+  return model.provider_model_id ?? model.id
 }
 
-function resolveProviderModelId(model: ModelConfig): string {
-  if (model.provider === 'anthropic') {
-    return process.env.ANTHROPIC_MODEL_ID?.trim() || model.id
-  }
+function inferToolGrantRefs(model: ModelConfig, steering?: SteeringConfig): string[] {
+  const refs = [`urn:srcos:grant:model:${model.id}`]
+  if (steering) refs.push(`urn:srcos:grant:steering:${model.steering}`)
+  return refs
+}
 
-  if (model.provider === 'openai') {
-    return process.env.OPENAI_MODEL_ID?.trim() || model.id
-  }
-
-  return model.id
+function providerRouteEvidenceRef(evidence: ReturnType<typeof buildExternalModelProviderRouteEvidence>, runId: string): string {
+  const provider = evidence.providerRef || evidence.providerClass || 'provider'
+  return `urn:srcos:evidence:provider-route:${provider}-${runId}`.toLowerCase().replace(/[^a-z0-9._:~-]+/g, '-')
 }
