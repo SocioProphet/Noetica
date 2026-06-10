@@ -3,14 +3,17 @@
 @tailwind utilities;
 
 :root {
-  --noetica-blue: #2563EB;
+  --noetica-blue: #1D4ED8;
   --noetica-blue-light: #EFF6FF;
   --noetica-blue-mid: #BFDBFE;
-  --noetica-ink: #0F172A;
+  --noetica-navy: #0F172A;
+  --noetica-ink: #111827;
   --noetica-muted: #64748B;
-  --noetica-line: #DBEAFE;
-  --background: #FFFFFF;
-  --foreground: #0F172A;
+  --noetica-line: #D7DEE8;
+  --noetica-surface: #F8FAFC;
+  --noetica-panel: #FFFFFF;
+  --background: #F3F6FA;
+  --foreground: #111827;
 }
 
 * {
@@ -26,6 +29,8 @@ body {
 
 body {
   margin: 0;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
 }
 
 button,
@@ -33,4 +38,8 @@ textarea,
 select,
 input {
   font: inherit;
+}
+
+::selection {
+  background: #BFDBFE;
 }

@@ -30,12 +30,15 @@
     "cli": "node cli/noetica.mjs",
     "cli:doctor": "node cli/noetica.mjs doctor --json",
     "cli:smoke": "node cli/noetica.mjs smoke --dry-run",
+    "tauri": "tauri",
     "tauri:icon": "node scripts/ensure-tauri-icon.mjs",
     "tauri:dev": "npm run tauri:icon && tauri dev",
     "tauri:build": "npm run tauri:icon && tauri build",
     "tauri:build:static": "npm run tauri:icon && npm run build:static && tauri build"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@tauri-apps/api": "^2.0.0",
     "next": "^14.2.23",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

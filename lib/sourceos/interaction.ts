@@ -301,7 +301,7 @@ function interactionEventId(sessionId: string, runId: string, eventClass: Source
 }
 
 function withIntegrity(event: SourceOSInteractionEvent): SourceOSInteractionEvent {
-  const payload: EvidencePayload = {
+  const payload = {
     event: {
       interactionEventId: event.interactionEventId,
       type: event.type,
@@ -314,7 +314,7 @@ function withIntegrity(event: SourceOSInteractionEvent): SourceOSInteractionEven
       payloadMode: event.payloadMode,
       payload: event.payload
     }
-  }
+  } as unknown as EvidencePayload
 
   return {
     ...event,
