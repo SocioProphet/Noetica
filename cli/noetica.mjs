@@ -206,27 +206,33 @@ async function start(args = []) {
 
   const portProbe = await probePort(config.server.host, config.server.port)
   if (!hasExplicitPort && !portProbe.available) {
-    console.error(JSON.stringify({
-      kind: 'NoeticaStartRefused',
-      status: 'port_unavailable',
-      host: config.server.host,
-      port: config.server.port,
-      detail: portProbe.state,
-      hint: 'Use noetica doctor --json for diagnostics, free the port, update config, or pass -- --port <port>.',
-    }, null, 2))
+    console.error(`\nNoetica cannot start: port ${config.server.port} on ${config.server.host} is already in use (${portProbe.state}).`)
+    console.error(`  Run \`noetica doctor\` for diagnostics, free the port, update your config, or pass -- --port <port>.\n`)
     process.exit(1)
   }
 
-  console.log(JSON.stringify({
-    kind: 'NoeticaStart',
-    mode: 'foreground_operational_service',
-    url: localUrl(config),
-    configPath: configState.path,
-    productHint: 'Use noetica app for desktop, noetica web for browser fallback, and noetica dev for developer-only Next output.',
-    nextArgs,
-  }, null, 2))
+  const productionBuildExists = existsSync(join(repoRoot, '.next', 'BUILD_ID'))
+  const url = localUrl(config)
 
-  await run('npm', ['run', 'dev', '--', ...nextArgs], { cwd: repoRoot })
+  if (!productionBuildExists) {
+    console.warn(`\nWarning: no production build found (.next/BUILD_ID missing).`)
+    console.warn(`  Run \`npm run build\` to create a production build for better performance.`)
+    console.warn(`  Falling back to development server.\n`)
+  }
+
+  console.log(`Noetica is running at ${url}`)
+  console.log(`  Run \`noetica open\` in another terminal to open the browser.`)
+  console.log(`  Press Ctrl-C to stop foreground mode.`)
+  if (!productionBuildExists) {
+    console.log(`  (development server — run \`npm run build\` for production mode)`)
+  }
+  console.log('')
+
+  if (productionBuildExists) {
+    await run('npm', ['run', 'start', '--', ...nextArgs], { cwd: repoRoot })
+  } else {
+    await run('npm', ['run', 'dev', '--', ...nextArgs], { cwd: repoRoot })
+  }
 }
 
 async function openNoetica() {
