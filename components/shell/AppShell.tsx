@@ -52,7 +52,11 @@ const surfaceToWorkspaceMode: Record<ActiveSurface, WorkspaceMode> = {
   govern:    'Chat',
 }
 
-export function AppShell() {
+type AppShellProps = {
+  initialSurface?: ActiveSurface
+}
+
+export function AppShell({ initialSurface = 'chat' }: AppShellProps) {
   // ── Session persistence ────────────────────────────────────────────────────
   const {
     hydrated,
@@ -67,8 +71,8 @@ export function AppShell() {
   } = useSession(defaultModelId)
 
   // ── Derive surface / messages from active session (with local overrides) ──
-  const [activeSurface, setActiveSurface] = useState<ActiveSurface>('chat')
-  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('Chat')
+  const [activeSurface, setActiveSurface] = useState<ActiveSurface>(initialSurface)
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(surfaceToWorkspaceMode[initialSurface])
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages)
   const [modelId, setModelId] = useState(defaultModelId)
 
@@ -81,8 +85,8 @@ export function AppShell() {
       setMessages(activeSession.messages.length > 0 ? activeSession.messages : initialMessages)
       setModelId(activeSession.modelId)
     } else {
-      // No saved session — create one for the current initial state
-      newSession({ surface: 'chat', workspaceMode: 'Chat', messages: initialMessages })
+      // No saved session — create one for the initial surface
+      newSession({ surface: initialSurface, workspaceMode: surfaceToWorkspaceMode[initialSurface], messages: initialMessages })
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated])
@@ -170,9 +174,9 @@ export function AppShell() {
   function handleNewChat() {
     const msgs = initialMessages
     setMessages(msgs)
-    setActiveSurface('chat')
-    setWorkspaceMode('Chat')
-    newSession({ surface: 'chat', workspaceMode: 'Chat', messages: msgs })
+    setActiveSurface(initialSurface)
+    setWorkspaceMode(surfaceToWorkspaceMode[initialSurface])
+    newSession({ surface: initialSurface, workspaceMode: surfaceToWorkspaceMode[initialSurface], messages: msgs })
   }
 
   function handleSurfaceChange(surface: ActiveSurface) {
