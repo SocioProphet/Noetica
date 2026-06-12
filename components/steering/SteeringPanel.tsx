@@ -1,6 +1,7 @@
 'use client'
 
 import { RiskAversionPanel } from '@/components/risk/RiskAversionPanel'
+import { useSettings } from '@/lib/settings/context'
 import type { RiskAversionLiveReadout } from '@/lib/risk/riskAversionLive'
 import type { ModelConfig } from '@/lib/types/model'
 import type { SteeringConfig } from '@/lib/types/steering'
@@ -113,7 +114,17 @@ export function SteeringPanel({ model, steering, workspaceMode, riskReadout, onC
 }
 
 function CapabilityNotice({ model }: { model: ModelConfig }) {
+  const { settings } = useSettings()
+
   if (model.steering === 'full') {
+    const neuronpediaConfigured = Boolean(settings.neuronpediaApiKey?.trim())
+    if (!neuronpediaConfigured) {
+      return (
+        <div className="mt-4 rounded-xl border border-[#fde68a] bg-[#fefce8] p-3 text-xs leading-5 text-[#92400e]">
+          SAE steering: <span className="font-semibold">status: not_configured</span>. Add a Neuronpedia API key in Settings → Models to enable hosted steering for {model.sae_source ?? 'this model'}.
+        </div>
+      )
+    }
     return (
       <div className="mt-4 rounded-xl border border-[#d7dee8] bg-white p-3 text-xs leading-5 text-[#64748b]">
         Full SAE steering path. M2b may apply hosted SAE features through {model.sae_source ?? 'a configured SAE source'}.
@@ -131,7 +142,7 @@ function CapabilityNotice({ model }: { model: ModelConfig }) {
 
   return (
     <div className="mt-4 rounded-xl border border-[#d7dee8] bg-white p-3 text-xs leading-5 text-[#64748b]">
-      Blackbox provider path. SAE steering is unavailable; Noetica should show provenance and tamper-evidence instead.
+      Blackbox provider path. SAE steering is unavailable; Noetica shows provenance and tamper-evidence posture only.
     </div>
   )
 }

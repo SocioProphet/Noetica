@@ -20,6 +20,14 @@ export const runtime = 'nodejs'
 // and durable runtime authority should move behind a local service, SourceOS
 // endpoint, Agent Machine endpoint, or model-router boundary.
 
+type ProviderKeys = {
+  anthropic?: string
+  openai?: string
+  google?: string
+  mistral?: string
+  neuronpedia?: string
+}
+
 type ChatRequest = {
   session_id?: string
   mode?: 'standalone' | 'sourceos'
@@ -27,6 +35,8 @@ type ChatRequest = {
   messages?: ChatMessage[]
   steering?: SteeringConfig
   memory_scope?: string
+  provider_keys?: ProviderKeys
+  agent_machine_endpoint?: string
 }
 
 export async function POST(request: Request) {
@@ -169,8 +179,8 @@ export async function POST(request: Request) {
 
       try {
         const providerStream = model.provider === 'openai'
-          ? streamOpenAI({ model: providerModelId, messages })
-          : streamAnthropic({ model: providerModelId, messages })
+          ? streamOpenAI({ model: providerModelId, messages, apiKey: body.provider_keys?.openai })
+          : streamAnthropic({ model: providerModelId, messages, apiKey: body.provider_keys?.anthropic })
 
         for await (const delta of providerStream) {
           content += delta
