@@ -1,6 +1,6 @@
 # Noetica Workstation Install Phase 1
 
-Status: proposed
+Status: implemented
 Issue: #20
 Scope: Noetica install, lifecycle, provider test routes, and OS-native service control
 
@@ -315,9 +315,28 @@ Phase 1 is complete when:
 7. Add Homebrew tap formula.
 8. Add install/operator docs.
 
+## Implementation status
+
+All Phase 1 CLI commands are implemented:
+
+| Command | File | Status |
+|---|---|---|
+| `noetica version` | `cli/noetica.mjs` | done |
+| `noetica doctor [--json]` | `cli/noetica.mjs` | done |
+| `noetica configure [--force]` | `cli/noetica.mjs` | done |
+| `noetica start [-- ...]` | `cli/noetica.mjs` | done — see PR #60 for foreground-UX hardening |
+| `noetica open` | `cli/noetica.mjs` | done |
+| `noetica smoke [--dry-run\|--provider <id>]` | `cli/noetica.mjs` | done |
+| `noetica service install/start/status/stop/uninstall` | `cli/noetica-service.mjs` | done |
+
+Config is written to `~/.config/sourceos/noetica/config.json`. Raw secrets are not stored.
+
+macOS LaunchAgent is generated at `~/Library/LaunchAgents/ai.noetica.app.plist` via `launchctl`.
+
+Linux systemd user unit is generated at `~/.config/systemd/user/noetica.service` via `systemctl --user`.
+
 ## Open decisions
 
-1. Whether the first release artifact should be a prebuilt Next standalone artifact or a source-plus-build artifact.
+1. Whether the first release artifact should be a prebuilt Next standalone artifact or a source-plus-build artifact. The production build path exists (`npm run build` + `noetica start`) but Homebrew formula packaging remains to be defined.
 2. Whether the Homebrew formula should hard-depend on `agent-machine` in Phase 1 or merely recommend it.
-3. Whether the first CLI implementation should be plain Node, shell plus Node, or a small compiled wrapper.
-4. Whether `prophet-mesh` should appear in default config as disabled/deferred or only in documentation until the hosted service exists.
+3. Whether `prophet-mesh` should appear in default config as disabled/deferred or only in documentation until the hosted service exists.
