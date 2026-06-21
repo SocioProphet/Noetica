@@ -31,11 +31,26 @@ SUBJECTS = os.environ.get('MMLU_SUBJECTS', 'college_physics,high_school_physics,
 LETTERS = ['A', 'B', 'C', 'D']
 
 
+_SYMPY_NS = {'sqrt', 'exp', 'log', 'factorial', 'binomial', 'sin', 'cos', 'tan',
+             'asin', 'acos', 'atan', 'pi', 'Rational', 'Abs', 'floor', 'ceiling'}
+
+
+def _eq_vars(eq):
+    """Variable names in an equation (drop sympy funcs/constants) — so every law carries a
+    vars hint, which the extractor needs to map knowns even when no DIMS are declared."""
+    seen = [t for t in re.findall(r'[A-Za-z_]\w*', eq) if t not in _SYMPY_NS]
+    return list(dict.fromkeys(seen))
+
+
 def law_menu():
+    # Surface the WHOLE catalog (MODELS), not just the dimensionally-declared subset (DIMS) —
+    # otherwise the function-based laws (combinatorics, quadratic, reactance) are invisible to the
+    # extractor and it abstains on them. Every form keeps a vars hint (declared dims or derived).
     lines = []
-    for name, vd in DIMS.items():
-        eq = MODELS[name][0]
-        lines.append(f'- {name}: {eq}   vars: {", ".join(vd)}')
+    for name, (eq, _dom, _disp, _t) in MODELS.items():
+        vd = DIMS.get(name)
+        vars_ = list(vd) if vd else _eq_vars(eq)
+        lines.append(f'- {name}: {eq}   vars: {", ".join(vars_)}')
     return '\n'.join(lines)
 
 
