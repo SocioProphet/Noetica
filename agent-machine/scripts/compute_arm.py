@@ -156,7 +156,7 @@ def extract(question, choices):
 
 def plug_back_ok(eq, knowns_si, target, value):
     """Substitute knowns + solution back into the law; residual must be ~0."""
-    loc = {n: sp.Symbol(n) for n in set(re.findall(r'[A-Za-z_]\w*', eq))}
+    loc = {n: sp.Symbol(n) for n in set(re.findall(r'[A-Za-z_]\w*', eq)) if n not in _SYMPY_NS}
     lhs, rhs = eq.split('=', 1)
     expr = sp.sympify(lhs, locals=loc) - sp.sympify(rhs, locals=loc)
     subs = {loc[k]: v for k, v in knowns_si.items() if k in loc}
@@ -213,13 +213,20 @@ def baseline_answer(question, choices):
 
 
 FREE_SYS = (
-    'You translate a physics/chemistry multiple-choice question into ONE governing equation '
-    'and its known quantities. You do NOT compute the answer. Use short variable names. '
-    'Include any needed physical constant as a known with its value+unit '
-    '(g=9.8 m/s**2, k=8.99e9 N*m**2/C**2, h=6.626e-34 J*s, c=3e8 m/s). Output ONLY JSON:\n'
-    '{"equation": "<lhs = rhs>", "knowns": {"var": [number, "unit"]}, "target": "<var to find>"}\n'
-    'Units like m, kg, s, N, J, V, A, C, F, mol, K, Pa, ohm, Hz, m/s, m/s**2. '
-    'If the question is not a single-equation calculation, output {"equation": null}.'
+    'You translate a STEM multiple-choice question (physics, chemistry, statistics, algebra, '
+    'combinatorics, circuits) into ONE governing equation and its known quantities. You do NOT '
+    'compute the answer. Use short variable names. You MAY use sqrt, log, factorial, binomial, pi. '
+    'Include any needed physical constant as a known (g=9.8 m/s**2, k=8.99e9 N*m**2/C**2, '
+    'h=6.626e-34 J*s, c=3e8 m/s). For pure numbers, counts, or probabilities use unit "" '
+    '(dimensionless).\n'
+    'Output ONLY JSON: {"equation": "<lhs = rhs>", "knowns": {"var": [number, "unit"]}, "target": "<var>"}\n'
+    'Examples:\n'
+    'KE of 2 kg at 3 m/s → {"equation":"KE = m*v**2/2","knowns":{"m":[2,"kg"],"v":[3,"m/s"]},"target":"KE"}\n'
+    'z-score of 85, mean 75, sd 5 → {"equation":"z = (x-mu)/sigma","knowns":{"x":[85,""],"mu":[75,""],"sigma":[5,""]},"target":"z"}\n'
+    'ways to choose 2 of 5 → {"equation":"Cnk = factorial(n)/(factorial(k)*factorial(n-k))","knowns":{"n":[5,""],"k":[2,""]},"target":"Cnk"}\n'
+    '100 ohm parallel 100 ohm → {"equation":"Rp = R1*R2/(R1+R2)","knowns":{"R1":[100,"ohm"],"R2":[100,"ohm"]},"target":"Rp"}\n'
+    '$1000 at 5% for 3 yr → {"equation":"A = P*(1+r)**n","knowns":{"P":[1000,""],"r":[0.05,""],"n":[3,""]},"target":"A"}\n'
+    'If it is a definition/concept question, not a calculation, output {"equation": null}.'
 )
 
 
@@ -241,7 +248,7 @@ def free_extract(question, choices):
 def free_solve(eq, knowns_units, target):
     """Solve an LLM-written equation: numeric solve in SI, infer the target's dimension from
     the knowns' units, and plug-back. Returns (value, target, target_dim)."""
-    ids = set(re.findall(r'[A-Za-z_]\w*', eq))
+    ids = {n for n in re.findall(r'[A-Za-z_]\w*', eq) if n not in _SYMPY_NS}
     loc = {n: sp.Symbol(n) for n in ids}
     lhs, rhs = eq.split('=', 1)
     equation = sp.Eq(sp.sympify(lhs, locals=loc), sp.sympify(rhs, locals=loc))
