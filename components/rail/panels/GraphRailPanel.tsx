@@ -84,7 +84,7 @@ export function GraphRailPanel() {
   const [communities, setCommunities] = useState<Array<{ id: number; title: string; summary: string; trust: number; grounded: boolean; size: number; topNodes: string[]; claims?: Array<{ text: string; grounded: boolean; score: number }> }>>([])
   const [themesLoading, setThemesLoading] = useState(false)
   const [globalQ, setGlobalQ] = useState('')
-  const [globalAnswer, setGlobalAnswer] = useState<{ answer: string; trust: number; grounded: boolean; communitiesUsed: Array<{ title: string }>; localUsed?: number; mode?: string; followups?: string[] } | null>(null)
+  const [globalAnswer, setGlobalAnswer] = useState<{ answer: string; trust: number; grounded: boolean; communitiesUsed: Array<{ title: string }>; localUsed?: number; mode?: string; followups?: string[]; sources?: string[] } | null>(null)
   const [globalLoading, setGlobalLoading] = useState(false)
   const [predictions, setPredictions] = useState<Array<{ source: string; target: string; sourceLabel: string; targetLabel: string; score: number; commonNeighbors: number; verified?: boolean; relation?: string; confidence?: number; rationale?: string }>>([])
   const [predLoading, setPredLoading] = useState(false)
@@ -574,6 +574,11 @@ export function GraphRailPanel() {
               </div>
               {globalAnswer.followups && globalAnswer.followups.length > 0 && (
                 <div className="mt-1 text-[9px] italic text-[var(--color-text-tertiary)]">↳ explored: {globalAnswer.followups.join(' · ')}</div>
+              )}
+              {globalAnswer.sources && globalAnswer.sources.length > 0 && (
+                <div className="mt-1 flex flex-wrap items-center gap-1 text-[9px] text-[var(--color-text-tertiary)]">
+                  <span>📎 sources:</span>{globalAnswer.sources.map((s, i) => <span key={i} className="rounded bg-[var(--color-background-secondary)] px-1 py-px font-mono">{s}</span>)}
+                </div>
               )}
             </div>
           )}

@@ -38,6 +38,7 @@ export interface GlobalAnswer {
   grounded: boolean
   communitiesUsed: Array<{ id: number; title: string; relevance: number }>
   localUsed: number   // # of local entity-level passages blended in (DRIFT-style hybrid)
+  sources: string[]   // document filenames the answer drew from (provenance / citations)
 }
 
 const STOP = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'what', 'which', 'are', 'how', 'does', 'about'])
@@ -149,12 +150,13 @@ export async function globalSearch(question: string, reports: CommunityReport[],
   // specific passages from the doc store matching the question. Global gives sensemaking; local gives
   // the specifics. The final answer is grounded against both.
   let local: string[] = []
+  let _sources: string[] = []
   if (opts.local !== false) {
-    try { local = [...new Set(lexicalSearch(question, 6).map((h) => h.text))].slice(0, 5) } catch { /* local best-effort */ }
+    try { const lh = lexicalSearch(question, 6); local = [...new Set(lh.map((h) => h.text))].slice(0, 5); _sources = [...new Set(lh.map((h) => h.filename).filter(Boolean))].slice(0, 5) } catch { /* local best-effort */ }
   }
 
   if (partials.length === 0 && local.length === 0) {
-    return { answer: "I don't have enough in the knowledge graph to answer that.", trust: 0, grounded: false, communitiesUsed: [], localUsed: 0 }
+    return { answer: "I don't have enough in the knowledge graph to answer that.", trust: 0, grounded: false, communitiesUsed: [], localUsed: 0, sources: [] }
   }
 
   // REDUCE — synthesize global themes + local passages into one grounded answer.
@@ -172,6 +174,7 @@ export async function globalSearch(question: string, reports: CommunityReport[],
     grounded: g.grounded,
     communitiesUsed: partials.map((p) => { const s = scored.find((x) => x.r.id === p.id); return { id: p.id, title: p.title, relevance: Number((s?.rel ?? 0).toFixed(2)) } }),
     localUsed: local.length,
+    sources: _sources,
   }
 }
 
