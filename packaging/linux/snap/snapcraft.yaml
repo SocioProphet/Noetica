@@ -1,0 +1,44 @@
+name: noetica
+base: core22
+version: '0.4.11'
+summary: Self-hosted AI dialogue management backend
+description: |
+  Noetica is a 22-intent AI dialogue management service for local, sovereign
+  AI inference. Runs an HTTP API on port 8080. Integrates with TurtleTerm
+  co-pilot as a local backend.
+grade: stable
+confinement: strict
+
+apps:
+  noetica:
+    command: bin/noetica-server
+    daemon: simple
+    plugs:
+      - network
+      - network-bind
+    environment:
+      PORT: "8080"
+      HOST: "127.0.0.1"
+      NODE_ENV: production
+
+parts:
+  noetica:
+    plugin: nil
+    source: .
+    build-packages:
+      - nodejs
+      - npm
+    stage-packages:
+      - nodejs
+    override-build: |
+      npm install --production --no-audit --no-fund 2>/dev/null || true
+      mkdir -p $SNAPCRAFT_PART_INSTALL/lib/noetica
+      cp -r . $SNAPCRAFT_PART_INSTALL/lib/noetica/
+      mkdir -p $SNAPCRAFT_PART_INSTALL/bin
+      for entry in app/server.js server.js src/server.js index.js; do
+        if [ -f "$SNAPCRAFT_PART_INSTALL/lib/noetica/$entry" ]; then
+          printf '#!/bin/sh\nexec node $SNAP/lib/noetica/%s "$@"\n' "$entry" > $SNAPCRAFT_PART_INSTALL/bin/noetica-server
+          chmod 755 $SNAPCRAFT_PART_INSTALL/bin/noetica-server
+          break
+        fi
+      done
