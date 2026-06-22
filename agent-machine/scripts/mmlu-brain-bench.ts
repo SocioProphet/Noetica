@@ -431,14 +431,22 @@ async function main() {
           const v = await verifyArm(q.question, q.choices, pools)
           letter = v.letter; mode = 'verify'
           row['verify_scores'] = v.scores.map((s) => Number(s.toFixed(2)))
-        } else if (arm === 'champion') {          // THE CROWN: understand first → route → best technique per type
+        } else if (arm === 'champion') {          // THE CROWN: reason+VOTE by default; retrieve when factual; compute only when cleanly extractable
           const k = kt[i] ?? { types: ['BasicFacts'], solver: 'retrieve' }
           row['ktype'] = k.types
-          if (k.solver === 'compute' && ci?.answer && ci.mode !== 'prog') { letter = ci.answer; mode = `compute:${ci.mode}` }   // computational → verified sympy (exact; prog falls through — it mis-sets-up word problems)
-          else if (k.solver === 'retrieve') {                                                                  // factual → HyDE/qgen retrieval + self-consistency vote
-            const v = await askVote(qgenPrompt, SC_K); letter = v.letter; mode = `retrieve+sc:${k.types[0]}`; row['sc_agree'] = Number(v.agree.toFixed(2))
+          if (k.solver === 'compute' && ci?.answer && ci.mode !== 'prog') {
+            letter = ci.answer; mode = `compute:${ci.mode}`           // exact — a clean expression was extractable
+          } else {
+            // The OLD verify path defaulted to A on every tie (strict `>` keeps index 0) — that was
+            // champion's A-bias (picked A 2× the gold rate). Replace it with the self-consistency VOTE,
+            // which launders positional bias by construction. Retrieval lifted physics/chem/math but was
+            // NOISE on pure-symbolic (abstract_algebra) and on compute-abstained word problems → reason
+            // closed-book there; qgen-context + vote elsewhere.
+            const symbolic = /abstract_algebra/.test(subject) || ci?.mode === 'prog'
+            const v = await askVote(symbolic ? `${base}${ANSWER_RULE}` : qgenPrompt, SC_K)
+            letter = v.letter; mode = `${symbolic ? 'reason' : 'qgen'}+sc:${k.types?.[0] ?? '?'}`
+            row['sc_agree'] = Number(v.agree.toFixed(2))
           }
-          else { const v = await verifyArm(q.question, q.choices, pools); letter = v.letter; mode = `verify:${k.types[0]}` }      // conceptual → plug-in-each-choice verify (an ensemble itself)
         } else {                                  // baseline (closed book)
           letter = extractLetter(await ask(`${base}${ANSWER_RULE}`))
         }
