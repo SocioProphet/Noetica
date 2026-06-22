@@ -4104,6 +4104,26 @@ Rules: MATCH ... RETURN ... with LIMIT 25. NO writes (no CREATE/MERGE/DELETE/SET
     return
   }
 
+  // POST /api/privacy/redact — preview the PII/secret firewall: what would be masked before any cloud
+  // egress. Body: { text }. Returns the redacted text + counts by kind (NOT the secret→placeholder map).
+  if (req.method === 'POST' && url.pathname === '/api/privacy/redact') {
+    let body = ''
+    req.on('data', (c: Buffer) => { body += c.toString() })
+    req.on('end', () => { void (async () => {
+      setCORSHeaders(res)
+      try {
+        const text = String((JSON.parse(body || '{}') as { text?: string }).text ?? '')
+        const { redact } = await import('./lib/redact.js')
+        const r = redact(text)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ redacted: r.redacted, count: r.count, kinds: r.kinds }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })() })
+    return
+  }
+
   // GET /api/governance/recent — last N completed run traces for Govern surface
   if (req.method === 'GET' && url.pathname === '/api/governance/recent') {
     setCORSHeaders(res)
