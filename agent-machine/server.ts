@@ -5441,6 +5441,30 @@ const server = http.createServer((req, res) => {
     return
   }
 
+  // GET /api/graph/resolve — entity resolution: ranked merge candidates (entities that refer to the
+  // same real-world thing) by fusing edit similarity + entity-embedding cosine + substring checks.
+  // Proposals, not silent merges. ?min=<0..1> confidence floor.
+  if (req.method === 'GET' && url.pathname === '/api/graph/resolve') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const min = Math.min(1, Math.max(0.5, Number(url.searchParams.get('min') ?? 0.82)))
+        const g = getGraph()
+        const keep = g.allNodes().filter((n) => cleanLabel(n) !== null && n.properties?.['hygiene_pruned'] !== true && !/corpus-test/i.test(String(n.id)))
+        const labelOf = (n: typeof keep[number]) => cleanLabel(n) ?? ''
+        const { embedEntities } = await import('./lib/graph-embed.js')
+        const { resolveEntities } = await import('./lib/graph-resolve.js')
+        const vectors = await embedEntities(keep.map((n) => ({ id: n.id, text: labelOf(n) || (n.labels[0] ?? '') })))
+        const candidates = resolveEntities(keep.map((n) => ({ id: n.id, label: labelOf(n) })), vectors, { minConfidence: min, topK: 30 })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ candidates, count: candidates.length, entitiesScanned: keep.length, embedderAvailable: vectors.size > 0 }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })()
+    return
+  }
+
   // GET /api/graph/timeline — the temporal axis: bucket clean nodes by when they entered the graph
   // to show how knowledge accreted over time (foundation for an "as-of" scrubber). ?buckets=N,
   // ?asOf=<epoch ms> caps to knowledge known by that instant ("what did I know last month").
