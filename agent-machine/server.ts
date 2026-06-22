@@ -5572,6 +5572,69 @@ const server = http.createServer((req, res) => {
     return
   }
 
+  // POST /api/graph/local — GraphRAG structured LOCAL search: resolve the focal entity (embedding
+  // similarity to the question), then assemble its relationships + text-units + community context into
+  // one window and answer from it — grounded + trust-scored. Entity-centric, vs global's theme-centric.
+  if (req.method === 'POST' && url.pathname === '/api/graph/local') {
+    let body = ''
+    req.on('data', (c: Buffer) => { body += c.toString() })
+    req.on('end', () => { void (async () => {
+      setCORSHeaders(res)
+      try {
+        const p = JSON.parse(body || '{}') as { question?: string }
+        const question = String(p.question ?? '').trim()
+        if (!question) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'question_required' })); return }
+        const { analytics } = await analyticsForGraph(false)
+        const model = await pickChatModel()
+        const g = getGraph()
+        const keep = g.allNodes().filter((n) => cleanLabel(n) !== null && n.properties?.['hygiene_pruned'] !== true && !/corpus-test/i.test(String(n.id)))
+        const lbl = (id: string) => { const n = keep.find((x) => x.id === id); return n ? (cleanLabel(n) ?? '') : '' }
+
+        // 1. Resolve the focal entity: most embedding-similar to the question (fallback: token match).
+        const { embedEntities } = await import('./lib/graph-embed.js')
+        const { cosineSim } = await import('./lib/graph-search.js')
+        const { embedBatchLocal } = await import('./lib/embed-runtime.js')
+        const vectors = await embedEntities(keep.map((n) => ({ id: n.id, text: (cleanLabel(n) ?? '') || (n.labels[0] ?? '') })))
+        const qv = (await embedBatchLocal([question]).catch(() => null))?.[0] ?? null
+        let focal = ''
+        if (qv && vectors.size) { let best = -1; for (const [id, v] of vectors) { const s = cosineSim(qv, v); if (s > best) { best = s; focal = id } } }
+        if (!focal) { const qt = question.toLowerCase(); focal = keep.find((n) => qt.includes((cleanLabel(n) ?? '').toLowerCase()) && (cleanLabel(n) ?? '').length > 2)?.id ?? keep[0]?.id ?? '' }
+        if (!focal) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ answer: "No matching entity in the graph.", trust: 0, grounded: false, entity: '', context: {} })); return }
+        const focalLabel = lbl(focal)
+
+        // 2. Relationships touching the focal entity.
+        const rels = [...new Set(g.allEdges().filter((e) => e.from === focal || e.to === focal)
+          .map((e) => { const other = e.from === focal ? e.to : e.from; const ol = lbl(other); return ol ? `${focalLabel} —${e.label}— ${ol}` : '' }).filter(Boolean))].slice(0, 12)
+        // 3. Text-units (local passages).
+        const { lexicalSearch } = await import('./lib/doc-store.js')
+        const passages = [...new Set(lexicalSearch(`${focalLabel} ${question}`, 5).map((h) => h.text))].slice(0, 5)
+        // 4. Community context (which theme this entity belongs to + its report).
+        const comm = analytics.communities.find((c) => c.members.includes(focal))
+        const report = comm ? (loadCommunitiesCache()?.reports.find((r) => r.id === comm.id)) : undefined
+
+        // 5. Assemble the local window + answer + verify.
+        const ctx = [
+          `Focal entity: ${focalLabel}`,
+          rels.length ? `Relationships:\n${rels.join('\n')}` : '',
+          report ? `Community theme — ${report.title}: ${report.summary}` : '',
+          passages.length ? `Passages:\n${passages.map((t, i) => `(${i + 1}) ${t.slice(0, 300)}`).join('\n')}` : '',
+        ].filter(Boolean).join('\n\n')
+        const { generateOllamaText } = await import('./lib/ollama.js')
+        const prompt = `${ctx}\n\nQuestion: ${question}\n\nAnswer concisely using ONLY the focal entity's relationships, community theme, and passages above. Do not add facts not present.`
+        let answer = ''
+        try { answer = (await generateOllamaText({ model, messages: [{ role: 'user', content: prompt }], temperature: 0.3 })).content.trim() } catch { answer = '' }
+        const { verifyGrounding } = await import('./lib/research-verify.js')
+        const evidence = [...rels.map((t) => ({ text: t })), ...passages.map((t) => ({ text: t })), ...(report ? [{ text: report.summary }] : [])]
+        const gr = evidence.length && answer ? verifyGrounding(answer, evidence) : { grounded: false, score: 0 }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ answer, trust: Number(gr.score.toFixed(2)), grounded: gr.grounded, entity: focalLabel, context: { relationships: rels.length, passages: passages.length, community: report?.title ?? null }, model }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })() })
+    return
+  }
+
   // POST /api/import/chats — ingest a Claude/ChatGPT data-EXPORT (the conversations JSON) into the
   // brain: each conversation becomes a Document (chunked + embedded + atoms), searchable + in the
   // graph. History is NOT reachable via an API key — this is the export-file path. Body: the raw
