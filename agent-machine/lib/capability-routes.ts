@@ -109,6 +109,20 @@ export async function handleCapabilityRoute(req: http.IncomingMessage, res: http
         const cred = makeCredential({ model: b.model as string, timestamp: b.timestamp as string, sourceRefs: b.sourceRefs ?? [] })
         return send(200, { credential: cred, digest: manifestDigest(cred), marked: b.text ? markAIGenerated(b.text as string, cred) : undefined }), true
       }
+      // ── AG-UI protocol conformance (Agent-User Interaction Protocol) ──
+      case 'agui-run': {
+        const { buildTextRun, isWellFormedRun } = await import('./ag-ui.js')
+        const prompt = String(b.prompt ?? '')
+        const model = String(b.model ?? (await listLocalModels())[0] ?? 'qwen2.5:7b')
+        const out = await generateOllamaText({ model, messages: [{ role: 'user', content: prompt }], temperature: 0.7, numCtx: 8192 })
+        const events = buildTextRun(String(b.threadId ?? 'thread'), String(b.runId ?? 'run'), 'msg-1', [out.content])
+        return send(200, { protocol: 'ag-ui', events, wellFormed: isWellFormedRun(events) }), true
+      }
+      case 'agui-validate': {
+        const { isWellFormedRun, isValidEvent } = await import('./ag-ui.js')
+        const events = (b.events ?? []) as Array<{ type: string }>
+        return send(200, { wellFormed: isWellFormedRun(events as never), invalid: events.filter((e) => !isValidEvent(e as never)).map((e) => e.type) }), true
+      }
       // ── AI-ops workbench backends (prompt workbench, model compare, vector search) ──
       case 'models': return send(200, { models: await listLocalModels() }), true
       case 'prompt-run': {
