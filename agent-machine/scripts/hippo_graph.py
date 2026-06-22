@@ -69,9 +69,12 @@ def load(field, cap):
     return texts, M
 
 
-def build_graph(texts):
+def build_graph(texts, cx=None):
     t0 = time.time()
-    chunk_phrases = [phrases(t) for t in texts]
+    if cx is not None:
+        chunk_phrases = [set(s) for s in cx.extract_batch(texts)]   # clean ensemble concepts (NLTK+spaCy+GLiNER+KeyBERT)
+    else:
+        chunk_phrases = [phrases(t) for t in texts]                 # n-gram fallback
     df = Counter()
     for ps in chunk_phrases:
         df.update(ps)
@@ -113,8 +116,9 @@ def ppr(W, seedw, alpha=0.85, iters=40):
     return r
 
 
-def retrieve_ppr(query, vocab, chunk_ents, W, idf, k):
-    seedw = {vocab[p]: float(idf[vocab[p]]) for p in phrases(query) if p in vocab}  # IDF-weighted seeds
+def retrieve_ppr(query, vocab, chunk_ents, W, idf, k, cx=None):
+    qph = set(cx.extract_batch([query])[0]) if cx is not None else phrases(query)   # same extractor for query
+    seedw = {vocab[p]: float(idf[vocab[p]]) for p in qph if p in vocab}              # IDF-weighted seeds
     if not seedw:
         return [], 0
     r = ppr(W, seedw)
@@ -129,7 +133,13 @@ def content(s):
 def main():
     print(f"# hippo_graph · field={FIELD} · cap={CAP}\n")
     texts, M = load(FIELD, CAP)
-    vocab, chunk_ents, W, idf = build_graph(texts)
+    cx = None
+    try:
+        from concept_extract import ConceptExtractor
+        cx = ConceptExtractor()
+    except Exception as e:
+        print(f'  [hippo] ensemble extractor off ({e}); n-gram fallback')
+    vocab, chunk_ents, W, idf = build_graph(texts, cx)
 
     # self-test: PPR retrieval vs cosine on this field's MMLU questions — does PPR surface the gold-answer text?
     bank = json.load(open(BANK))
@@ -148,7 +158,7 @@ def main():
         query = q['question'] + ' ' + ' '.join(q['choices'])
         gold = content(q['choices'][q['answer']])
         # PPR
-        idx_ppr, ns = retrieve_ppr(query, vocab, chunk_ents, W, idf, 4); nseed += ns
+        idx_ppr, ns = retrieve_ppr(query, vocab, chunk_ents, W, idf, 4, cx); nseed += ns
         ctx_ppr = ' '.join(texts[i][:400] for i in idx_ppr)
         if gold and len(gold & content(ctx_ppr)) / len(gold) >= 0.5:
             ph += 1
@@ -159,7 +169,7 @@ def main():
     # show one worked example
     if qs:
         q = qs[0]; query = q['question'] + ' ' + ' '.join(q['choices'])
-        idx, ns = retrieve_ppr(query, vocab, chunk_ents, W, idf, 3)
+        idx, ns = retrieve_ppr(query, vocab, chunk_ents, W, idf, 3, cx)
         print(f"\n  example — Q: {q['question'][:90]}...")
         print(f"    seeded {ns} concepts → top PPR chunks:")
         for i in idx[:3]:

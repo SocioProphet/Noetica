@@ -353,9 +353,77 @@ function pct(a: number, b: number): string { return b ? (100 * a / b).toFixed(1)
 
 // ── verified-compute arm: the model only PARSES; units + the law catalog compute and certify ──
 const COMPUTE_PY = path.join(__dirname, 'compute_arm.py')
+const EVAL_PY = path.join(__dirname, 'eval_sympy.py')
+const AUTOFORM_K = Number(process.env['MMLU_AUTOFORM_K'] || 3)  // sympy formalizations sampled per question
+
+// parse the numeric value of a choice (first number; supports a/b fractions)
+function choiceNum(c: string): number | null {
+  const frac = /(-?\d+(?:\.\d+)?)\s*\/\s*(-?\d+(?:\.\d+)?)/.exec(c)
+  if (frac) { const d = Number(frac[2]); if (d) return Number(frac[1]) / d }
+  const m = /-?\d+(?:\.\d+)?/.exec(c.replace(/,/g, ''))
+  return m ? Number(m[0]) : null
+}
+// pull a single sympy expression out of the model's reply (strip fences / prose / "x = ")
+function extractExpr(raw: string): string {
+  let s = raw.trim()
+  const fence = /```(?:python)?\s*([\s\S]*?)```/.exec(s); if (fence) s = fence[1]!.trim()
+  const lines = s.split('\n').map((l) => l.trim()).filter(Boolean)
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i]!.replace(/^[a-zA-Z_]\w*\s*=\s*/, '').replace(/[.;]+$/, '')
+    if (/[0-9)]/.test(l) && l.length < 200) return l
+  }
+  return ''
+}
+// nearest numeric choice to a computed value — require a close (2% relative) match, else abstain
+function nearestChoice(choices: string[], val: number): string {
+  let best = -1, bd = Infinity
+  for (let i = 0; i < choices.length; i++) {
+    const n = choiceNum(choices[i]!); if (n == null) continue
+    const d = Math.abs(n - val) / (Math.abs(n) + 1e-9)
+    if (d < bd) { bd = d; best = i }
+  }
+  return best >= 0 && bd < 0.02 ? LETTERS[best]! : ''
+}
 interface CompRes { answer: string | null; mode: string }
 /** Score the whole compute arm for a subject in ONE python call (one sympy import). Each result
  *  is the verified answer letter, or null=abstain when no law fits / units reject the extraction. */
+// autoformalization: LLM writes K sympy expressions per (numeric) question, eval_sympy.py executes
+// them deterministically, majority-vote the numeric result, match to the nearest choice. Self-
+// consistency over formalizations IS the verification. Attacks the computational ceiling.
+async function autoformBatch(qs: Q[]): Promise<CompRes[]> {
+  const res: CompRes[] = qs.map(() => ({ answer: null, mode: 'abstain' }))
+  const exprs: Array<{ id: number; expr: string }> = []
+  await Promise.all(qs.map(async (q, i) => {
+    if (!q.choices.every((c) => choiceNum(c) != null)) return    // only numeric-answer questions
+    for (let s = 0; s < AUTOFORM_K; s++) {
+      const raw = await ask(`Solve this exam problem by writing ONE Python expression (sympy is available: sqrt, pi, factorial, binomial, Rational, exp, log, sin/cos, solve, ...) that evaluates to the numeric answer. Output ONLY the expression on a single line — no words, no units.\n\n${q.question}`, s === 0 ? 0 : 0.7)
+      const e = extractExpr(raw)
+      if (e) exprs.push({ id: i, expr: e })
+    }
+  }))
+  if (!exprs.length) return res
+  const byId = new Map<number, number[]>()
+  try {
+    const out = execFileSync('python3', [EVAL_PY], { input: exprs.map((e) => JSON.stringify(e)).join('\n') + '\n', encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, env: { ...process.env } })
+    for (const line of out.split('\n')) {
+      if (!line.trim()) continue
+      try {
+        const r = JSON.parse(line) as { id: number; val: number | null }
+        if (r.val != null && typeof r.id === 'number') { const a = byId.get(r.id) ?? []; a.push(r.val); byId.set(r.id, a) }
+      } catch { /* skip */ }
+    }
+  } catch { return res }
+  for (const [id, vals] of byId) {
+    const cnt = new Map<number, number>()
+    for (const v of vals) { const k = Math.round(v * 1e4) / 1e4; cnt.set(k, (cnt.get(k) ?? 0) + 1) }
+    const top = [...cnt.entries()].sort((a, b) => b[1] - a[1])[0]
+    if (!top) continue
+    const letter = nearestChoice(qs[id]!.choices, top[0])
+    if (letter) res[id] = { answer: letter, mode: `autoform×${top[1]}` }
+  }
+  return res
+}
+
 function computeBatch(qs: Q[]): CompRes[] {
   const res: CompRes[] = qs.map(() => ({ answer: null, mode: 'abstain' }))
   if (!qs.length) return res
@@ -424,6 +492,7 @@ async function main() {
     const comp: CompRes[] = (ARMS.includes('compute') || ARMS.includes('route') || ARMS.includes('champion') || ARMS.includes('gate')) ? computeBatch(sample) : []
     // knowledge-type per question (the 'understand first' step) — used by the champion router
     const kt: KType[] = (ARMS.includes('champion') || ARMS.includes('gate')) ? ktypeBatch(sample) : []
+    const af: CompRes[] = ARMS.includes('autoform') ? await autoformBatch(sample) : []   // LLM-formalize → sympy-execute → vote
 
     const scoreQuestion = async (i: number) => {
       const q = sample[i]!
@@ -475,6 +544,8 @@ async function main() {
           letter = await askBrain()
         } else if (arm === 'qgen') {              // brain + HyDE/step-back query generation
           letter = await askQgen(); mode = 'qgen'
+        } else if (arm === 'autoform') {          // autoformalization: LLM→sympy→execute→vote (abstains on non-numeric)
+          const a = af[i]; letter = a?.answer ?? ''; mode = a?.mode ?? 'abstain'; attempted = !!a?.answer
         } else if (arm === 'gate') {              // CRAG adaptive retrieval: only retrieve when the model ISN'T already confident
           const k = kt[i] ?? { types: ['BasicFacts'], solver: 'retrieve' }
           const scClosed = await askVote(`${base}${ANSWER_RULE}`, SC_K)   // closed-book confidence probe (calibrated by SC agreement)
