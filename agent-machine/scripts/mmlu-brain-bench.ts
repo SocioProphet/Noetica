@@ -318,6 +318,7 @@ async function ask(prompt: string, temperature = 0): Promise<string> {
 // of the answer (a bias toward "A" washes out across diverse samples). Unaffordable on CPU; cheap
 // on the L4. k<=1 collapses to one temp-0 answer (voting off), so non-champion arms are unaffected.
 const SC_K = Number(process.env['MMLU_SC_K'] || 5)
+const SHUFFLE_M = Number(process.env['MMLU_SHUFFLE'] || 4)   // Medprompt choice-shuffle ensemble members (rotations cancel position bias)
 const CISC = process.env['MMLU_CISC'] === '1'   // confidence-weighted self-consistency (Google 2025) — weight each vote by the model's stated confidence
 function extractConf(raw: string): number {
   const m = /conf(?:idence)?[:\s]*([01]?(?:\.\d+)?|\d{1,3})\s*%?/i.exec(raw)
@@ -646,6 +647,19 @@ async function main() {
             letter = ranked[0]?.[0] || sc.letter || 'B'
             mode = `council:${k.types?.[0] ?? '?'}`
           }
+        } else if (arm === 'medprompt') {         // Medprompt choice-shuffle ensemble — position (A) bias cancels by construction (Microsoft, 90.10% MMLU)
+          const n = q.choices.length, M = Math.min(SHUFFLE_M, n) || n
+          const votes = new Map<number, number>()
+          for (let m = 0; m < M; m++) {
+            const order = Array.from({ length: n }, (_, j) => (j + m) % n)   // rotation m: each choice visits each position across the ensemble
+            const shuffled = order.map((oi) => q.choices[oi]!)
+            const pr = `${q.question}\n\n${shuffled.map((c, j) => `${LETTERS[j]}. ${c}`).join('\n')}${ANSWER_RULE}`
+            const p = LETTERS.indexOf(extractLetter(await ask(pr)))
+            if (p >= 0 && p < n) { const orig = order[p]!; votes.set(orig, (votes.get(orig) ?? 0) + 1) }
+          }
+          let best = -1, bn = -1
+          for (const [oi, c] of votes) if (c > bn) { bn = c; best = oi }
+          letter = best >= 0 ? LETTERS[best]! : ''; mode = `medprompt×${M}`
         } else {                                  // baseline (closed book)
           letter = extractLetter(await ask(`${base}${ANSWER_RULE}`))
         }

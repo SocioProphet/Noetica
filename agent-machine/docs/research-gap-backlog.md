@@ -19,6 +19,12 @@ implement → measure → **repeat**. Each pass adds rows here, ships the top on
 | **0** | **Medprompt** (choice-shuffle ensemble + dynamic kNN few-shot + self-CoT) | **Microsoft** 2023 | **90.10% MMLU via PROMPTING** (highest ever); choice-shuffle is the *principled* A-bias cure; kNN few-shot = CBR exemplars from our brain | **next — the MMLU recipe** |
 | 1 | **Phi-style distillation** — curate textbook-quality data from OCW → fine-tune/distill small model | **Microsoft** Phi | 2.7B beats 25× larger on reasoning; turns our corpus into model weights | research |
 | 1 | **Contextual Retrieval — hybrid BM25 + RRF** | Anthropic 2024 | catches exact-term matches dense misses | ✅ `MMLU_HYBRID` (full contextual-embeddings re-embed = GPU upgrade) |
+| **0** | **Medprompt choice-shuffle ensemble** | Microsoft | rotations cancel position bias → the A-bias cure | ✅ `medprompt` arm (`MMLU_SHUFFLE`) |
+| 1 | **Distill technique → weights** (council/Medprompt trajectories → SFT/distill small model) | **DeepSeek-R1** (GRPO, 800K trajectories) + **Thinking Machines** on-policy distill | turn inference-technique into a small model that IS the technique — the endgame of "technique not horsepower" | research (the big one) |
+| 1 | **RLVR post-training** (SFT→DPO→RLVR with verifiable MMLU-correctness reward) | **AI2 Tülu 3 / OLMo 2** | fully-open recipe to fine-tune our model with answer-correctness rewards | research |
+| 2 | **Cross-encoder reranker** | **Cohere Rerank 4** (Dec'25) | upgrade our BM25/RRF hybrid with a real reranker | backlog |
+| 2 | **Optimal test-time compute allocation** | **NeurIPS'24** Snell ("test-time compute > params") + Adaptive-SC | spend samples where they matter (easy Q → 1, hard → many) — the academic backing for our whole thesis | backlog |
+| 3 | **RankRAG** (rank context + generate in one LLM) | NeurIPS'24 | unify rerank+answer | backlog |
 | 2 | **AlphaEvolve** evolutionary combiner discovery | **DeepMind** 2025 | LLM proposes combiner-program variants + evaluator + evolution → discover the council law (FunSearch successor; beat Strassen) | upgrade meta_combiner |
 | 2 | **On-policy distillation** — distill the council into model weights | **Thinking Machines** 2025 | technique → weights (the small model internalizes council reasoning) | research |
 | 3 | **Deterministic/batch-invariant inference** | **Thinking Machines** 2025 | reproducible benchmark numbers (clean-eval/`batch_invariant_ops`) | research |
