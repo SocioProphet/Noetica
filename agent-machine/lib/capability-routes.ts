@@ -33,6 +33,7 @@ import { buildMindMap, flattenOutline, countNodes } from './mind-map.js'
 import { makeCredential, markAIGenerated, manifestDigest } from './content-credentials.js'
 import { persistProposals, persistInferred } from './graph-writeback.js'
 import type { GraphProposal } from './graph-proposals.js'
+import { placeToFeatureEntry, mergeToConcordance, entityToCanonical, gaiaDocument, conformsToGaia, type GaiaRecord } from './gaia-bridge.js'
 
 function readBody(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve) => { let b = ''; req.on('data', (c: Buffer) => { b += c.toString() }); req.on('end', () => resolve(b)); req.on('error', () => resolve('')) })
@@ -103,6 +104,15 @@ export async function handleCapabilityRoute(req: http.IncomingMessage, res: http
       case 'content-credential': {
         const cred = makeCredential({ model: b.model as string, timestamp: b.timestamp as string, sourceRefs: b.sourceRefs ?? [] })
         return send(200, { credential: cred, digest: manifestDigest(cred), marked: b.text ? markAIGenerated(b.text as string, cred) : undefined }), true
+      }
+      // ── canonical GAIA ontology export (conformant JSON-LD) ──
+      case 'gaia-export': {
+        const recs: GaiaRecord[] = [
+          ...((b.places ?? []) as Array<{ name: string; lat?: number; lon?: number; type?: string }>).map((p) => placeToFeatureEntry(p, { verified: !!b.verified })),
+          ...((b.merges ?? []) as Array<{ a: string; b: string; confidence?: number }>).map((m) => mergeToConcordance(m)),
+          ...((b.entities ?? []) as Array<{ id: string; label: string }>).map((e) => entityToCanonical(e.id, e.label)),
+        ]
+        return send(200, { document: gaiaDocument(recs), conformance: recs.map((r) => ({ id: r['@id'], ...conformsToGaia(r) })) }), true
       }
       // ── HellGraph write-back (PERSIST derived knowledge into the store) ──
       case 'proposals-apply': return send(200, persistProposals((b.proposals ?? []) as GraphProposal[])), true
