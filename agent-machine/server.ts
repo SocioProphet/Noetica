@@ -5374,6 +5374,42 @@ Rules: MATCH ... RETURN ... with LIMIT 25. NO writes (no CREATE/MERGE/DELETE/SET
     return
   }
 
+  // GET /api/graph/impact?entity=&hops= — blast-radius / impact analysis: what's reachable from an
+  // entity within N hops, grouped by distance and ranked by importance. "If X changes, these are
+  // affected" — the dependency-impact view ops/investigation graphs (Palantir, CMDB) provide.
+  if (req.method === 'GET' && url.pathname === '/api/graph/impact') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const q = (url.searchParams.get('entity') || url.searchParams.get('id') || '').trim()
+        if (!q) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'entity_required' })); return }
+        const hops = Math.min(4, Math.max(1, Number(url.searchParams.get('hops') ?? 2)))
+        const { analytics } = await analyticsForGraph(false)
+        const g = getGraph()
+        const keep = g.allNodes().filter((n) => cleanLabel(n) !== null && n.properties?.['hygiene_pruned'] !== true && !/corpus-test/i.test(String(n.id)))
+        const byId = new Map(keep.map((n) => [n.id, n]))
+        const lbl = (id: string) => { const n = byId.get(id); return n ? (cleanLabel(n) ?? '') : '' }
+        const target = keep.find((n) => n.id === q) ?? keep.find((n) => (cleanLabel(n) ?? '').toLowerCase() === q.toLowerCase())
+        if (!target) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'entity_not_found' })); return }
+        const adj = new Map<string, string[]>()
+        for (const e of g.allEdges()) { (adj.get(e.from) ?? adj.set(e.from, []).get(e.from)!).push(e.to); (adj.get(e.to) ?? adj.set(e.to, []).get(e.to)!).push(e.from) }
+        const dist = new Map([[target.id, 0]]); const bq = [target.id]
+        while (bq.length) { const u = bq.shift()!; const d = dist.get(u)!; if (d >= hops) continue; for (const v of adj.get(u) ?? []) { if (!dist.has(v)) { dist.set(v, d + 1); bq.push(v) } } }
+        const levels: Array<{ distance: number; count: number; nodes: Array<{ label: string; importance: number }> }> = []
+        for (let h = 1; h <= hops; h++) {
+          const nodes = [...dist].filter(([, d]) => d === h).map(([id]) => ({ label: lbl(id), importance: Number((analytics.nodes[id]?.pagerank ?? 0).toFixed(3)) }))
+            .filter((n) => n.label).sort((a, b) => b.importance - a.importance).slice(0, 15)
+          if (nodes.length) levels.push({ distance: h, count: nodes.length, nodes })
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ entity: lbl(target.id), hops, totalAffected: dist.size - 1, levels }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })()
+    return
+  }
+
   // GET /api/graph/explain-path?from=&to= — investigation: the connection between two entities, with
   // each hop's relationship, an epistemic-weighted confidence for the whole chain, and an LLM narration.
   // Palantir/Linkurious find paths; we explain them + rate trust. Accepts labels or ids.
