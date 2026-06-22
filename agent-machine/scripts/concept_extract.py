@@ -50,6 +50,11 @@ class ConceptExtractor:
         if gliner:
             try:
                 from gliner import GLiNER; self.gliner = GLiNER.from_pretrained(gliner_model)
+                try:
+                    import torch
+                    if torch.cuda.is_available(): self.gliner = self.gliner.to('cuda'); print("  [concept_extract] GLiNER on CUDA")
+                except Exception:
+                    pass
             except Exception as e:
                 print(f"  [concept_extract] GLiNER off: {e}")
         if keybert:
