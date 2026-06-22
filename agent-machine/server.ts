@@ -5654,6 +5654,27 @@ const server = http.createServer((req, res) => {
     return
   }
 
+  // GET /api/graph/infer — rule-based inference (OWL-lite): derive new facts by transitivity over the
+  // relational covariates, marked epistemic:'inferred' with their derivation chain. ?verify=1 has the
+  // model check each derivation holds. Reasoning + verification — Stardog reasons, GraphRAG doesn't.
+  if (req.method === 'GET' && url.pathname === '/api/graph/infer') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const verify = url.searchParams.get('verify') === '1'
+        const { entities, model } = await buildOrLoadCovariates(false)
+        const facts = entities.flatMap((e) => e.covariates.filter((c) => c.object).map((c) => ({ subject: e.entity, predicate: c.type, object: c.object! })))
+        const { inferFacts } = await import('./lib/graph-infer.js')
+        const inferred = await inferFacts(facts, { model, verify, max: 30 })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ model, inferred, count: inferred.length, verifiedCount: verify ? inferred.filter((f) => f.verified).length : null, factsFrom: facts.length }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })()
+    return
+  }
+
   // GET /api/graph/communities — GraphRAG community reports: one LLM-written, grounding-verified
   // summary per Louvain community. Cached by analytics signature + model; ?refresh=1 rebuilds.
   if (req.method === 'GET' && url.pathname === '/api/graph/communities') {
