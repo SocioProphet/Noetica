@@ -5550,8 +5550,9 @@ const server = http.createServer((req, res) => {
     req.on('end', () => { void (async () => {
       setCORSHeaders(res)
       try {
-        const p = JSON.parse(body || '{}') as { question?: string }
+        const p = JSON.parse(body || '{}') as { question?: string; drift?: boolean }
         const question = String(p.question ?? '').trim()
+        const useDrift = p.drift === true || url.searchParams.get('drift') === '1'
         if (!question) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'question_required' })); return }
         const { analytics, sig, labelOf } = await analyticsForGraph(false)
         const model = await pickChatModel()
@@ -5561,7 +5562,7 @@ const server = http.createServer((req, res) => {
           const reports = await buildCommunityReports(analytics, labelOf, { model, maxCommunities: 24, minSize: 3, level: 'coarse' })
           cached = { sig, model, level: 'coarse', reports, builtAt: new Date().toISOString() }; saveCommunitiesCache(cached)
         }
-        const { globalSearch } = await import('./lib/graph-rag.js')
+        const { globalSearch, driftSearch } = await import('./lib/graph-rag.js')
         // Embed the reports + question for SEMANTIC relevance (GraphRAG "embed reports") — beats token
         // overlap at matching a question to the right communities. Degrades to token overlap if cold.
         let relevanceOf: ((r: import('./lib/graph-rag.js').CommunityReport) => number) | undefined
@@ -5572,9 +5573,10 @@ const server = http.createServer((req, res) => {
           const vecs = await embedBatchLocal([question, ...reps.map((r) => `${r.title}. ${r.summary}`)])
           if (vecs && vecs[0]) { const qv = vecs[0]; const rmap = new Map(reps.map((r, i) => [r.id, vecs[i + 1] ? cosineSim(qv, vecs[i + 1]!) : 0])); relevanceOf = (r) => rmap.get(r.id) ?? 0 }
         } catch { /* embedder optional → token overlap */ }
-        const result = await globalSearch(question, cached.reports, { model, maxCommunities: 6, ...(relevanceOf ? { relevanceOf } : {}) })
+        const gOpts = { model, maxCommunities: 6, ...(relevanceOf ? { relevanceOf } : {}) }
+        const result = useDrift ? await driftSearch(question, cached.reports, gOpts) : await globalSearch(question, cached.reports, gOpts)
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ ...result, model, retrieval: relevanceOf ? 'semantic' : 'lexical' }))
+        res.end(JSON.stringify({ ...result, model, mode: useDrift ? 'drift' : 'global', retrieval: relevanceOf ? 'semantic' : 'lexical' }))
       } catch (e) {
         res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
       }

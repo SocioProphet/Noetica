@@ -174,3 +174,41 @@ export async function globalSearch(question: string, reports: CommunityReport[],
     localUsed: local.length,
   }
 }
+
+export interface DriftAnswer extends GlobalAnswer { followups: string[]; rounds: number }
+
+function safeStrArr(s: string): string[] {
+  const m = s.match(/\[[\s\S]*\]/); if (!m) return []
+  try { const v = JSON.parse(m[0]); return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [] } catch { return [] }
+}
+
+/** DRIFT — iterative fan-out: answer (hybrid global+local), generate follow-up sub-questions from the
+ *  draft, fan out to gather more local evidence, then refine. Multi-step reasoning vs a single pass. */
+export async function driftSearch(question: string, reports: CommunityReport[], opts: { model: string; maxCommunities?: number; relevanceOf?: (r: CommunityReport) => number }): Promise<DriftAnswer> {
+  const base = await globalSearch(question, reports, opts)
+  if (!base.answer || (base.communitiesUsed.length === 0 && base.localUsed === 0)) return { ...base, followups: [], rounds: 0 }
+
+  // 1. Follow-up sub-questions implied by the draft answer.
+  let followups: string[] = []
+  try {
+    const { content } = await generateOllamaText({ model: opts.model, messages: [{ role: 'user', content: `Question: ${question}\nDraft answer: ${base.answer}\n\nList up to 3 specific follow-up questions whose answers would make the response more complete and concrete. STRICT JSON array of strings only.` }], temperature: 0.3 })
+    followups = safeStrArr(content).slice(0, 3)
+  } catch { /* no follow-ups → return the base */ }
+  if (followups.length === 0) return { ...base, followups: [], rounds: 1 }
+
+  // 2. Fan out — gather local evidence for each follow-up.
+  const extra: string[] = []
+  for (const fu of followups) { try { extra.push(...lexicalSearch(fu, 3).map((h) => h.text)) } catch { /* skip */ } }
+  const extraEv = [...new Set(extra)].slice(0, 8)
+
+  // 3. Refine the answer with the fanned-out evidence.
+  let refined = base.answer
+  try {
+    const { content } = await generateOllamaText({ model: opts.model, messages: [{ role: 'user', content: `Question: ${question}\nInitial answer: ${base.answer}\n\nFollow-up evidence:\n${extraEv.map((t, i) => `(${i + 1}) ${t.slice(0, 250)}`).join('\n') || '(none)'}\n\nProduce a more complete final answer grounded ONLY in the initial answer + the evidence above. Be concise.` }], temperature: 0.3 })
+    if (content.trim()) refined = content.trim()
+  } catch { /* keep base */ }
+
+  // 4. Verify the refined answer against the draft + the new evidence.
+  const g = verifyGrounding(refined, [{ text: base.answer }, ...extraEv.map((t) => ({ text: t }))])
+  return { ...base, answer: refined, trust: Number(g.score.toFixed(2)), grounded: g.grounded, followups, rounds: 1 }
+}
