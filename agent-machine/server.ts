@@ -5510,6 +5510,60 @@ const server = http.createServer((req, res) => {
     return
   }
 
+  // GET /api/graph/health — knowledge-health synthesis: one trust+completeness score over the graph,
+  // aggregating community structure, grounded-claim ratio, community trust, and structural gaps. Cheap
+  // (reads cached signals; never rebuilds), so it's an instant "is my brain trustworthy + complete" view.
+  if (req.method === 'GET' && url.pathname === '/api/graph/health') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { analytics } = await analyticsForGraph(false)
+        const metrics = Object.values(analytics.nodes)
+        const n = metrics.length || 1
+        const orphans = metrics.filter((m) => m.community < 0).length
+        const orphanRatio = orphans / n
+        // important-but-under-connected: top-importance nodes whose degree is low (knowledge gaps).
+        const sortedPr = [...metrics].sort((a, b) => b.pagerank - a.pagerank).slice(0, 12)
+        const underConnected = sortedPr.filter((m) => m.pagerank > 0.3 && m.degree <= 2).length
+        // cached (don't rebuild): covariate grounding + community trust.
+        const cov = loadCovariatesCache()
+        const covTotal = cov ? cov.entities.reduce((s, e) => s + e.covariates.length, 0) : 0
+        const covGrounded = cov ? cov.entities.reduce((s, e) => s + e.grounded, 0) : 0
+        const groundedRatio = covTotal ? covGrounded / covTotal : null
+        const comms = loadCommunitiesCache()
+        const commTrusts = comms ? comms.reports.map((r) => r.trust) : []
+        const avgCommTrust = commTrusts.length ? commTrusts.reduce((s, t) => s + t, 0) / commTrusts.length : null
+        const lowTrustCommunities = comms ? comms.reports.filter((r) => !r.grounded).map((r) => r.title) : []
+
+        // health score: blend the available signals (each 0..1), weighted, → 0..100.
+        const parts: Array<[number, number]> = [[analytics.modularity, 1], [1 - orphanRatio, 1]]
+        if (groundedRatio !== null) parts.push([groundedRatio, 2])
+        if (avgCommTrust !== null) parts.push([avgCommTrust, 2])
+        const wSum = parts.reduce((s, [, w]) => s + w, 0)
+        const score = Math.round((parts.reduce((s, [v, w]) => s + Math.max(0, Math.min(1, v)) * w, 0) / wSum) * 100)
+
+        const gaps: string[] = []
+        if (orphanRatio > 0.1) gaps.push(`${orphans} orphan nodes (${Math.round(orphanRatio * 100)}%) — disconnected from any community`)
+        if (underConnected > 0) gaps.push(`${underConnected} important concept(s) under-connected — high importance, few links`)
+        if (groundedRatio === null) gaps.push('covariates not extracted yet — run /api/graph/covariates')
+        else if (groundedRatio < 0.8) gaps.push(`${covTotal - covGrounded} ungrounded claim(s) — extraction outran the evidence`)
+        if (avgCommTrust === null) gaps.push('community reports not built yet — run /api/graph/communities')
+        if (lowTrustCommunities.length) gaps.push(`${lowTrustCommunities.length} low-trust theme(s): ${lowTrustCommunities.slice(0, 3).join(', ')}`)
+
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          score,
+          structure: { nodes: analytics.summary.nodeCount, edges: analytics.summary.edgeCount, communities: analytics.summary.communityCount, modularity: Number(analytics.modularity.toFixed(2)), orphans, orphanRatio: Number(orphanRatio.toFixed(2)) },
+          trust: { groundedRatio: groundedRatio === null ? null : Number(groundedRatio.toFixed(2)), claimsVerified: covTotal, avgCommunityTrust: avgCommTrust === null ? null : Number(avgCommTrust.toFixed(2)) },
+          gaps,
+        }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })()
+    return
+  }
+
   // GET /api/graph/contradictions — find + adjudicate contradictions among verified covariates: claims
   // that can't both be true, surfaced as "contested" knowledge (the epistemic layer). ?refresh rebuilds.
   if (req.method === 'GET' && url.pathname === '/api/graph/contradictions') {
