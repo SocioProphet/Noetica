@@ -35,22 +35,24 @@ apt-get update -y && apt-get install -y python3-pip
 # CRITICAL: install into the SAME interpreter that runs the script (DLVM has conda+system python;
 # bare pip3 last time installed numpy to the wrong one → ModuleNotFoundError on every field).
 PY=\$(which python3)
-\$PY -m pip install -q nltk spacy gliner keybert numpy scikit-learn scipy \
-  || \$PY -m pip install --break-system-packages -q nltk spacy gliner keybert numpy scikit-learn scipy
-\$PY -c "import numpy, sklearn, gliner, nltk, spacy; print('DEPS OK on', __import__('sys').executable)" || { echo "FATAL: deps not importable by \$PY"; exit 1; }
+timeout 1200 \$PY -m pip install -q nltk spacy gliner keybert numpy scikit-learn scipy \
+  || timeout 1200 \$PY -m pip install --break-system-packages -q nltk spacy gliner keybert numpy scikit-learn scipy || { step "FATAL: pip install (timeout/fail)"; exit 1; }
+\$PY -c "import numpy, sklearn, gliner, nltk, spacy; print('DEPS OK on', __import__('sys').executable)" || { step "FATAL: deps not importable by \$PY"; exit 1; }
 \$PY -c "import nltk; [nltk.download(d,quiet=True) for d in ('punkt','punkt_tab','averaged_perceptron_tagger','averaged_perceptron_tagger_eng','wordnet')]"
-\$PY -m spacy download en_core_web_sm
+timeout 300 \$PY -m spacy download en_core_web_sm || step "WARN: spacy model dl failed (NLTK+GLiNER still work)"
 \$PY -c "import torch;print('CUDA:',torch.cuda.is_available())"
 
 step "pull code + brain"
-mkdir -p /opt/am/scripts && gsutil -m cp "\$GCS/code/agent-machine/scripts/concept_extract.py" "\$GCS/code/agent-machine/scripts/glossary_build.py" /opt/am/scripts/
-mkdir -p /opt/OCW && gsutil cp "\$GCS/brain-complete.tar.gz" /tmp/b.tgz && tar xzf /tmp/b.tgz -C /opt/OCW
+mkdir -p /opt/am/scripts && timeout 120 gsutil -m cp "\$GCS/code/agent-machine/scripts/concept_extract.py" "\$GCS/code/agent-machine/scripts/glossary_build.py" /opt/am/scripts/ || { step "FATAL: code pull"; exit 1; }
+mkdir -p /opt/OCW && timeout 900 gsutil cp "\$GCS/brain-complete.tar.gz" /tmp/b.tgz || { step "FATAL: brain pull"; exit 1; }
+tar xzf /tmp/b.tgz -C /opt/OCW || { step "FATAL: brain extract"; exit 1; }
+step "SETUP COMPLETE ✓ — extracting glossaries"
 
 step "extract glossaries (GPU GLiNER) — fields: $FIELDS"
 cd /opt/am
 for F in $FIELDS; do
   step "field \$F"
-  OCW_BRAIN=/opt/OCW/_brain python3 scripts/glossary_build.py \$F --per-course $PER_COURSE --top 250 || echo "FIELD \$F FAILED"
+  OCW_BRAIN=/opt/OCW/_brain \$PY scripts/glossary_build.py \$F --per-course $PER_COURSE --top 250 || step "FIELD \$F FAILED"
   gsutil cp /opt/OCW/_brain/\$F.glossary.json "\$GCS/glossary/\$F.glossary.json" 2>/dev/null || echo "no glossary for \$F"
 done
 
