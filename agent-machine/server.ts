@@ -5331,6 +5331,47 @@ const server = http.createServer((req, res) => {
     return
   }
 
+  // GET /api/graph/explain-path?from=&to= — investigation: the connection between two entities, with
+  // each hop's relationship, an epistemic-weighted confidence for the whole chain, and an LLM narration.
+  // Palantir/Linkurious find paths; we explain them + rate trust. Accepts labels or ids.
+  if (req.method === 'GET' && url.pathname === '/api/graph/explain-path') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const fromQ = (url.searchParams.get('from') || '').trim(), toQ = (url.searchParams.get('to') || '').trim()
+        if (!fromQ || !toQ) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'from_and_to_required' })); return }
+        const g = getGraph()
+        const keep = g.allNodes().filter((n) => cleanLabel(n) !== null && n.properties?.['hygiene_pruned'] !== true && !/corpus-test/i.test(String(n.id)))
+        const byId = new Map(keep.map((n) => [n.id, n]))
+        const lbl = (id: string) => { const n = byId.get(id); return n ? (cleanLabel(n) ?? '') : (id.split(':').pop() ?? id) }
+        const resolve = (q: string) => keep.find((n) => n.id === q) ?? keep.find((n) => (cleanLabel(n) ?? '').toLowerCase() === q.toLowerCase())
+        const from = resolve(fromQ), to = resolve(toQ)
+        if (!from || !to) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'entity_not_found' })); return }
+        // BFS tracking the edge used at each step.
+        const adj = new Map<string, Array<{ to: string; label: string }>>()
+        for (const e of g.allEdges()) { (adj.get(e.from) ?? adj.set(e.from, []).get(e.from)!).push({ to: e.to, label: e.label }); (adj.get(e.to) ?? adj.set(e.to, []).get(e.to)!).push({ to: e.from, label: e.label }) }
+        const prev = new Map<string, { node: string; label: string }>(); const seen = new Set([from.id]); const q = [from.id]; let found = from.id === to.id
+        while (q.length && !found) { const u = q.shift()!; for (const { to: v, label } of adj.get(u) ?? []) { if (!seen.has(v)) { seen.add(v); prev.set(v, { node: u, label }); if (v === to.id) { found = true; break } q.push(v) } } }
+        if (!found) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ from: lbl(from.id), to: lbl(to.id), connected: false, hops: [], confidence: 0, explanation: 'No connecting path in the graph.' })); return }
+        const { epistemicOf } = await import('./lib/graph-surface.js')
+        const hops: Array<{ from: string; rel: string; to: string; epistemic: string }> = []
+        let cur = to.id
+        while (cur !== from.id && prev.has(cur)) { const p = prev.get(cur)!; hops.unshift({ from: lbl(p.node), rel: p.label, to: lbl(cur), epistemic: epistemicOf(p.label) }); cur = p.node }
+        const W: Record<string, number> = { confirmed: 1, extracted: 0.85, inferred: 0.5, contested: 0.3 }
+        const confidence = hops.reduce((acc, h) => acc * (W[h.epistemic] ?? 0.7), 1)
+        const chain = hops.map((h) => `${h.from} —[${h.rel}]→ ${h.to}`).join('; ')
+        const model = await pickChatModel()
+        let explanation = chain
+        try { const { generateOllamaText } = await import('./lib/ollama.js'); explanation = (await generateOllamaText({ model, messages: [{ role: 'user', content: `Explain in 1-2 sentences how "${lbl(from.id)}" connects to "${lbl(to.id)}" through this chain: ${chain}. Be concrete and use ONLY the chain.` }], temperature: 0.3 })).content.trim() || chain } catch { /* keep chain */ }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ from: lbl(from.id), to: lbl(to.id), connected: true, length: hops.length, hops, confidence: Number(confidence.toFixed(2)), explanation }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })()
+    return
+  }
+
   // GET /api/graph/analytics — Graph Data Science over HellGraph: PageRank (importance), Louvain
   // (communities from topology), betweenness (bridge concepts). O(V·E), so cached by graph signature;
   // ?refresh=1 forces recompute. Top nodes resolved to readable labels for the human-facing summary.
