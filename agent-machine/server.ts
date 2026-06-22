@@ -5561,6 +5561,59 @@ Rules: MATCH ... RETURN ... with LIMIT 25. NO writes (no CREATE/MERGE/DELETE/SET
     return
   }
 
+  // GET /api/graph/recommend?entity= — guided exploration ("what to look at next"): fuse semantically
+  // similar + structurally similar + predicted links + important neighbours into one ranked list, each
+  // with a reason. Synthesizes the embedding/prediction/GDS layers into the next-best-action investigation
+  // platforms (Linkurious/Palantir) guide analysts with.
+  if (req.method === 'GET' && url.pathname === '/api/graph/recommend') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const qy = (url.searchParams.get('entity') || url.searchParams.get('id') || '').trim()
+        if (!qy) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'entity_required' })); return }
+        const k = Math.min(15, Math.max(1, Number(url.searchParams.get('k') ?? 8)))
+        const { analytics } = await analyticsForGraph(false)
+        const g = getGraph()
+        const keep = g.allNodes().filter((n) => cleanLabel(n) !== null && n.properties?.['hygiene_pruned'] !== true && !/corpus-test/i.test(String(n.id)))
+        const byId = new Map(keep.map((n) => [n.id, n]))
+        const lbl = (id: string) => { const n = byId.get(id); return n ? (cleanLabel(n) ?? '') : '' }
+        const target = keep.find((n) => n.id === qy) ?? keep.find((n) => (cleanLabel(n) ?? '').toLowerCase() === qy.toLowerCase())
+        if (!target) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'entity_not_found' })); return }
+        const keepIds = new Set(keep.map((n) => n.id))
+        const edges = g.allEdges().filter((e) => keepIds.has(e.from) && keepIds.has(e.to))
+        // existing neighbours (exclude from "discover" recs)
+        const neighbours = new Set<string>(); for (const e of edges) { if (e.from === target.id) neighbours.add(e.to); if (e.to === target.id) neighbours.add(e.from) }
+
+        const recs = new Map<string, { id: string; label: string; score: number; reasons: Set<string> }>()
+        const bump = (id: string, s: number, reason: string) => { if (id === target.id || !lbl(id)) return; const r = recs.get(id) ?? { id, label: lbl(id), score: 0, reasons: new Set<string>() }; r.score += s; r.reasons.add(reason); recs.set(id, r) }
+
+        // 1. semantic + 2. structural similarity
+        const { embedEntities, similarEntities } = await import('./lib/graph-embed.js')
+        const vectors = await embedEntities(keep.map((n) => ({ id: n.id, text: lbl(n.id) || (n.labels[0] ?? '') })))
+        for (const s of similarEntities(target.id, vectors, 6)) bump(s.id, s.sim, 'similar meaning')
+        const { structuralEmbeddings, structurallySimilar } = await import('./lib/graph-struct.js')
+        const semb = structuralEmbeddings(keep.map((n) => ({ id: n.id })), edges.map((e) => ({ from: e.from, to: e.to })), { walks: 10, length: 8, window: 2 })
+        for (const s of structurallySimilar(target.id, semb, 6)) bump(s.id, s.sim * 0.8, 'similar role')
+        // 3. predicted links from target
+        const { predictLinks } = await import('./lib/graph-predict.js')
+        for (const p of predictLinks(keep.map((n) => ({ id: n.id })), edges.map((e) => ({ from: e.from, to: e.to })), { topK: 40 })) {
+          if (p.source === target.id) bump(p.target, p.score * 0.9, 'likely connection')
+          else if (p.target === target.id) bump(p.source, p.score * 0.9, 'likely connection')
+        }
+        // 4. important neighbours (already-connected but high importance — worth revisiting)
+        for (const nb of neighbours) bump(nb, (analytics.nodes[nb]?.pagerank ?? 0) * 0.6, 'important neighbour')
+
+        const recommendations = [...recs.values()].sort((a, b) => b.score - a.score).slice(0, k)
+          .map((r) => ({ label: r.label, score: Number(r.score.toFixed(3)), reasons: [...r.reasons], connected: neighbours.has(r.id) }))
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ entity: lbl(target.id), recommendations }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })()
+    return
+  }
+
   // GET /api/graph/structural-similar?entity= — structurally similar nodes (similar TOPOLOGICAL role)
   // via DeepWalk-style random-walk embeddings. Distinct from /similar (semantic): two nodes can play the
   // same structural role with unrelated meanings, or be semantically close but structurally distant.
