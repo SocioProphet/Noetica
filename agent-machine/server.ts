@@ -5441,6 +5441,36 @@ const server = http.createServer((req, res) => {
     return
   }
 
+  // GET /api/graph/structural-similar?entity= — structurally similar nodes (similar TOPOLOGICAL role)
+  // via DeepWalk-style random-walk embeddings. Distinct from /similar (semantic): two nodes can play the
+  // same structural role with unrelated meanings, or be semantically close but structurally distant.
+  if (req.method === 'GET' && url.pathname === '/api/graph/structural-similar') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const q = (url.searchParams.get('entity') || url.searchParams.get('id') || '').trim()
+        if (!q) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'entity_required' })); return }
+        const k = Math.min(20, Math.max(1, Number(url.searchParams.get('k') ?? 8)))
+        const g = getGraph()
+        const keep = g.allNodes().filter((n) => cleanLabel(n) !== null && n.properties?.['hygiene_pruned'] !== true && !/corpus-test/i.test(String(n.id)))
+        const lbl = (n: typeof keep[number]) => cleanLabel(n) ?? ''
+        const target = keep.find((n) => n.id === q) ?? keep.find((n) => lbl(n).toLowerCase() === q.toLowerCase())
+        if (!target) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'entity_not_found' })); return }
+        const keepIds = new Set(keep.map((n) => n.id))
+        const edges = g.allEdges().filter((e) => keepIds.has(e.from) && keepIds.has(e.to)).map((e) => ({ from: e.from, to: e.to }))
+        const { structuralEmbeddings, structurallySimilar } = await import('./lib/graph-struct.js')
+        const emb = structuralEmbeddings(keep.map((n) => ({ id: n.id })), edges, { walks: 12, length: 8, window: 2 })
+        const byId = new Map(keep.map((n) => [n.id, n]))
+        const sims = structurallySimilar(target.id, emb, k).map((s) => ({ id: s.id, label: lbl(byId.get(s.id)!), sim: s.sim }))
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ entity: lbl(target), structurallySimilar: sims }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })()
+    return
+  }
+
   // GET /api/graph/retrieve?q= — FAST hybrid retrieval with ZERO LLM calls (Graphiti-class latency):
   // fuse lexical (keyword) + semantic (embedding) passages via reciprocal-rank fusion, plus graph
   // entities matching the query + their relationships. For when latency matters more than synthesis.
