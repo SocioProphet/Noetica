@@ -57,6 +57,7 @@ import { repairToolArgs } from './lib/tool-validate.js'
 import { containmentState, hydrateContainment, resolvePurpose, armKillSwitch, disarmKillSwitch, bindPurpose, PURPOSES } from './lib/agent-containment.js'
 import { retrieve } from './lib/retrieval.js'
 import { getGraph, graphHealth, graphSparql, ingestInteraction, ingestConversation, ingestMessage } from './lib/graph.js'
+import { handleCapabilityRoute } from './lib/capability-routes.js'
 import { isVoiceProvisioned, ensureVoiceSidecar, voiceFetch } from './lib/voice-runtime.js'
 import { runOcr } from './lib/ocr.js'
 import { getHellGraph, attachRocksDB } from '@socioprophet/hellgraph'
@@ -3703,6 +3704,9 @@ const server = http.createServer((req, res) => {
   }
 
   const url = new URL(req.url ?? '/', `http://localhost:${PORT}`)
+
+  // Capability API surface (wave-2/3 libs) — one mount for all /api/cap/* routes.
+  if (url.pathname.startsWith('/api/cap/')) { void handleCapabilityRoute(req, res, url); return }
 
   // GET /api/security/state — bearbrowser polls this to auto-enable Tor when armed.
   if (req.method === 'GET' && url.pathname === '/api/security/state') {
