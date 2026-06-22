@@ -1,0 +1,47 @@
+{
+  "app-id": "ai.noetica.app",
+  "runtime": "org.freedesktop.Platform",
+  "runtime-version": "23.08",
+  "sdk": "org.freedesktop.Sdk",
+  "sdk-extensions": [
+    "org.freedesktop.Sdk.Extension.node20"
+  ],
+  "command": "noetica-server",
+  "finish-args": [
+    "--share=network",
+    "--filesystem=home",
+    "--persist=.config/noetica",
+    "--persist=.noetica",
+    "--env=PORT=8080",
+    "--env=HOST=127.0.0.1",
+    "--env=NODE_ENV=production"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/node20/bin",
+    "env": {
+      "NPM_CONFIG_OFFLINE": "true",
+      "NPM_CONFIG_PREFER_OFFLINE": "true"
+    }
+  },
+  "modules": [
+    {
+      "name": "noetica",
+      "buildsystem": "simple",
+      "build-commands": [
+        "npm install --production --no-audit --no-fund 2>/dev/null || true",
+        "install -d /app/lib/noetica",
+        "cp -r . /app/lib/noetica/",
+        "for entry in app/server.js server.js src/server.js index.js; do [ -f /app/lib/noetica/$entry ] && { echo '#!/bin/sh'; echo \"exec /usr/lib/sdk/node20/bin/node /app/lib/noetica/$entry \\\"\\$@\\\"\"; } > /app/bin/noetica-server && chmod 755 /app/bin/noetica-server && break || true; done",
+        "[ -f packaging/linux/ai.noetica.app.desktop ] && install -Dm644 packaging/linux/ai.noetica.app.desktop /app/share/applications/ || true",
+        "[ -f packaging/linux/ai.noetica.app.metainfo.xml ] && install -Dm644 packaging/linux/ai.noetica.app.metainfo.xml /app/share/metainfo/ || true"
+      ],
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://github.com/SocioProphet/Noetica.git",
+          "branch": "main"
+        }
+      ]
+    }
+  ]
+}
