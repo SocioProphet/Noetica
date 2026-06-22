@@ -5441,6 +5441,43 @@ const server = http.createServer((req, res) => {
     return
   }
 
+  // GET /api/graph/retrieve?q= — FAST hybrid retrieval with ZERO LLM calls (Graphiti-class latency):
+  // fuse lexical (keyword) + semantic (embedding) passages via reciprocal-rank fusion, plus graph
+  // entities matching the query + their relationships. For when latency matters more than synthesis.
+  if (req.method === 'GET' && url.pathname === '/api/graph/retrieve') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const q = (url.searchParams.get('q') || '').trim()
+        if (!q) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'q_required' })); return }
+        const k = Math.min(20, Math.max(1, Number(url.searchParams.get('k') ?? 8)))
+        const t0 = Date.now()
+        const { lexicalSearch, semanticSearch } = await import('./lib/doc-store.js')
+        const lex = lexicalSearch(q, 12)
+        const sem = await semanticSearch(q, 12).catch(() => [] as typeof lex)
+        // Reciprocal-rank fusion of the two rankings.
+        const fused = new Map<string, { text: string; filename: string; rrf: number; sources: Set<string> }>()
+        const add = (hits: typeof lex, src: string) => hits.forEach((h, i) => { const key = `${h.docId}#${h.text.slice(0, 48)}`; const e = fused.get(key) ?? { text: h.text, filename: h.filename, rrf: 0, sources: new Set<string>() }; e.rrf += 1 / (60 + i); e.sources.add(src); fused.set(key, e) })
+        add(lex, 'lexical'); add(sem, 'semantic')
+        const passages = [...fused.values()].sort((a, b) => b.rrf - a.rrf).slice(0, k).map((p) => ({ text: p.text.slice(0, 400), filename: p.filename, score: Number(p.rrf.toFixed(4)), sources: [...p.sources] }))
+        // Graph traversal: entities whose label matches the query + their relationships.
+        const qt = [...new Set(q.toLowerCase().split(/\W+/).filter((w) => w.length > 2))]
+        const g = getGraph()
+        const keep = g.allNodes().filter((n) => cleanLabel(n) !== null && n.properties?.['hygiene_pruned'] !== true && !/corpus-test/i.test(String(n.id)))
+        const lbl = (id: string) => { const n = keep.find((x) => x.id === id); return n ? (cleanLabel(n) ?? '') : '' }
+        const matched = keep.filter((n) => { const l = (cleanLabel(n) ?? '').toLowerCase(); return l && qt.some((t) => l.includes(t)) }).slice(0, 8)
+        const mIds = new Set(matched.map((n) => n.id))
+        const rels = [...new Set(g.allEdges().filter((e) => mIds.has(e.from) || mIds.has(e.to))
+          .map((e) => { const a = lbl(e.from), b = lbl(e.to); return a && b ? `${a} —${e.label}— ${b}` : '' }).filter(Boolean))].slice(0, 12)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ passages, entities: matched.map((n) => cleanLabel(n)), relationships: rels, latencyMs: Date.now() - t0, llmCalls: 0 }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })()
+    return
+  }
+
   // GET /api/graph/resolve — entity resolution: ranked merge candidates (entities that refer to the
   // same real-world thing) by fusing edit similarity + entity-embedding cosine + substring checks.
   // Proposals, not silent merges. ?min=<0..1> confidence floor.
