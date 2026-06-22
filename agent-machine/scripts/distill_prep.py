@@ -74,11 +74,21 @@ def gen_mcq(chunk):
     return {'question': q, 'answer': ans}
 
 
-def answer_cot(question):
-    raw = chat(STUDENT, question + "\n\nReason step by step in a few sentences, then end with a single "
-               "line 'FINAL: X' (X = A, B, C, or D).", temperature=0.0)
+def raft_context(golden, distractors):
+    """RAFT (UC Berkeley): mix the GOLDEN passage with DISTRACTORS so the model learns to ignore
+    noise and reason only with the relevant context — the fix for 'retrieval hurts' baked into data."""
+    import random
+    docs = [golden] + distractors
+    random.Random(hash(golden) & 0xffff).shuffle(docs)
+    return '\n\n'.join(f"[{i+1}] {d[:500]}" for i, d in enumerate(docs))
+
+
+def answer_cot(question, context=''):
+    ctx = f"Context (some passages are relevant, some are distractors — use only what helps):\n{context}\n\n" if context else ''
+    raw = chat(STUDENT, ctx + question + "\n\nReason step by step in a few sentences (cite the relevant "
+               "context), then end with a single line 'FINAL: X' (X = A, B, C, or D).", temperature=0.0)
     m = re.findall(r'FINAL:\s*([A-D])', raw, re.I)
-    return raw.strip(), (m[-1].upper() if m else '')
+    return raw.strip(), (m[-1].upper() if m else ''), ctx
 
 
 def main():
@@ -87,19 +97,23 @@ def main():
     print(f"# distill_prep · field={FIELD} · {len(chunks)} chunks · teacher={TEACHER} student={STUDENT}")
     gen = kept = 0
     t0 = time.time()
+    import random
+    rng = random.Random(1729)
     with open(OUT, 'w') as out:
         for i, ch in enumerate(chunks):
             mcq = gen_mcq(ch)
             if not mcq:
                 continue
             gen += 1
-            reasoning, pred = answer_cot(mcq['question'])
+            distractors = rng.sample([c for c in chunks if c is not ch], min(2, max(0, len(chunks) - 1)))
+            ctx_docs = raft_context(ch, distractors)                       # RAFT: golden + distractors
+            reasoning, pred, ctx = answer_cot(mcq['question'], ctx_docs)
             if pred and pred == mcq['answer']:          # rejection sampling: keep only CORRECT trajectories
                 kept += 1
                 out.write(json.dumps({'messages': [
-                    {'role': 'user', 'content': mcq['question'] + "\n\nReason step by step, then 'FINAL: X'."},
+                    {'role': 'user', 'content': ctx + mcq['question'] + "\n\nReason step by step (cite the relevant context), then 'FINAL: X'."},
                     {'role': 'assistant', 'content': reasoning if 'FINAL:' in reasoning else reasoning + f"\nFINAL: {pred}"},
-                ], 'field': FIELD, 'gold': mcq['answer']}) + '\n')
+                ], 'field': FIELD, 'gold': mcq['answer'], 'raft': True}) + '\n')
             if (i + 1) % 10 == 0:
                 sys.stderr.write(f"  {i+1}/{len(chunks)} · generated {gen} · kept {kept} ({time.time()-t0:.0f}s)\n")
     yld = 100 * kept / gen if gen else 0

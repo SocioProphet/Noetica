@@ -50,3 +50,19 @@ implement → measure → **repeat**. Each pass adds rows here, ships the top on
 
 ## Loop cadence
 After each implement+measure pass: append new gaps, re-rank, re-survey for what the field shipped since. Keep `[[project_mmlu_championship]]` memory + this file in sync.
+
+## Fresh deepdive (iter 5 — "stop using memory") — NEW, beyond prior backlog
+
+| P | Gap (genuinely new) | Lab/paper | Status |
+|---|---|---|---|
+| **0** | **RAFT** — fine-tune on golden+DISTRACTOR docs so the model learns to use retrieval / ignore noise (our #1 failure, in weights) | UC Berkeley 2403.10131 | ✅ wired into `distill_prep` (RAFT context); fine-tune = GPU step |
+| **0** | **Qwen3-Embedding-8B** swap (we ran outdated `nomic`!) — broad retrieval lift, ~free | Alibaba (70.58 MTEB) | env-ready (`NOETICA_EMBED_MODEL`); **re-embed = GPU job, queue** |
+| 1 | **Qwen3-Reranker** (open cross-encoder) | Alibaba 2601.04720 | queue (rerank step on hybrid candidates) |
+| 1 | **Search-R1 / R1-Searcher** — RL-train the model to interleave reason+search (token-masked) | 2503.09516 | research (RL) |
+| 2 | **HippoRAG2** — proven upgrade to our lite HippoRAG (passage integration, seed/reset tuning) | Gutiérrez 2025 | upgrade hippo_graph |
+| 2 | **ReasoningBank** — agent accumulates reasoning memory + self-evolves | 2509.25140 | connects to our evidence-fabric (revive) |
+| 3 | **Coconut** — latent (continuous-thought) reasoning, BFS over paths, fewer tokens | Meta 2412.06769 | research |
+| 3 | **LightRAG / KAG / LinearRAG** — lighter/linear graph-RAG alternatives | EMNLP'25 / 2409.13731 | eval vs our graph |
+| 3 | **EAGLE-3 speculative decoding** — 1.4× faster inference (our cost/speed pain) | 2026 | infra |
+
+**Deepdive takeaway:** the field's real leverage moved to (1) a CURRENT embedder+reranker (we're on an old one — cheapest fix), (2) TRAINING the model to use RAG (RAFT) rather than coaxing it at inference. Both now actioned (RAFT wired; embedder one re-embed away).
