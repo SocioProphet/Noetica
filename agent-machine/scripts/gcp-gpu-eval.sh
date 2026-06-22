@@ -82,9 +82,10 @@ Z=\$(curl -s -H "Metadata-Flavor: Google" http://metadata/computeMetadata/v1/ins
 gcloud compute instances delete "\$N" --zone="\$Z" --quiet
 STARTUP
 
-echo "# creating $VM ($MACHINE · L4 GPU) — champion eval on $MODEL, HARD SHUTDOWN at $TERM_TIME"
+ACCELFLAG=""; [ -n "${ACCEL:-}" ] && ACCELFLAG="--accelerator=type=$ACCEL,count=1"   # T4 fallback when L4 is stocked out (qwen2.5:7b fits a 16GB T4)
+echo "# creating $VM ($MACHINE ${ACCEL:-L4} GPU) — champion eval on $MODEL, HARD SHUTDOWN at $TERM_TIME"
 gcloud compute instances create "$VM" --project="$PROJECT" --zone="$ZONE" \
-  --machine-type="$MACHINE" --maintenance-policy=TERMINATE \
+  --machine-type="$MACHINE" --maintenance-policy=TERMINATE $ACCELFLAG \
   --image-family=common-cu129-ubuntu-2204-nvidia-580 --image-project=deeplearning-platform-release \
   --metadata="install-nvidia-driver=True" --metadata-from-file startup-script=/tmp/gpu-eval-startup.sh \
   --boot-disk-size=120GB --service-account="$SA" --scopes=cloud-platform \
