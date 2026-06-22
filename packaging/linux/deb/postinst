@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-INSTALL_DIR=/usr/share/noetica
+INSTALL_DIR=/usr/lib/noetica
 CONFIG_DIR=/etc/noetica
 LOG_DIR=/var/log/noetica
 
@@ -11,43 +11,34 @@ case "$1" in
     mkdir -p "$CONFIG_DIR" "$LOG_DIR"
     chown -R noetica:noetica "$LOG_DIR" 2>/dev/null || true
 
-    # Create config
+    # Create config (agent-machine backend)
     cat > "$CONFIG_DIR/config.json" << 'EOF'
 {
-  "port": 8080,
-  "host": "127.0.0.1",
+  "NOETICA_AM_PORT": 8080,
+  "OLLAMA_HOST": "http://127.0.0.1:11434",
   "platform": "linux",
   "service": true
 }
 EOF
 
-    # Install npm dependencies if available
-    if command -v npm >/dev/null 2>&1 && [ -f "$INSTALL_DIR/package.json" ]; then
-      cd "$INSTALL_DIR"
-      npm install --production --silent 2>/dev/null || true
-    fi
-
-    # Set up systemd service
+    # Set up systemd service (agent-machine backend via launcher)
     if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
       cat > /etc/systemd/system/noetica.service << UNIT
 [Unit]
-Description=Noetica AI Dialogue Backend
+Description=Noetica agent-machine — AI dialogue backend (:8080)
+Documentation=https://github.com/SocioProphet/Noetica
 After=network.target
 Wants=network.target
 
 [Service]
 Type=simple
-User=$SUDO_USER
-WorkingDirectory=$INSTALL_DIR
-ExecStart=/usr/bin/node $INSTALL_DIR/server.js
+ExecStart=$INSTALL_DIR/noetica-launch
 Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-Environment=PORT=8080
-Environment=HOST=127.0.0.1
-Environment=NODE_ENV=production
-Environment=NOETICA_CONFIG=$CONFIG_DIR/config.json
+Environment=NOETICA_AM_PORT=8080
+Environment=OLLAMA_HOST=http://127.0.0.1:11434
 
 [Install]
 WantedBy=multi-user.target
@@ -70,9 +61,12 @@ UNIT
       fi
     done
 
-    echo "Noetica v0.4.11 installed."
+    echo "Noetica v0.4.11 (agent-machine backend) installed."
     echo "  Config : $CONFIG_DIR/config.json"
-    echo "  API    : http://localhost:8080/health"
+    echo "  Port   : NOETICA_AM_PORT=8080  ->  http://localhost:8080/health"
+    echo ""
+    echo "  Requires a running Ollama instance (OLLAMA_HOST, default"
+    echo "  http://127.0.0.1:11434). Start it with:  ollama serve"
     echo ""
     echo "  TurtleTerm co-pilot integration:"
     echo "    turtle-copilot use noetica"
