@@ -187,6 +187,25 @@ async function ask(prompt: string): Promise<string> {
     return (m?.content || m?.reasoning_content || '').trim()
   } catch { return '' }
 }
+
+// "Plug in each answer" — what a good student does. Instead of "pick one of four" (which a weak
+// model answers with a positional A-bias), verify EACH choice independently against its own
+// targeted evidence, then take the best-supported. Per-option scoring sidesteps the bias and forces
+// the model to evaluate each option on its merits.
+async function verifyArm(question: string, choices: string[], pools: Chunk[][]): Promise<{ letter: string; scores: number[] }> {
+  const scores: number[] = []
+  for (let i = 0; i < choices.length; i++) {
+    const ctx = (await retrieveMulti(question, [choices[i]!], pools, PER_SHOT, 4)).map((h, n) => `[${n + 1}] ${h.text.slice(0, 400)}`).join('\n\n')
+    const prompt = `Relevant MIT course notes (use only what helps):\n${ctx}\n\nQuestion: ${question}\nProposed answer: "${choices[i]}"\n\nUsing the notes and sound reasoning, is the proposed answer the CORRECT answer to the question? Reply on ONE line exactly: "VERDICT: YES conf 0.NN" or "VERDICT: NO conf 0.NN".`
+    const raw = await ask(prompt)
+    const m = /VERDICT:\s*(YES|NO)\D*([01](?:\.\d+)?)?/i.exec(raw)
+    const yes = m ? /yes/i.test(m[1]!) : /\byes\b/i.test(raw)
+    const conf = m && m[2] != null ? Math.min(1, Math.max(0, Number(m[2]))) : 0.5
+    scores[i] = yes ? conf : -conf   // best-supported wins; an explicit NO pushes it negative
+  }
+  let best = 0; for (let i = 1; i < scores.length; i++) if (scores[i]! > scores[best]!) best = i
+  return { letter: LETTERS[best]!, scores }
+}
 function extractLetter(raw: string): string {
   const t = raw.trim()
   // 1. explicit FINAL: directive (strongest) — tolerate **bold**, parens, spacing
@@ -283,6 +302,10 @@ async function main() {
           if (ci?.answer) { letter = ci.answer; mode = ci.mode } else { letter = await askBrain(); mode = 'retrieve' }
         } else if (arm === 'brain') {
           letter = await askBrain()
+        } else if (arm === 'verify') {            // plug EACH choice in, verify vs its evidence, pick best
+          const v = await verifyArm(q.question, q.choices, pools)
+          letter = v.letter; mode = 'verify'
+          row['verify_scores'] = v.scores.map((s) => Number(s.toFixed(2)))
         } else {                                  // baseline (closed book)
           letter = extractLetter(await ask(`${base}${ANSWER_RULE}`))
         }
