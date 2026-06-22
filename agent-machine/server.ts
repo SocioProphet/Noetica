@@ -4085,6 +4085,11 @@ const server = http.createServer((req, res) => {
         // NL → structured intent (executed IN-MEMORY — robust to the external cypher engine being down).
         const prompt = `Classify this question into a graph query. STRICT JSON only:
 {"op":"top_connected"|"neighbors"|"search"|"count","target":"<an entity or search term, or empty>","limit":<1-25, default 10>}
+op meanings:
+- neighbors: the question names a SPECIFIC entity and asks what it connects/links/relates to (set target to that entity)
+- top_connected: the most-connected concepts overall (no specific entity)
+- search: find entities matching a term (set target to the term)
+- count: how many
 Known entities: ${sampleNames.join(', ')}
 Question: ${question}`
         let intent: { op?: string; target?: string; limit?: number } = {}
