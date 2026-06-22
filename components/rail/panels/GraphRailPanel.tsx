@@ -49,7 +49,7 @@ export function GraphRailPanel() {
   const [digestDismissed, setDigestDismissed] = useState(false)
   const [recs, setRecs] = useState<Array<{ id: string; label: string; reasons: string[]; connected: boolean }>>([])
   // unsurfaced-capability state: NL→Cypher, alerts (anomalies+contradictions), entity resolution, inference, impact
-  const [nlResult, setNlResult] = useState<{ cypher: string; executed?: boolean; error?: string; results?: unknown } | null>(null)
+  const [nlResult, setNlResult] = useState<{ cypher: string; executed?: boolean; error?: string; op?: string; count?: number; rows?: Array<Record<string, unknown>> } | null>(null)
   const [nlLoading, setNlLoading] = useState(false)
   const [showTools, setShowTools] = useState(false)
   const [anomalies, setAnomalies] = useState<Array<{ label: string; kind: string; detail: string }>>([])
@@ -405,8 +405,16 @@ export function GraphRailPanel() {
               {nlResult && (
                 <div className="mt-1.5 rounded-lg border border-[var(--color-border-secondary)] bg-[var(--color-background-primary)] px-2.5 py-1.5">
                   <code className="block whitespace-pre-wrap break-words font-mono text-[9px] text-[#0891b2]">{nlResult.cypher || '(no query)'}</code>
-                  {nlResult.error ? <span className="text-[9px] text-[#f59e0b]">{nlResult.error}</span>
-                    : <span className="text-[9px] text-[var(--color-text-tertiary)]">{Array.isArray((nlResult.results as { rows?: unknown[] })?.rows) ? `${((nlResult.results as { rows: unknown[] }).rows).length} rows` : (nlResult.executed ? 'executed' : '')}</span>}
+                  {nlResult.error ? <span className="text-[9px] text-[#f59e0b]">{nlResult.error}</span> : (
+                    <>
+                      <span className="text-[9px] text-[var(--color-text-tertiary)]">{nlResult.count ?? 0} result{nlResult.count === 1 ? '' : 's'}</span>
+                      <ul className="mt-0.5 max-h-28 space-y-px overflow-y-auto">
+                        {(nlResult.rows ?? []).slice(0, 12).map((r, i) => (
+                          <li key={i} className="truncate text-[9px] text-[var(--color-text-secondary)]">{Object.values(r).map((v) => String(v)).join(' · ')}</li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
                 </div>
               )}
             </div>

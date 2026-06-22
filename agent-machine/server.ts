@@ -4073,30 +4073,43 @@ const server = http.createServer((req, res) => {
         const question = String((JSON.parse(body || '{}') as { question?: string }).question ?? '').trim()
         if (!question) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'question_required' })); return }
         const g = getGraph()
-        const kinds = [...new Set(g.allNodes().map((n) => String(n.properties?.['kind'] ?? n.labels[0] ?? '')).filter(Boolean))].slice(0, 16)
-        const edgeLabels = [...new Set(g.allEdges().map((e) => e.label))].filter(Boolean).slice(0, 16)
-        const sampleNames = [...new Set(g.allNodes().map((n) => cleanLabel(n)).filter(Boolean))].slice(0, 12)
+        const keep = g.allNodes().filter((n) => cleanLabel(n) !== null && n.properties?.['hygiene_pruned'] !== true && !/corpus-test/i.test(String(n.id)))
+        const byId = new Map(keep.map((n) => [n.id, n]))
+        const lbl = (id: string) => { const n = byId.get(id); return n ? (cleanLabel(n) ?? '') : '' }
+        const keepIds = new Set(keep.map((n) => n.id))
+        const edges = g.allEdges().filter((e) => keepIds.has(e.from) && keepIds.has(e.to))
+        const deg = new Map<string, number>(); for (const e of edges) { deg.set(e.from, (deg.get(e.from) ?? 0) + 1); deg.set(e.to, (deg.get(e.to) ?? 0) + 1) }
+        const sampleNames = [...keep].sort((a, b) => (deg.get(b.id) ?? 0) - (deg.get(a.id) ?? 0)).slice(0, 14).map((n) => cleanLabel(n)).filter(Boolean)
         const model = await pickChatModel()
         const { generateOllamaText } = await import('./lib/ollama.js')
-        const prompt = `Translate the question into a single READ-ONLY Cypher query for a knowledge graph.
-Node labels (kinds): ${kinds.join(', ')}
-Relationship types: ${edgeLabels.join(', ')}
-Example node names: ${sampleNames.join(', ')}
-Node display label is the first label or a 'name'/'title' property.
-
-Question: ${question}
-
-Rules: MATCH ... RETURN ... with LIMIT 25. NO writes (no CREATE/MERGE/DELETE/SET/REMOVE). Return ONLY the Cypher, no prose, no markdown fences.`
-        let cypher = ''
-        try { cypher = (await generateOllamaText({ model, messages: [{ role: 'user', content: prompt }], temperature: 0.1, numCtx: 4096 })).content.trim() } catch { cypher = '' }
-        cypher = cypher.replace(/```(?:cypher)?/gi, '').replace(/^cypher\s*/i, '').trim()
-        if (!cypher) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ question, cypher: '', error: 'no_query_generated' })); return }
-        if (/\b(CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|CALL\s+db\.)\b/i.test(cypher)) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ question, cypher, error: 'rejected_non_read_query', executed: false })); return }
-        try {
-          const upstream = await fetch('http://127.0.0.1:8137/cypher', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: cypher }), signal: AbortSignal.timeout(8_000) })
-          const results = await upstream.json()
-          res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ question, cypher, executed: upstream.ok, results }))
-        } catch { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ question, cypher, executed: false, error: 'execution_failed' })) }
+        // NL → structured intent (executed IN-MEMORY — robust to the external cypher engine being down).
+        const prompt = `Classify this question into a graph query. STRICT JSON only:
+{"op":"top_connected"|"neighbors"|"search"|"count","target":"<an entity or search term, or empty>","limit":<1-25, default 10>}
+Known entities: ${sampleNames.join(', ')}
+Question: ${question}`
+        let intent: { op?: string; target?: string; limit?: number } = {}
+        try { const c = (await generateOllamaText({ model, messages: [{ role: 'user', content: prompt }], temperature: 0.1, numCtx: 4096 })).content; const m = c.match(/\{[\s\S]*\}/); if (m) intent = JSON.parse(m[0]) }
+        catch { /* fall back to top_connected below */ }
+        const op = ['top_connected', 'neighbors', 'search', 'count'].includes(String(intent.op)) ? String(intent.op) : 'top_connected'
+        const limit = Math.min(25, Math.max(1, Number(intent.limit) || 10))
+        const target = String(intent.target ?? '').trim()
+        const findNode = (t: string) => keep.find((n) => n.id === t) ?? keep.find((n) => (cleanLabel(n) ?? '').toLowerCase() === t.toLowerCase()) ?? keep.find((n) => (cleanLabel(n) ?? '').toLowerCase().includes(t.toLowerCase()))
+        let rows: unknown[] = []; let cypher = ''
+        if (op === 'count') { rows = [{ count: keep.length }]; cypher = 'MATCH (n) RETURN count(n)' }
+        else if (op === 'neighbors') {
+          const tn = target ? findNode(target) : null
+          if (tn) rows = [...new Set(edges.filter((e) => e.from === tn.id || e.to === tn.id).map((e) => JSON.stringify({ entity: lbl(e.from === tn.id ? e.to : e.from), relation: e.label })))].slice(0, limit).map((s) => JSON.parse(s) as object)
+          cypher = `MATCH (n {name:"${target}"})-[r]-(m) RETURN m.name, type(r) LIMIT ${limit}`
+        } else if (op === 'search') {
+          const t = target.toLowerCase()
+          rows = keep.filter((n) => (cleanLabel(n) ?? '').toLowerCase().includes(t)).slice(0, limit).map((n) => ({ entity: cleanLabel(n), kind: String(n.properties?.['kind'] ?? n.labels[0] ?? '') }))
+          cypher = `MATCH (n) WHERE n.name CONTAINS "${target}" RETURN n.name LIMIT ${limit}`
+        } else {
+          rows = [...keep].sort((a, b) => (deg.get(b.id) ?? 0) - (deg.get(a.id) ?? 0)).slice(0, limit).map((n) => ({ entity: cleanLabel(n), connections: deg.get(n.id) ?? 0 }))
+          cypher = `MATCH (n) RETURN n.name, size((n)--()) AS connections ORDER BY connections DESC LIMIT ${limit}`
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ question, op, cypher, rows, count: rows.length, executed: true }))
       } catch (e) {
         res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
       }
