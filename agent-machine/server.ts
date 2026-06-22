@@ -6763,7 +6763,7 @@ Question: ${question}`
     let body = ''
     req.on('data', (c: Buffer) => { body += c.toString() })
     req.on('end', () => { void (async () => {
-      let p: { audio_b64?: string } = {}
+      let p: { audio_b64?: string; language?: string } = {}
       try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
       const b64 = String(p.audio_b64 ?? '').split(',').pop() ?? ''
       if (!b64) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'no_audio' })); return }
@@ -6771,7 +6771,7 @@ Question: ${question}`
       const tmp = path.join(os.tmpdir(), `noetica-stt-${crypto.randomUUID()}.webm`)
       try { fs.writeFileSync(tmp, Buffer.from(b64, 'base64'), { mode: 0o600 }) } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'write_failed' })); return }
       const { transcribe } = await import('./lib/stt.js')
-      const r = await transcribe(tmp)
+      const r = await transcribe(tmp, String(p.language ?? 'en'))
       try { fs.unlinkSync(tmp) } catch { /* */ }
       res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(r))
     })() })
