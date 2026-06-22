@@ -5562,9 +5562,19 @@ const server = http.createServer((req, res) => {
           cached = { sig, model, level: 'coarse', reports, builtAt: new Date().toISOString() }; saveCommunitiesCache(cached)
         }
         const { globalSearch } = await import('./lib/graph-rag.js')
-        const result = await globalSearch(question, cached.reports, { model, maxCommunities: 6 })
+        // Embed the reports + question for SEMANTIC relevance (GraphRAG "embed reports") — beats token
+        // overlap at matching a question to the right communities. Degrades to token overlap if cold.
+        let relevanceOf: ((r: import('./lib/graph-rag.js').CommunityReport) => number) | undefined
+        try {
+          const { embedBatchLocal } = await import('./lib/embed-runtime.js')
+          const { cosineSim } = await import('./lib/graph-search.js')
+          const reps = cached.reports
+          const vecs = await embedBatchLocal([question, ...reps.map((r) => `${r.title}. ${r.summary}`)])
+          if (vecs && vecs[0]) { const qv = vecs[0]; const rmap = new Map(reps.map((r, i) => [r.id, vecs[i + 1] ? cosineSim(qv, vecs[i + 1]!) : 0])); relevanceOf = (r) => rmap.get(r.id) ?? 0 }
+        } catch { /* embedder optional → token overlap */ }
+        const result = await globalSearch(question, cached.reports, { model, maxCommunities: 6, ...(relevanceOf ? { relevanceOf } : {}) })
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ ...result, model }))
+        res.end(JSON.stringify({ ...result, model, retrieval: relevanceOf ? 'semantic' : 'lexical' }))
       } catch (e) {
         res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
       }

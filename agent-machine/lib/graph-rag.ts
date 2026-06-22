@@ -121,13 +121,15 @@ Base the summary and claims ONLY on the concepts and evidence above. Do not inve
 }
 
 /** Global sensemaking: map a question over relevant community reports, reduce to one grounded answer. */
-export async function globalSearch(question: string, reports: CommunityReport[], opts: { model: string; maxCommunities?: number; local?: boolean }): Promise<GlobalAnswer> {
+export async function globalSearch(question: string, reports: CommunityReport[], opts: { model: string; maxCommunities?: number; local?: boolean; relevanceOf?: (r: CommunityReport) => number }): Promise<GlobalAnswer> {
   const qTok = tokens(question)
-  const relevance = (r: CommunityReport): number => {
+  // Report relevance: a caller can pass an embedding-based scorer (semantic, GraphRAG's "embed reports");
+  // otherwise fall back to token overlap.
+  const relevance = opts.relevanceOf ?? ((r: CommunityReport): number => {
     const rTok = tokens(`${r.title} ${r.summary} ${r.claims.map((c) => c.text).join(' ')} ${r.topNodes.join(' ')}`)
     let overlap = 0; for (const t of qTok) if (rTok.has(t)) overlap++
     return qTok.size ? overlap / qTok.size : 0
-  }
+  })
   const scored = reports.map((r) => ({ r, rel: relevance(r) })).sort((a, b) => b.rel - a.rel)
   const relevant = scored.filter((s) => s.rel > 0).slice(0, opts.maxCommunities ?? 6)
   if (relevant.length === 0) relevant.push(...scored.slice(0, 3))   // nothing matched → broadest communities
