@@ -49,6 +49,10 @@ export function GraphRailPanel() {
   const [globalLoading, setGlobalLoading] = useState(false)
   const [predictions, setPredictions] = useState<Array<{ source: string; target: string; sourceLabel: string; targetLabel: string; score: number; commonNeighbors: number; verified?: boolean; relation?: string; confidence?: number; rationale?: string }>>([])
   const [predLoading, setPredLoading] = useState(false)
+  const [showTimeline, setShowTimeline] = useState(false)
+  const [timeline, setTimeline] = useState<{ from: number; to: number; total: number; buckets: Array<{ start: number; end: number; newNodes: number; cumulative: number; newConcepts: string[] }> } | null>(null)
+  const [tlLoading, setTlLoading] = useState(false)
+  const [tlSel, setTlSel] = useState<number | null>(null)
 
   async function loadThemes() {
     setThemesLoading(true)
@@ -72,6 +76,13 @@ export function GraphRailPanel() {
       const res = await fetch('/api/graph/predictions?verify=1&topK=10')
       if (res.ok) { const j = await res.json() as { predictions?: typeof predictions }; setPredictions(j.predictions ?? []) }
     } catch { /* offline */ } finally { setPredLoading(false) }
+  }
+  async function loadTimeline() {
+    setTlLoading(true)
+    try {
+      const res = await fetch('/api/graph/timeline?buckets=14')
+      if (res.ok) setTimeline(await res.json() as NonNullable<typeof timeline>)
+    } catch { /* offline */ } finally { setTlLoading(false) }
   }
 
   async function handleNodeClick(id: string) {
@@ -288,7 +299,47 @@ export function GraphRailPanel() {
             className={`ml-auto rounded-full border px-2 py-0.5 transition ${showThemes ? 'border-[#7c3aed] text-[#7c3aed]' : 'border-[var(--color-border-secondary)] text-[var(--color-text-tertiary)]'}`}>
             🧭 themes
           </button>
+          <button onClick={() => { setShowTimeline((v) => !v); if (!showTimeline && !timeline) void loadTimeline() }} title="How your knowledge grew over time"
+            className={`rounded-full border px-2 py-0.5 transition ${showTimeline ? 'border-[#0891b2] text-[#0891b2]' : 'border-[var(--color-border-secondary)] text-[var(--color-text-tertiary)]'}`}>
+            📈 timeline
+          </button>
         </div>
+        {showTimeline && (
+          <div className="mt-1.5 rounded-lg border border-[var(--color-border-secondary)] bg-[var(--color-background-secondary)] px-2.5 py-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[9px] uppercase tracking-wide text-[var(--color-text-tertiary)]">knowledge over time {timeline ? `(${timeline.total})` : ''}</span>
+              <button onClick={() => void loadTimeline()} disabled={tlLoading} className="text-[9px] text-[#0891b2] disabled:opacity-50">{tlLoading ? 'loading…' : 'refresh'}</button>
+            </div>
+            {!timeline && !tlLoading && <p className="mt-1 text-[10px] text-[var(--color-text-tertiary)]">No timeline yet — load the knowledge-growth curve.</p>}
+            {timeline && timeline.buckets.length > 0 && (() => {
+              const max = Math.max(...timeline.buckets.map((b) => b.cumulative), 1)
+              const fmt = (ms: number) => new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+              const sel = tlSel != null ? timeline.buckets[tlSel] : null
+              return (
+                <>
+                  {/* cumulative growth — bar height ∝ total concepts known by then; click a period to inspect */}
+                  <div className="mt-2 flex h-16 items-end gap-0.5">
+                    {timeline.buckets.map((b, i) => (
+                      <button key={i} onClick={() => setTlSel(i === tlSel ? null : i)} title={`${fmt(b.start)} · +${b.newNodes} (cum ${b.cumulative})`}
+                        className="flex-1 rounded-t transition hover:opacity-80"
+                        style={{ height: `${Math.max(3, (b.cumulative / max) * 100)}%`, background: i === tlSel ? '#0891b2' : (b.newNodes > 0 ? 'var(--color-border-secondary)' : 'var(--color-border-tertiary)') }} />
+                    ))}
+                  </div>
+                  <div className="mt-0.5 flex justify-between text-[8px] text-[var(--color-text-tertiary)]"><span>{fmt(timeline.from)}</span><span>{fmt(timeline.to)}</span></div>
+                  {sel && (
+                    <div className="mt-1.5 rounded-lg border border-[var(--color-border-secondary)] bg-[var(--color-background-primary)] px-2.5 py-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[10px] font-semibold text-[var(--color-text-primary)]">{fmt(sel.start)} → {fmt(sel.end)}</span>
+                        <span className="text-[9px] text-[var(--color-text-tertiary)]">+{sel.newNodes} new · {sel.cumulative} known</span>
+                      </div>
+                      <p className="mt-0.5 text-[10px] leading-snug text-[var(--color-text-secondary)]">{sel.newConcepts.join(' · ') || 'no new concepts in this period'}</p>
+                    </div>
+                  )}
+                </>
+              )
+            })()}
+          </div>
+        )}
         {/* Entity-class legend + filter, and a trust toggle. Click a class to hide it; "confirmed
             only" hides inferred (dashed) edges so you see what the graph KNOWS vs guesses. */}
         {(() => {
