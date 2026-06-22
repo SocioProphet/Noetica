@@ -5983,30 +5983,14 @@ Question: ${question}`
     void (async () => {
       try {
         const cached = _placesCache
-        const slug = (s: string) => (s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'x')
-        const layerGroup = (t: string) => (t === 'facility' ? 'facility_asset' : t === 'landmark' || t === 'city' || t === 'region' || t === 'country' ? 'field_report' : 'unknown')
-        const markers = (cached?.places ?? []).filter((p) => typeof p.lat === 'number' && typeof p.lon === 'number').map((p, i) => ({
-          schema_version: '0.1.0',
-          marker_id: `orion-marker-${slug(p.name)}-${i}`,
-          event_ref: `orion-evt-${slug(p.name)}-${i}`,
-          layer_group: layerGroup(p.type),
-          coordinates: [p.lon, p.lat],
-          title: p.name,
-          severity: 'info',
-          confidence: 0.5,
-          evidence_grade: 'fused.inferred',          // LLM-classified from graph concepts, not a verified source
-          policy_state: 'attribution_required',       // OSM basemap → ODbL attribution required
-          source_count: 1,
-          selectable: true,
-          action_enabled: false,                       // OFIF boundary: no scanner/sweep/recon/dispatch action here
-          action_disabled_reason: 'read-only field view; active actions are SCOPE-D scope-gated',
-        }))
+        const { placesToMarkers, OSM_ATTRIBUTION, ORION_FIELD_BOUNDARY } = await import('./lib/orion-markers.js')
+        const markers = placesToMarkers(cached?.places ?? [])
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({
           markers,
           count: markers.length,
-          attribution: { required: true, texts: ['© OpenStreetMap contributors'], license_refs: ['ODbL-1.0'] },
-          boundary: 'Advisory field view — not for navigation, routing, dispatch, or safety-critical use.',
+          attribution: OSM_ATTRIBUTION,
+          boundary: ORION_FIELD_BOUNDARY,
           note: cached ? undefined : 'No places cached yet — call /api/graph/places first to populate.',
         }))
       } catch (e) {
