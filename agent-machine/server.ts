@@ -131,6 +131,7 @@ const GOVERNANCE_FILE = path.join(os.homedir(), '.noetica', 'governance.json')
 const ANALYTICS_CACHE_FILE = path.join(os.homedir(), '.noetica', 'cache', 'graph-analytics.json')
 type AnalyticsCache = { sig: string; analytics: import('./lib/graph-analytics.js').GraphAnalytics; computedAt: string }
 let _analyticsCache: AnalyticsCache | null = null
+let _placesCache: { sig: string; places: Array<{ name: string; lat: number | null; lon: number | null; type: string }> } | null = null   // geospatial place classification
 function loadAnalyticsCache(): AnalyticsCache | null {
   if (_analyticsCache) return _analyticsCache
   try { _analyticsCache = JSON.parse(fs.readFileSync(ANALYTICS_CACHE_FILE, 'utf8')) as AnalyticsCache; return _analyticsCache } catch { return null }
@@ -5966,6 +5967,37 @@ Question: ${question}`
         ]
         res.writeHead(200, { 'content-type': 'application/xml', 'content-disposition': 'attachment; filename="noetica-graph.graphml"' })
         res.end(lines.join('\n'))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })()
+    return
+  }
+
+  // GET /api/graph/places — geospatial foundation: classify which concepts are geographic locations
+  // (cities/regions/landmarks/facilities) with best-effort coordinates, so the graph can be placed on a
+  // map (Palantir/KeyLines have geo overlays). Read-only; LLM classification. Cached by graph signature.
+  if (req.method === 'GET' && url.pathname === '/api/graph/places') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const refresh = url.searchParams.get('refresh') === '1'
+        const { analytics, sig, labelOf } = await analyticsForGraph(false)
+        const model = await pickChatModel()
+        const cached = _placesCache
+        if (!refresh && cached && cached.sig === sig) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ places: cached.places, count: cached.places.length, geocoded: cached.places.filter((p) => p.lat != null).length, cached: true })); return }
+        const entities = [...new Set(Object.values(analytics.nodes).sort((a, b) => b.pagerank - a.pagerank).map((m) => labelOf(m.id)).filter((l) => l && !/^[0-9a-f]{8}-[0-9a-f]{4}/i.test(l) && !/^\d{8,}$/.test(l.replace(/\s/g, ''))))].slice(0, 30)
+        const { generateOllamaText } = await import('./lib/ollama.js')
+        const prompt = `From this list, identify which are GEOGRAPHIC LOCATIONS (city, region, country, landmark, facility, address). For each, give approximate latitude/longitude if you genuinely know it (else null), and a type. Ignore non-places. STRICT JSON array only:\n[{"name":"<exact name from the list>","lat":<number|null>,"lon":<number|null>,"type":"city|region|country|landmark|facility|other"}]\nConcepts: ${entities.join(', ')}`
+        let places: Array<{ name: string; lat: number | null; lon: number | null; type: string }> = []
+        try {
+          const c = (await generateOllamaText({ model, messages: [{ role: 'user', content: prompt }], temperature: 0.1, numCtx: 8192 })).content
+          const m = c.match(/\[[\s\S]*\]/)
+          if (m) places = (JSON.parse(m[0]) as typeof places).filter((p) => p && p.name && entities.includes(p.name)).slice(0, 20)
+        } catch { /* extraction best-effort */ }
+        _placesCache = { sig, places }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ places, count: places.length, geocoded: places.filter((p) => p.lat != null).length, cached: false }))
       } catch (e) {
         res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
       }
