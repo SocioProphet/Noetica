@@ -1,0 +1,19 @@
+Package: noetica
+Version: 0.4.11
+Section: net
+Priority: optional
+Architecture: amd64
+Maintainer: SourceOS Linux <maintainers@sourceos.ai>
+Depends: nodejs (>= 20)
+Recommends: npm
+Homepage: https://github.com/SocioProphet/Noetica
+Description: Noetica — self-hosted AI dialogue management backend
+ Noetica is a 22-intent AI dialogue management service for local,
+ sovereign AI inference. Runs on port 8080.
+ .
+ Integrates with TurtleTerm co-pilot as the local AI backend:
+ set SOURCEOS_NOETICA_URL=http://localhost:8080
+ .
+ Intents: chat, explain, fix, search, summarize, translate, codegen,
+ debug, refactor, test, document, deploy, review, plan, recall,
+ memorize, learn, compare, analyze, classify, generate, complete.

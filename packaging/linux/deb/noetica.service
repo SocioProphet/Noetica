@@ -1,0 +1,18 @@
+[Unit]
+Description=Noetica AI Dialogue Backend
+Documentation=https://github.com/SocioProphet/Noetica
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /usr/share/noetica/server.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=PORT=8080
+Environment=HOST=127.0.0.1
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
