@@ -16,7 +16,13 @@ implement → measure → **repeat**. Each pass adds rows here, ships the top on
 
 | P | Gap | Lab · paper | Gives us | Status |
 |---|-----|-------------|----------|--------|
+| **0** | **Medprompt** (choice-shuffle ensemble + dynamic kNN few-shot + self-CoT) | **Microsoft** 2023 | **90.10% MMLU via PROMPTING** (highest ever); choice-shuffle is the *principled* A-bias cure; kNN few-shot = CBR exemplars from our brain | **next — the MMLU recipe** |
+| 1 | **Phi-style distillation** — curate textbook-quality data from OCW → fine-tune/distill small model | **Microsoft** Phi | 2.7B beats 25× larger on reasoning; turns our corpus into model weights | research |
 | 1 | **Contextual Retrieval — hybrid BM25 + RRF** | Anthropic 2024 | catches exact-term matches dense misses | ✅ `MMLU_HYBRID` (full contextual-embeddings re-embed = GPU upgrade) |
+| 2 | **AlphaEvolve** evolutionary combiner discovery | **DeepMind** 2025 | LLM proposes combiner-program variants + evaluator + evolution → discover the council law (FunSearch successor; beat Strassen) | upgrade meta_combiner |
+| 2 | **On-policy distillation** — distill the council into model weights | **Thinking Machines** 2025 | technique → weights (the small model internalizes council reasoning) | research |
+| 3 | **Deterministic/batch-invariant inference** | **Thinking Machines** 2025 | reproducible benchmark numbers (clean-eval/`batch_invariant_ops`) | research |
+| 3 | **Training-free routing (SkewRoute) + RAG reward model (RAGferee)** | **Amazon** EMNLP'25 | route by retrieval-score skewness (cheaper gate); reward model for retrieval quality | backlog |
 | 1 | **VSA problem-manipulation** (concept compose, CBR structure-match, abductive MCQ) | IBM NVSA | manipulate problems algebraically in vector space | substrate built → apply |
 | 2 | **CISC** (confidence-weighted SC) | Google 2025 | 40% fewer samples, +acc on the council vote | ✅ `MMLU_CISC` |
 | 2 | **Self-Discover routing** | DeepMind NeurIPS'24 | learned per-type reasoning structure (replaces hand-coded knowledge_type) | backlog |
