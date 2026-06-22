@@ -31,6 +31,8 @@ import { monitorTrajectory, type AgentAction } from './trajectory-monitor.js'
 import { parseMemoryExport } from './memory-import.js'
 import { buildMindMap, flattenOutline, countNodes } from './mind-map.js'
 import { makeCredential, markAIGenerated, manifestDigest } from './content-credentials.js'
+import { persistProposals, persistInferred } from './graph-writeback.js'
+import type { GraphProposal } from './graph-proposals.js'
 
 function readBody(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve) => { let b = ''; req.on('data', (c: Buffer) => { b += c.toString() }); req.on('end', () => resolve(b)); req.on('error', () => resolve('')) })
@@ -102,6 +104,9 @@ export async function handleCapabilityRoute(req: http.IncomingMessage, res: http
         const cred = makeCredential({ model: b.model as string, timestamp: b.timestamp as string, sourceRefs: b.sourceRefs ?? [] })
         return send(200, { credential: cred, digest: manifestDigest(cred), marked: b.text ? markAIGenerated(b.text as string, cred) : undefined }), true
       }
+      // ── HellGraph write-back (PERSIST derived knowledge into the store) ──
+      case 'proposals-apply': return send(200, persistProposals((b.proposals ?? []) as GraphProposal[])), true
+      case 'infer-apply': return send(200, persistInferred((b.inferred ?? []) as Array<{ subject: string; predicate: string; object: string; via?: string; verified?: boolean }>)), true
       // ── graph-derived (GET) ──
       case 'graph-triples': {
         const g = getGraph()
