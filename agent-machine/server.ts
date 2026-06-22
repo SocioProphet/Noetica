@@ -5974,6 +5974,39 @@ Question: ${question}`
     return
   }
 
+  // GET /api/graph/associative — query-seeded Personalized PageRank (HippoRAG): seed the rank from the
+  // entities named in ?q= and let one diffusion surface associatively-related, multi-hop concepts — no
+  // iterative LLM loop. Same engine as analytics, query-conditioned instead of a static global prior.
+  if (req.method === 'GET' && url.pathname === '/api/graph/associative') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const q = (url.searchParams.get('q') ?? '').trim()
+        if (!q) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'query_required' })); return }
+        const topK = Math.min(40, Math.max(1, Number(url.searchParams.get('k')) || 12))
+        const g = getGraph()
+        const keep = g.allNodes().filter((n) => cleanLabel(n) !== null && n.properties?.['hygiene_pruned'] !== true && !/corpus-test/i.test(String(n.id)))
+        const keepIds = new Set(keep.map((n) => n.id))
+        const nodes = keep.map((n) => ({ id: n.id }))
+        const edges = g.allEdges().filter((e) => keepIds.has(e.from) && keepIds.has(e.to)).map((e) => ({ from: e.from, to: e.to }))
+        const labelById = new Map(keep.map((n) => [n.id, cleanLabel(n) ?? n.id]))
+        const { associativeRetrieve } = await import('./lib/graph-ppr.js')
+        const { seeds, results } = associativeRetrieve(nodes, edges, labelById, q, { topK })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          query: q,
+          method: 'personalized-pagerank',
+          seeds: seeds.map((id) => labelById.get(id) ?? id),
+          seedResolved: seeds.length > 0,
+          results: results.map((r) => ({ entity: r.label, score: Number(r.score.toFixed(5)) })),
+        }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })()
+    return
+  }
+
   // GET /api/graph/geo — Orion Field Intelligence (OFIF) map-marker surface: our detected places projected
   // into the OrionMapMarker v0.1 contract (from SocioProphet/orion-field-intelligence), so the OSM × GAIA
   // map workbench can render them. Read-only + ODbL-attributed; honors the OFIF boundary (no action UI —
