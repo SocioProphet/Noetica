@@ -41,6 +41,7 @@ export function GraphRailPanel() {
   const [colorBy, setColorBy] = useState<'class' | 'community'>('class')
   const [sizeBy, setSizeBy] = useState<'degree' | 'importance'>('degree')
   const [metrics, setMetrics] = useState<Record<string, { pagerank: number; betweenness: number; community: number }>>({})
+  const [insights, setInsights] = useState<{ communityCount: number; modularity: number; topImportant: string[]; topBridges: string[] } | null>(null)
   const [showThemes, setShowThemes] = useState(false)
   const [communities, setCommunities] = useState<Array<{ id: number; title: string; summary: string; trust: number; grounded: boolean; size: number; topNodes: string[] }>>([])
   const [themesLoading, setThemesLoading] = useState(false)
@@ -151,8 +152,9 @@ export function GraphRailPanel() {
       try {
         const res = await fetch('/api/graph/analytics')
         if (!res.ok) return
-        const j = (await res.json()) as { nodes?: Record<string, { pagerank: number; betweenness: number; community: number }> }
+        const j = (await res.json()) as { nodes?: Record<string, { pagerank: number; betweenness: number; community: number }>; modularity?: number; summary?: { communityCount: number; topByPagerank: Array<{ label: string }>; topByBetweenness: Array<{ label: string }> } }
         if (!cancelled && j.nodes) setMetrics(j.nodes)
+        if (!cancelled && j.summary) setInsights({ communityCount: j.summary.communityCount, modularity: j.modularity ?? 0, topImportant: j.summary.topByPagerank.slice(0, 4).map((x) => x.label), topBridges: j.summary.topByBetweenness.slice(0, 3).map((x) => x.label) })
       } catch { /* offline */ }
     })()
     return () => { cancelled = true }
@@ -304,6 +306,14 @@ export function GraphRailPanel() {
             📈 timeline
           </button>
         </div>
+        {/* GDS insights readout — the analytics that drive node size/colour, made legible. */}
+        {insights && (
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[9px] text-[var(--color-text-tertiary)]">
+            <span title="Most important concepts (PageRank)">★ <span className="text-[var(--color-text-secondary)]">{insights.topImportant.join(', ') || '—'}</span></span>
+            {insights.topBridges.length > 0 && <span title="Bridge concepts (high betweenness)">· 🌉 <span className="text-[#0891b2]">{insights.topBridges.join(', ')}</span></span>}
+            <span title="Louvain communities + modularity">· {insights.communityCount} communities <span className="opacity-70">(mod {insights.modularity.toFixed(2)})</span></span>
+          </div>
+        )}
         {showTimeline && (
           <div className="mt-1.5 rounded-lg border border-[var(--color-border-secondary)] bg-[var(--color-background-secondary)] px-2.5 py-2">
             <div className="flex items-center justify-between">
