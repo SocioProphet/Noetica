@@ -109,6 +109,17 @@ export async function handleCapabilityRoute(req: http.IncomingMessage, res: http
         const cred = makeCredential({ model: b.model as string, timestamp: b.timestamp as string, sourceRefs: b.sourceRefs ?? [] })
         return send(200, { credential: cred, digest: manifestDigest(cred), marked: b.text ? markAIGenerated(b.text as string, cred) : undefined }), true
       }
+      // ── RAG inspection / retrieval-debug (the genuine whitespace MS/Vertex do weakly) ──
+      case 'rag-inspect': {
+        const q = String(b.query ?? '')
+        if (!q) return send(400, { error: 'query_required' }), true
+        const { semanticSearch, lexicalSearch } = await import('./doc-store.js')
+        let semantic: Array<{ text: string; source: string; score: number }> = []
+        try { semantic = (await semanticSearch(q, 8)).map((h) => ({ text: String(h.text ?? '').slice(0, 400), source: String(h.filename ?? ''), score: Number(((h as { score?: number }).score ?? 0).toFixed(4)) })) } catch { /* no index */ }
+        let lexical: Array<{ text: string; source: string; score: number }> = []
+        try { lexical = lexicalSearch(q, 8).map((h) => ({ text: String(h.text ?? '').slice(0, 200), source: String(h.filename ?? ''), score: Number(((h as { score?: number }).score ?? 0).toFixed(4)) })) } catch { /* none */ }
+        return send(200, { query: q, semantic, lexical, semanticCount: semantic.length, lexicalCount: lexical.length }), true
+      }
       // ── AG-UI protocol conformance (Agent-User Interaction Protocol) ──
       case 'agui-run': {
         const { buildTextRun, isWellFormedRun } = await import('./ag-ui.js')
