@@ -341,25 +341,60 @@ def math_extract(question, choices):
         return None
 
 
-def _match_math(ans, choices):
-    """Match a sympy answer (expr / number / list of roots) to a choice by symbolic-or-numeric
-    equality — the deterministic gate (no fuzzy matching)."""
-    cands = ans if isinstance(ans, list) else [ans]
-    for i, c in enumerate(choices):
-        try:
-            ce = sp.sympify(re.sub(r'[^0-9A-Za-z_+\-*/.^() ]', ' ', str(c)).replace('^', '**'))
-        except Exception:
+from sympy.parsing.sympy_parser import (parse_expr, standard_transformations,
+                                         implicit_multiplication_application, convert_xor)
+_TX = standard_transformations + (implicit_multiplication_application, convert_xor)
+
+
+def _choice_vals(c):
+    """A choice may hold ONE expr ('6x + 2') or MANY values ('2 and 3', '1, 6'). Tolerate math
+    notation (implicit mult, '^', '×'), a leading label, and a trailing integration constant.
+    Returns the list of parsed sympy values."""
+    s = str(c).replace('×', '*').strip()
+    s = re.sub(r'^[A-Da-d][).:]\s*', '', s)
+    s = re.sub(r'\+\s*[Cc]\b', '', s)
+    vals = []
+    for p in re.split(r'\s+and\s+|\s*,\s*|\s+or\s+|;', s):
+        p = p.strip()
+        if not p:
             continue
-        for a in cands:
-            try:
-                if sp.simplify(sp.sympify(str(a)) - ce) == 0:
-                    return i
-            except Exception:
-                try:
-                    if abs(float(a) - float(ce)) < 1e-6:
-                        return i
-                except Exception:
-                    pass
+        try:
+            vals.append(parse_expr(p, transformations=_TX))
+        except Exception:
+            pass
+    return vals
+
+
+def _eq(a, b):
+    """a == b, exactly or (for antiderivatives) up to an additive constant."""
+    try:
+        d = sp.simplify(a - b)
+        if d == 0:
+            return True
+        return bool(d.free_symbols) and sp.simplify(sp.diff(d, *sorted(d.free_symbols, key=str))) == 0
+    except Exception:
+        try:
+            return abs(float(a) - float(b)) < 1e-6
+        except Exception:
+            return False
+
+
+def _match_math(ans, choices):
+    """Deterministic gate: match a sympy answer to a choice by symbolic/numeric equality. A single
+    answer matches any value in a choice; a root-set answer matches a choice whose value-set equals it."""
+    cset = []
+    for a in (ans if isinstance(ans, list) else [ans]):
+        cset.append(a if hasattr(a, 'free_symbols') else sp.sympify(str(a)))
+    for i, c in enumerate(choices):
+        cvals = _choice_vals(c)
+        if not cvals:
+            continue
+        if len(cset) > 1:   # root set: choice's values must equal the answer set
+            if len(cvals) == len(cset) and all(any(_eq(cv, a) for a in cset) for cv in cvals):
+                return i
+        else:               # single value: any of the choice's parsed values matches
+            if any(_eq(cset[0], cv) for cv in cvals):
+                return i
     return None
 
 
