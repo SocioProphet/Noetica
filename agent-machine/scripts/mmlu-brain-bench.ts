@@ -45,6 +45,7 @@ const SHOT_K = Number(process.env['MMLU_SHOT_K'] || 8)      // chunks injected a
 const PER_SHOT = Number(process.env['MMLU_PER_SHOT'] || 3)  // chunks each query (broad + per-choice) contributes
 const ARMS = (process.env['MMLU_ARMS'] || 'baseline,brain').split(',').map((s) => s.trim()).filter(Boolean)
 const CONC = Number(process.env['MMLU_CONC'] || 6)   // questions scored concurrently — ollama calls are I/O; serial left the GPU idle
+const MMR_LAMBDA = Number(process.env['MMLU_MMR'] || 0) // >0 enables MMR diverse selection (relevance vs novelty); cluster_analysis showed top-8 collapse into ~2 cells
 const MAX_CHUNKS = Number(process.env['MMLU_MAX_CHUNKS'] || 150_000)
 const SEED = Number(process.env['MMLU_SEED'] ?? (Date.now() % 2147483647))
 const TIMEOUT = Number(process.env['MMLU_TIMEOUT_MS'] || 120_000)
@@ -161,6 +162,13 @@ function embedCached(text: string): Promise<number[]> {
   return p
 }
 
+// cosine between two already-loaded chunk vectors (norms precomputed) — for MMR novelty
+function chunkCos(a: Chunk, b: Chunk): number {
+  let dot = 0; const m = Math.min(a.vec.length, b.vec.length)
+  for (let i = 0; i < m; i++) dot += a.vec[i]! * b.vec[i]!
+  return dot / ((a.norm || 1) * (b.norm || 1))
+}
+
 async function retrieveMulti(question: string, choices: string[], pools: Chunk[][], perShot: number, finalK: number, extra: string[] = []): Promise<Chunk[]> {
   const queries = [`${question}\n${choices.join(' ')}`, ...choices.map((c) => `${question}\n${c}`), ...extra.filter(Boolean)]
   const best = new Map<string, { c: Chunk; s: number }>()
@@ -181,7 +189,25 @@ async function retrieveMulti(question: string, choices: string[], pools: Chunk[]
       if (!prev || hit.s > prev.s) best.set(key, hit)
     }
   }
-  return [...best.values()].sort((a, b) => b.s - a.s).slice(0, finalK).map((x) => x.c)
+  const ranked = [...best.values()].sort((a, b) => b.s - a.s)
+  if (MMR_LAMBDA <= 0 || ranked.length <= finalK) return ranked.slice(0, finalK).map((x) => x.c)
+  // MMR: greedily pick finalK balancing relevance (cosine to query) against novelty (low similarity
+  // to already-picked). Fixes the redundancy where brute-force top hits collapse into one sub-topic,
+  // so the K context slots carry K distinct facets instead of the same fact restated.
+  const pool = ranked.slice(0, Math.max(finalK * 5, 40))
+  const picked: Array<{ c: Chunk; s: number }> = []
+  while (picked.length < finalK && pool.length) {
+    let bi = 0, bScore = -Infinity
+    for (let i = 0; i < pool.length; i++) {
+      const r = pool[i]!
+      let maxSim = 0
+      for (const p of picked) { const sim = chunkCos(r.c, p.c); if (sim > maxSim) maxSim = sim }
+      const mmr = MMR_LAMBDA * r.s - (1 - MMR_LAMBDA) * maxSim
+      if (mmr > bScore) { bScore = mmr; bi = i }
+    }
+    picked.push(pool.splice(bi, 1)[0]!)
+  }
+  return picked.map((x) => x.c)
 }
 
 // ── model ──────────────────────────────────────────────────────────────────────
