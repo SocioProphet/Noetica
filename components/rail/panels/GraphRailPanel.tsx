@@ -43,7 +43,7 @@ export function GraphRailPanel() {
   const [metrics, setMetrics] = useState<Record<string, { pagerank: number; betweenness: number; community: number }>>({})
   const [insights, setInsights] = useState<{ communityCount: number; modularity: number; topImportant: string[]; topBridges: string[] } | null>(null)
   const [showThemes, setShowThemes] = useState(false)
-  const [communities, setCommunities] = useState<Array<{ id: number; title: string; summary: string; trust: number; grounded: boolean; size: number; topNodes: string[] }>>([])
+  const [communities, setCommunities] = useState<Array<{ id: number; title: string; summary: string; trust: number; grounded: boolean; size: number; topNodes: string[]; claims?: Array<{ text: string; grounded: boolean; score: number }> }>>([])
   const [themesLoading, setThemesLoading] = useState(false)
   const [globalQ, setGlobalQ] = useState('')
   const [globalAnswer, setGlobalAnswer] = useState<{ answer: string; trust: number; grounded: boolean; communitiesUsed: Array<{ title: string }> } | null>(null)
@@ -432,6 +432,16 @@ export function GraphRailPanel() {
                 </div>
                 <p className="mt-0.5 text-[10px] leading-snug text-[var(--color-text-secondary)]">{c.summary}</p>
                 <p className="mt-0.5 truncate text-[9px] text-[var(--color-text-tertiary)]">{c.topNodes.join(' · ')}</p>
+                {c.claims && c.claims.length > 0 && (
+                  <ul className="mt-1 space-y-0.5 border-t border-[var(--color-border-tertiary)] pt-1">
+                    {c.claims.map((cl, k) => (
+                      <li key={k} className="flex items-start gap-1 text-[9px] leading-snug">
+                        <span className={cl.grounded ? 'text-[#16a34a]' : 'text-[#f59e0b]'}>{cl.grounded ? '✓' : '✗'}</span>
+                        <span className={cl.grounded ? 'text-[var(--color-text-secondary)]' : 'text-[var(--color-text-tertiary)] line-through opacity-70'}>{cl.text}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
             ))}
           </div>

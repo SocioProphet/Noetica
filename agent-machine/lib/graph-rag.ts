@@ -17,16 +17,19 @@ import { verifyGrounding } from './research-verify.js'
 import { lexicalSearch, semanticSearch } from './doc-store.js'
 import type { GraphAnalytics } from './graph-analytics.js'
 
+/** A first-class, individually grounding-verified claim — GraphRAG extracts claims; we verify each. */
+export interface VerifiedClaim { text: string; grounded: boolean; score: number }
+
 export interface CommunityReport {
   id: number
   size: number
   title: string
   summary: string
-  claims: string[]
-  trust: number        // grounding score 0..1 (claims supported by the community's evidence)
+  claims: VerifiedClaim[]   // each claim carries its own grounding verdict, not just the report
+  trust: number             // overall grounding score 0..1 (summary + claims vs the community's evidence)
   grounded: boolean
-  topNodes: string[]   // readable labels of the central members
-  members: string[]    // readable labels (capped)
+  topNodes: string[]        // readable labels of the central members
+  members: string[]         // readable labels (capped)
 }
 
 export interface GlobalAnswer {
@@ -90,12 +93,20 @@ Base the summary and claims ONLY on the concepts and evidence above. Do not inve
 
     const title = (parsed?.title || topLabels.slice(0, 3).join(' / ')).slice(0, 80)
     const summary = (parsed?.summary || '').slice(0, 600)
-    const claims = (parsed?.claims || []).filter((x) => typeof x === 'string').slice(0, 4)
+    const claimStrings = (parsed?.claims || []).filter((x) => typeof x === 'string').slice(0, 4)
+    const ev = evidence.map((t) => ({ text: t }))
 
-    // Grounding: do the summary's claims actually appear in the community's evidence?
-    const verifyText = [summary, ...claims].join(' ')
-    const g = evidence.length && verifyText.trim()
-      ? verifyGrounding(verifyText, evidence.map((t) => ({ text: t })))
+    // Verify EACH claim against the community's evidence (deterministic grounding — no extra LLM cost),
+    // so an ungrounded claim is flagged individually, not hidden inside a report-level average.
+    const claims: VerifiedClaim[] = claimStrings.map((text) => {
+      const cg = ev.length ? verifyGrounding(text, ev, 0.5, 0.5) : { grounded: false, score: 0 }
+      return { text, grounded: cg.grounded, score: Number(cg.score.toFixed(2)) }
+    })
+
+    // Report-level grounding: summary + claims vs the evidence.
+    const verifyText = [summary, ...claimStrings].join(' ')
+    const g = ev.length && verifyText.trim()
+      ? verifyGrounding(verifyText, ev)
       : { grounded: false, score: 0, supported: 0, total: 0, unsupported: [] as string[] }
 
     reports.push({
@@ -111,7 +122,7 @@ Base the summary and claims ONLY on the concepts and evidence above. Do not inve
 export async function globalSearch(question: string, reports: CommunityReport[], opts: { model: string; maxCommunities?: number }): Promise<GlobalAnswer> {
   const qTok = tokens(question)
   const relevance = (r: CommunityReport): number => {
-    const rTok = tokens(`${r.title} ${r.summary} ${r.claims.join(' ')} ${r.topNodes.join(' ')}`)
+    const rTok = tokens(`${r.title} ${r.summary} ${r.claims.map((c) => c.text).join(' ')} ${r.topNodes.join(' ')}`)
     let overlap = 0; for (const t of qTok) if (rTok.has(t)) overlap++
     return qTok.size ? overlap / qTok.size : 0
   }
@@ -122,7 +133,7 @@ export async function globalSearch(question: string, reports: CommunityReport[],
   // MAP — a partial answer from each relevant community report.
   const partials: Array<{ id: number; title: string; text: string }> = []
   for (const { r } of relevant) {
-    const prompt = `Community report "${r.title}": ${r.summary}\nKey points: ${r.claims.join('; ') || '(none)'}\n\nQuestion: ${question}\n\nIf this community is relevant to the question, answer in 1-2 sentences using ONLY this report. If it is not relevant, reply exactly: NOT RELEVANT`
+    const prompt = `Community report "${r.title}": ${r.summary}\nKey points: ${r.claims.map((c) => c.text).join('; ') || '(none)'}\n\nQuestion: ${question}\n\nIf this community is relevant to the question, answer in 1-2 sentences using ONLY this report. If it is not relevant, reply exactly: NOT RELEVANT`
     try {
       const { content } = await generateOllamaText({ model: opts.model, messages: [{ role: 'user', content: prompt }], temperature: 0.2 })
       const txt = content.trim()
