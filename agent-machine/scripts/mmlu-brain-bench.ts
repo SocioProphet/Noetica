@@ -689,6 +689,10 @@ async function main() {
           const appr = await ask(`List 3 distinct approaches to solve this question, one short line each.\n\n${q.question}`)
           letter = extractLetter(await ask(`Candidate approaches:\n${appr}\n\nPick the single most promising approach (one line on why), then carry it out on:\n${base}${ANSWER_RULE}`))
           mode = 'tot'
+        } else if (arm === 'reflect') {           // process-supervision-lite (OpenAI PRM): self-verify the reasoning, revise a flawed step
+          const first = await ask(`${base}${ANSWER_RULE}`)
+          letter = extractLetter(await ask(`A student proposed this solution:\n${first}\n\nQuestion:\n${base}\n\nCheck each reasoning step for an error. If any step is wrong, correct it and give the right answer; otherwise confirm.${ANSWER_RULE}`))
+          mode = 'reflect'
         } else {                                  // baseline (closed book)
           letter = extractLetter(await ask(`${base}${ANSWER_RULE}`))
         }
