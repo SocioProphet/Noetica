@@ -42,6 +42,7 @@ export function GraphRailPanel() {
   const [sizeBy, setSizeBy] = useState<'degree' | 'importance'>('degree')
   const [metrics, setMetrics] = useState<Record<string, { pagerank: number; betweenness: number; community: number }>>({})
   const [insights, setInsights] = useState<{ communityCount: number; modularity: number; topImportant: string[]; topBridges: string[] } | null>(null)
+  const [kHealth, setKHealth] = useState<{ score: number; gaps: string[] } | null>(null)
   const [showThemes, setShowThemes] = useState(false)
   const [communities, setCommunities] = useState<Array<{ id: number; title: string; summary: string; trust: number; grounded: boolean; size: number; topNodes: string[]; claims?: Array<{ text: string; grounded: boolean; score: number }> }>>([])
   const [themesLoading, setThemesLoading] = useState(false)
@@ -168,6 +169,8 @@ export function GraphRailPanel() {
         const j = (await res.json()) as { nodes?: Record<string, { pagerank: number; betweenness: number; community: number }>; modularity?: number; summary?: { communityCount: number; topByPagerank: Array<{ label: string }>; topByBetweenness: Array<{ label: string }> } }
         if (!cancelled && j.nodes) setMetrics(j.nodes)
         if (!cancelled && j.summary) setInsights({ communityCount: j.summary.communityCount, modularity: j.modularity ?? 0, topImportant: j.summary.topByPagerank.slice(0, 4).map((x) => x.label), topBridges: j.summary.topByBetweenness.slice(0, 3).map((x) => x.label) })
+        // knowledge-health synthesis — cheap, aggregates the verified-stack signals into one score
+        try { const hr = await fetch('/api/graph/knowledge-health'); if (hr.ok) { const hj = (await hr.json()) as { score: number; gaps: string[] }; if (!cancelled) setKHealth({ score: hj.score, gaps: hj.gaps ?? [] }) } } catch { /* offline */ }
       } catch { /* offline */ }
     })()
     return () => { cancelled = true }
@@ -319,6 +322,17 @@ export function GraphRailPanel() {
             📈 timeline
           </button>
         </div>
+        {/* Knowledge-health — the verified-stack value in one score (trust + completeness + gaps). */}
+        {kHealth && (
+          <div className="mt-1.5 flex items-center gap-2" title={kHealth.gaps.length ? `Gaps:\n• ${kHealth.gaps.join('\n• ')}` : 'No gaps detected'}>
+            <span className="text-[9px] uppercase tracking-wide text-[var(--color-text-tertiary)]">🧠 knowledge health</span>
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-[var(--color-border-tertiary)]">
+              <div className="h-full rounded-full" style={{ width: `${kHealth.score}%`, background: kHealth.score >= 75 ? '#16a34a' : kHealth.score >= 50 ? '#0891b2' : '#f59e0b' }} />
+            </div>
+            <span className="text-[10px] font-semibold" style={{ color: kHealth.score >= 75 ? '#16a34a' : kHealth.score >= 50 ? '#0891b2' : '#f59e0b' }}>{kHealth.score}</span>
+            {kHealth.gaps.length > 0 && <span className="text-[9px] text-[var(--color-text-tertiary)]">· {kHealth.gaps.length} gap{kHealth.gaps.length === 1 ? '' : 's'}</span>}
+          </div>
+        )}
         {/* GDS insights readout — the analytics that drive node size/colour, made legible. */}
         {insights && (
           <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[9px] text-[var(--color-text-tertiary)]">
