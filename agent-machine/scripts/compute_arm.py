@@ -22,6 +22,7 @@ import sympy as sp
 from units import parse_unit, to_si, dimension_of, DimError
 from model_verify import MODELS, DIMS, verify_and_solve
 from chain_solve import chain_solve
+from math_solve import solve_math, infer_op   # Gödel-routed exact calculus/algebra
 
 BANK = os.path.expanduser('~/.noetica/corpus/benchmarks/mmlu_stem.json')
 BASE = os.environ.get('OLLAMA_HOST', 'http://127.0.0.1:11434').rstrip('/')
@@ -319,9 +320,76 @@ def chain_extract(question, choices):
     return cx
 
 
+MATH_SYS = (
+    'Extract the math expression and the operation from this question — do NOT solve it. '
+    'Output ONLY JSON: {"expr": "<sympy expr, use ** for powers>", '
+    '"op": "differentiate|integrate|limit|solve|evaluate|factor|simplify|series", '
+    '"var": "x", "at": <number or null>}. Example: "derivative of 3x^2+2x" -> '
+    '{"expr":"3*x**2+2*x","op":"differentiate","var":"x","at":null}'
+)
+
+
+def math_extract(question, choices):
+    raw = ollama([{'role': 'system', 'content': MATH_SYS},
+                  {'role': 'user', 'content': f'Question:\n{question}\nChoices: {choices}'}])
+    m = re.search(r'\{.*\}', raw, re.S)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(0))
+    except Exception:
+        return None
+
+
+def _match_math(ans, choices):
+    """Match a sympy answer (expr / number / list of roots) to a choice by symbolic-or-numeric
+    equality — the deterministic gate (no fuzzy matching)."""
+    cands = ans if isinstance(ans, list) else [ans]
+    for i, c in enumerate(choices):
+        try:
+            ce = sp.sympify(re.sub(r'[^0-9A-Za-z_+\-*/.^() ]', ' ', str(c)).replace('^', '**'))
+        except Exception:
+            continue
+        for a in cands:
+            try:
+                if sp.simplify(sp.sympify(str(a)) - ce) == 0:
+                    return i
+            except Exception:
+                try:
+                    if abs(float(a) - float(ce)) < 1e-6:
+                        return i
+                except Exception:
+                    pass
+    return None
+
+
+def math_solve_question(question, choices):
+    """RIGHT-MATHS path: detect the operation, LLM PARSES the expression, Gödel-routed math_solve
+    computes it EXACTLY, match the choice by symbolic equality. The model parses; sympy is exact."""
+    op = infer_op(question)
+    if not op:
+        return None, None
+    mx = math_extract(question, choices)
+    if not mx or not mx.get('expr'):
+        return None, None
+    try:
+        ans = solve_math(mx['expr'], mx.get('op') or op, mx.get('var') or 'x', mx.get('at'))
+        idx = _match_math(ans, choices)
+        if idx is not None:
+            return LETTERS[idx], 'math:' + (mx.get('op') or op)
+    except Exception:
+        pass
+    return None, None
+
+
 def solve_question(question, choices):
-    """Verified compute: multi-hop chain over the catalog, then the free-equation escape
-    hatch. Returns (answer_letter or None, mode)."""
+    """Verified compute: the right-maths (calculus/algebra) path, then multi-hop chain over the
+    physics catalog, then the free-equation escape hatch. Returns (answer_letter or None, mode)."""
+    # 0. RIGHT-MATHS — calculus/algebra computed exactly (Gödel form → sympy method)
+    if infer_op(question):
+        ans, mode = math_solve_question(question, choices)
+        if ans is not None:
+            return ans, mode
     # 1. CHAIN path — name the knowns + target; the verified planner derives the rest
     #    (handles single-law AND multi-step; every hop dimension-checked).
     cx = chain_extract(question, choices)
