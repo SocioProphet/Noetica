@@ -5974,6 +5974,38 @@ Question: ${question}`
     return
   }
 
+  // GET /api/graph/ontology — the GAIA Ontogenesis Stewardship ontology (dogfooded from regis-entity-graph),
+  // PLUS a live census: every clean node classified into a GAIA developmental phase + abandonment signals
+  // detected from its GDS structural state. The abstract ontology grounded in our actual graph.
+  if (req.method === 'GET' && url.pathname === '/api/graph/ontology') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { GAIA_ONTOLOGY, ontogenesisPhase, abandonmentSignals } = await import('./lib/gaia-ontology.js')
+        if (url.searchParams.get('apply') === '0') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ontology: GAIA_ONTOLOGY })); return }
+        const { analytics, labelOf } = await analyticsForGraph(false)
+        const phases: Record<string, number> = {}
+        const signals: Record<string, string[]> = {}
+        let total = 0
+        for (const [id, m] of Object.entries(analytics.nodes)) {
+          const lbl = labelOf(id); if (!lbl) continue
+          total++
+          const phase = ontogenesisPhase(m); phases[phase] = (phases[phase] ?? 0) + 1
+          for (const s of abandonmentSignals(m)) { (signals[s] ??= []).push(lbl) }
+        }
+        const census = {
+          total,
+          phases: Object.entries(phases).sort((a, b) => b[1] - a[1]).map(([phase, count]) => ({ phase, count })),
+          signals: Object.entries(signals).sort((a, b) => b[1].length - a[1].length).map(([signal, ents]) => ({ signal, count: ents.length, examples: ents.slice(0, 6) })),
+        }
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ontology: GAIA_ONTOLOGY, census }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })()
+    return
+  }
+
   // GET /api/graph/places — geospatial foundation: classify which concepts are geographic locations
   // (cities/regions/landmarks/facilities) with best-effort coordinates, so the graph can be placed on a
   // map (Palantir/KeyLines have geo overlays). Read-only; LLM classification. Cached by graph signature.
