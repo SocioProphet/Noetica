@@ -41,6 +41,8 @@ const BASE = (process.env['OLLAMA_HOST'] || 'http://127.0.0.1:11434').replace(/\
 const MODEL = process.env['MMLU_MODEL'] || 'llama3.2:3b'
 const PER = Number(process.env['MMLU_PER_SUBJECT'] ?? 5)
 const K = Number(process.env['MMLU_K'] || 4)
+const SHOT_K = Number(process.env['MMLU_SHOT_K'] || 8)      // chunks injected after multi-shot union
+const PER_SHOT = Number(process.env['MMLU_PER_SHOT'] || 3)  // chunks each query (broad + per-choice) contributes
 const ARMS = (process.env['MMLU_ARMS'] || 'baseline,brain').split(',').map((s) => s.trim()).filter(Boolean)
 const MAX_CHUNKS = Number(process.env['MMLU_MAX_CHUNKS'] || 150_000)
 const SEED = Number(process.env['MMLU_SEED'] ?? (Date.now() % 2147483647))
@@ -143,6 +145,34 @@ function topK(qVec: number[], pools: Chunk[][], k: number): Chunk[] {
   return out
 }
 
+// Multi-shot retrieval: a broad query (question + all choices) THEN one targeted query per answer
+// choice — 2nd/3rd-shot specificity. Each option pulls the chunk that would confirm/refute IT, so
+// the discriminating fact lands in context. For memorization subjects (biology) this is the
+// difference between "the topic is in the brain" and "the answer is in the brain". Union by best
+// cosine across shots, dedup, take the top finalK.
+async function retrieveMulti(question: string, choices: string[], pools: Chunk[][], perShot: number, finalK: number): Promise<Chunk[]> {
+  const queries = [`${question}\n${choices.join(' ')}`, ...choices.map((c) => `${question}\n${c}`)]
+  const best = new Map<string, { c: Chunk; s: number }>()
+  for (const query of queries) {
+    const qv = await embedText(query)
+    if (!qv.length) continue
+    let qn = 0; for (const v of qv) qn += v * v; qn = Math.sqrt(qn) || 1
+    const shot: Array<{ c: Chunk; s: number }> = []
+    for (const pool of pools) for (const c of pool) {
+      let dot = 0; const m = Math.min(qv.length, c.vec.length)
+      for (let i = 0; i < m; i++) dot += qv[i]! * c.vec[i]!
+      shot.push({ c, s: dot / (qn * c.norm) })
+    }
+    shot.sort((a, b) => b.s - a.s)
+    for (const hit of shot.slice(0, perShot)) {
+      const key = hit.c.text.slice(0, 80)
+      const prev = best.get(key)
+      if (!prev || hit.s > prev.s) best.set(key, hit)
+    }
+  }
+  return [...best.values()].sort((a, b) => b.s - a.s).slice(0, finalK).map((x) => x.c)
+}
+
 // ── model ──────────────────────────────────────────────────────────────────────
 const SYS = 'You are taking a multiple-choice exam. Reason in ONE short sentence, then end with a line "FINAL: X" where X is exactly one of A, B, C, or D.'
 async function ask(prompt: string): Promise<string> {
@@ -227,11 +257,12 @@ async function main() {
       const gold = LETTERS[q.answer]
       const row: Record<string, unknown> = { subject, i, gold }
 
-      // brain retrieval (shared by the brain arm AND the route arm's fallback)
+      // brain retrieval (shared by the brain arm AND the route arm's fallback) — multi-shot:
+      // a broad query + one targeted query per choice, union top-K. MMLU_SHOT_K sets how many
+      // chunks land in context (default 8); MMLU_PER_SHOT how many each query contributes (default 3).
       let context = ''
       if (ARMS.includes('brain') || ARMS.includes('route')) {
-        const qVec = await embedText(`${q.question}\n${q.choices.join(' ')}`)
-        const hits = topK(qVec, pools, K)
+        const hits = await retrieveMulti(q.question, q.choices, pools, PER_SHOT, SHOT_K)
         context = hits.map((h, n) => `[${n + 1}] ${h.text.slice(0, 500)}`).join('\n\n')
         row['sources'] = hits.map((h) => `${h.slug}:${h.material}`)
       }
