@@ -41,6 +41,8 @@ const BASE = (process.env['OLLAMA_HOST'] || 'http://127.0.0.1:11434').replace(/\
 const MODEL = process.env['MMLU_MODEL'] || 'llama3.2:3b'
 const PER = Number(process.env['MMLU_PER_SUBJECT'] ?? 5)
 const K = Number(process.env['MMLU_K'] || 4)
+const SHOT_K = Number(process.env['MMLU_SHOT_K'] || 8)      // chunks injected after multi-shot union
+const PER_SHOT = Number(process.env['MMLU_PER_SHOT'] || 3)  // chunks each query (broad + per-choice) contributes
 const ARMS = (process.env['MMLU_ARMS'] || 'baseline,brain').split(',').map((s) => s.trim()).filter(Boolean)
 const MAX_CHUNKS = Number(process.env['MMLU_MAX_CHUNKS'] || 150_000)
 const SEED = Number(process.env['MMLU_SEED'] ?? (Date.now() % 2147483647))
@@ -143,6 +145,34 @@ function topK(qVec: number[], pools: Chunk[][], k: number): Chunk[] {
   return out
 }
 
+// Multi-shot retrieval: a broad query (question + all choices) THEN one targeted query per answer
+// choice — 2nd/3rd-shot specificity. Each option pulls the chunk that would confirm/refute IT, so
+// the discriminating fact lands in context. For memorization subjects (biology) this is the
+// difference between "the topic is in the brain" and "the answer is in the brain". Union by best
+// cosine across shots, dedup, take the top finalK.
+async function retrieveMulti(question: string, choices: string[], pools: Chunk[][], perShot: number, finalK: number): Promise<Chunk[]> {
+  const queries = [`${question}\n${choices.join(' ')}`, ...choices.map((c) => `${question}\n${c}`)]
+  const best = new Map<string, { c: Chunk; s: number }>()
+  for (const query of queries) {
+    const qv = await embedText(query)
+    if (!qv.length) continue
+    let qn = 0; for (const v of qv) qn += v * v; qn = Math.sqrt(qn) || 1
+    const shot: Array<{ c: Chunk; s: number }> = []
+    for (const pool of pools) for (const c of pool) {
+      let dot = 0; const m = Math.min(qv.length, c.vec.length)
+      for (let i = 0; i < m; i++) dot += qv[i]! * c.vec[i]!
+      shot.push({ c, s: dot / (qn * c.norm) })
+    }
+    shot.sort((a, b) => b.s - a.s)
+    for (const hit of shot.slice(0, perShot)) {
+      const key = hit.c.text.slice(0, 80)
+      const prev = best.get(key)
+      if (!prev || hit.s > prev.s) best.set(key, hit)
+    }
+  }
+  return [...best.values()].sort((a, b) => b.s - a.s).slice(0, finalK).map((x) => x.c)
+}
+
 // ── model ──────────────────────────────────────────────────────────────────────
 const SYS = 'You are taking a multiple-choice exam. Reason in ONE short sentence, then end with a line "FINAL: X" where X is exactly one of A, B, C, or D.'
 async function ask(prompt: string): Promise<string> {
@@ -156,6 +186,25 @@ async function ask(prompt: string): Promise<string> {
     const m = d.choices?.[0]?.message
     return (m?.content || m?.reasoning_content || '').trim()
   } catch { return '' }
+}
+
+// "Plug in each answer" — what a good student does. Instead of "pick one of four" (which a weak
+// model answers with a positional A-bias), verify EACH choice independently against its own
+// targeted evidence, then take the best-supported. Per-option scoring sidesteps the bias and forces
+// the model to evaluate each option on its merits.
+async function verifyArm(question: string, choices: string[], pools: Chunk[][]): Promise<{ letter: string; scores: number[] }> {
+  const scores: number[] = []
+  for (let i = 0; i < choices.length; i++) {
+    const ctx = (await retrieveMulti(question, [choices[i]!], pools, PER_SHOT, 4)).map((h, n) => `[${n + 1}] ${h.text.slice(0, 400)}`).join('\n\n')
+    const prompt = `Relevant MIT course notes (use only what helps):\n${ctx}\n\nQuestion: ${question}\nProposed answer: "${choices[i]}"\n\nUsing the notes and sound reasoning, is the proposed answer the CORRECT answer to the question? Reply on ONE line exactly: "VERDICT: YES conf 0.NN" or "VERDICT: NO conf 0.NN".`
+    const raw = await ask(prompt)
+    const m = /VERDICT:\s*(YES|NO)\D*([01](?:\.\d+)?)?/i.exec(raw)
+    const yes = m ? /yes/i.test(m[1]!) : /\byes\b/i.test(raw)
+    const conf = m && m[2] != null ? Math.min(1, Math.max(0, Number(m[2]))) : 0.5
+    scores[i] = yes ? conf : -conf   // best-supported wins; an explicit NO pushes it negative
+  }
+  let best = 0; for (let i = 1; i < scores.length; i++) if (scores[i]! > scores[best]!) best = i
+  return { letter: LETTERS[best]!, scores }
 }
 function extractLetter(raw: string): string {
   const t = raw.trim()
@@ -189,6 +238,24 @@ function computeBatch(qs: Q[]): CompRes[] {
   return res
 }
 
+const KTYPE_PY = path.join(__dirname, 'knowledge_type.py')
+interface KType { types: string[]; solver: string }
+/** Classify each question's knowledge type (one python call) so the CHAMPION arm understands the
+ *  problem BEFORE approaching: compute the computational, verify the conceptual, retrieve the factual. */
+function ktypeBatch(qs: Q[]): KType[] {
+  const res: KType[] = qs.map(() => ({ types: ['BasicFacts'], solver: 'retrieve' }))
+  if (!qs.length) return res
+  const input = qs.map((q, i) => JSON.stringify({ id: i, question: q.question, choices: q.choices })).join('\n') + '\n'
+  try {
+    const out = execFileSync('python3', [KTYPE_PY, '--batch'], { input, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, env: { ...process.env } })
+    for (const line of out.split('\n')) {
+      if (!line.trim()) continue
+      try { const r = JSON.parse(line) as { id: number; types: string[]; solver: string }; if (typeof r.id === 'number' && r.id < res.length) res[r.id] = { types: r.types, solver: r.solver } } catch { /* skip */ }
+    }
+  } catch { /* default all to retrieve */ }
+  return res
+}
+
 async function main() {
   const mmlu = JSON.parse(fs.readFileSync(BANK, 'utf8')) as Record<string, Q[]>
   const rand = rng(SEED)
@@ -218,8 +285,10 @@ async function main() {
     const sample = shuffle(mmlu[subject]!, rand).slice(0, PER > 0 ? PER : mmlu[subject]!.length)
     process.stdout.write(`\n## ${subject}  (fields: ${fields.join('+')} · ${poolN.toLocaleString()} chunks · ${sample.length} q)\n`)
     for (const arm of ARMS) tally[arm]![subject] = { c: 0, n: 0, a: 0 }
-    // verified-compute arm scored up front (one python call per subject); used by compute + route
-    const comp: CompRes[] = (ARMS.includes('compute') || ARMS.includes('route')) ? computeBatch(sample) : []
+    // verified-compute arm scored up front (one python call per subject); used by compute + route + champion
+    const comp: CompRes[] = (ARMS.includes('compute') || ARMS.includes('route') || ARMS.includes('champion')) ? computeBatch(sample) : []
+    // knowledge-type per question (the 'understand first' step) — used by the champion router
+    const kt: KType[] = ARMS.includes('champion') ? ktypeBatch(sample) : []
 
     for (let i = 0; i < sample.length; i++) {
       const q = sample[i]!
@@ -227,11 +296,12 @@ async function main() {
       const gold = LETTERS[q.answer]
       const row: Record<string, unknown> = { subject, i, gold }
 
-      // brain retrieval (shared by the brain arm AND the route arm's fallback)
+      // brain retrieval (shared by the brain arm AND the route arm's fallback) — multi-shot:
+      // a broad query + one targeted query per choice, union top-K. MMLU_SHOT_K sets how many
+      // chunks land in context (default 8); MMLU_PER_SHOT how many each query contributes (default 3).
       let context = ''
       if (ARMS.includes('brain') || ARMS.includes('route')) {
-        const qVec = await embedText(`${q.question}\n${q.choices.join(' ')}`)
-        const hits = topK(qVec, pools, K)
+        const hits = await retrieveMulti(q.question, q.choices, pools, PER_SHOT, SHOT_K)
         context = hits.map((h, n) => `[${n + 1}] ${h.text.slice(0, 500)}`).join('\n\n')
         row['sources'] = hits.map((h) => `${h.slug}:${h.material}`)
       }
@@ -252,6 +322,16 @@ async function main() {
           if (ci?.answer) { letter = ci.answer; mode = ci.mode } else { letter = await askBrain(); mode = 'retrieve' }
         } else if (arm === 'brain') {
           letter = await askBrain()
+        } else if (arm === 'verify') {            // plug EACH choice in, verify vs its evidence, pick best
+          const v = await verifyArm(q.question, q.choices, pools)
+          letter = v.letter; mode = 'verify'
+          row['verify_scores'] = v.scores.map((s) => Number(s.toFixed(2)))
+        } else if (arm === 'champion') {          // UNDERSTAND FIRST, then route to the right method
+          const k = kt[i] ?? { types: ['BasicFacts'], solver: 'retrieve' }
+          row['ktype'] = k.types
+          if (k.solver === 'compute' && ci?.answer) { letter = ci.answer; mode = `compute:${ci.mode}` }       // computational → verified compute
+          else if (k.solver === 'retrieve') { letter = await askBrain(); mode = `retrieve:${k.types[0]}` }     // factual → multishot lookup
+          else { const v = await verifyArm(q.question, q.choices, pools); letter = v.letter; mode = `verify:${k.types[0]}` }  // conceptual → plug-in verify
         } else {                                  // baseline (closed book)
           letter = extractLetter(await ask(`${base}${ANSWER_RULE}`))
         }
