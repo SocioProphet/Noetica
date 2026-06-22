@@ -238,6 +238,24 @@ function computeBatch(qs: Q[]): CompRes[] {
   return res
 }
 
+const KTYPE_PY = path.join(__dirname, 'knowledge_type.py')
+interface KType { types: string[]; solver: string }
+/** Classify each question's knowledge type (one python call) so the CHAMPION arm understands the
+ *  problem BEFORE approaching: compute the computational, verify the conceptual, retrieve the factual. */
+function ktypeBatch(qs: Q[]): KType[] {
+  const res: KType[] = qs.map(() => ({ types: ['BasicFacts'], solver: 'retrieve' }))
+  if (!qs.length) return res
+  const input = qs.map((q, i) => JSON.stringify({ id: i, question: q.question, choices: q.choices })).join('\n') + '\n'
+  try {
+    const out = execFileSync('python3', [KTYPE_PY, '--batch'], { input, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, env: { ...process.env } })
+    for (const line of out.split('\n')) {
+      if (!line.trim()) continue
+      try { const r = JSON.parse(line) as { id: number; types: string[]; solver: string }; if (typeof r.id === 'number' && r.id < res.length) res[r.id] = { types: r.types, solver: r.solver } } catch { /* skip */ }
+    }
+  } catch { /* default all to retrieve */ }
+  return res
+}
+
 async function main() {
   const mmlu = JSON.parse(fs.readFileSync(BANK, 'utf8')) as Record<string, Q[]>
   const rand = rng(SEED)
@@ -267,8 +285,10 @@ async function main() {
     const sample = shuffle(mmlu[subject]!, rand).slice(0, PER > 0 ? PER : mmlu[subject]!.length)
     process.stdout.write(`\n## ${subject}  (fields: ${fields.join('+')} · ${poolN.toLocaleString()} chunks · ${sample.length} q)\n`)
     for (const arm of ARMS) tally[arm]![subject] = { c: 0, n: 0, a: 0 }
-    // verified-compute arm scored up front (one python call per subject); used by compute + route
-    const comp: CompRes[] = (ARMS.includes('compute') || ARMS.includes('route')) ? computeBatch(sample) : []
+    // verified-compute arm scored up front (one python call per subject); used by compute + route + champion
+    const comp: CompRes[] = (ARMS.includes('compute') || ARMS.includes('route') || ARMS.includes('champion')) ? computeBatch(sample) : []
+    // knowledge-type per question (the 'understand first' step) — used by the champion router
+    const kt: KType[] = ARMS.includes('champion') ? ktypeBatch(sample) : []
 
     for (let i = 0; i < sample.length; i++) {
       const q = sample[i]!
@@ -306,6 +326,12 @@ async function main() {
           const v = await verifyArm(q.question, q.choices, pools)
           letter = v.letter; mode = 'verify'
           row['verify_scores'] = v.scores.map((s) => Number(s.toFixed(2)))
+        } else if (arm === 'champion') {          // UNDERSTAND FIRST, then route to the right method
+          const k = kt[i] ?? { types: ['BasicFacts'], solver: 'retrieve' }
+          row['ktype'] = k.types
+          if (k.solver === 'compute' && ci?.answer) { letter = ci.answer; mode = `compute:${ci.mode}` }       // computational → verified compute
+          else if (k.solver === 'retrieve') { letter = await askBrain(); mode = `retrieve:${k.types[0]}` }     // factual → multishot lookup
+          else { const v = await verifyArm(q.question, q.choices, pools); letter = v.letter; mode = `verify:${k.types[0]}` }  // conceptual → plug-in verify
         } else {                                  // baseline (closed book)
           letter = extractLetter(await ask(`${base}${ANSWER_RULE}`))
         }
