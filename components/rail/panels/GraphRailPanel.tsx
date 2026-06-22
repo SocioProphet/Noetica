@@ -46,10 +46,15 @@ export function GraphRailPanel() {
   const [communities, setCommunities] = useState<Array<{ id: number; title: string; summary: string; trust: number; grounded: boolean; size: number; topNodes: string[]; claims?: Array<{ text: string; grounded: boolean; score: number }> }>>([])
   const [themesLoading, setThemesLoading] = useState(false)
   const [globalQ, setGlobalQ] = useState('')
-  const [globalAnswer, setGlobalAnswer] = useState<{ answer: string; trust: number; grounded: boolean; communitiesUsed: Array<{ title: string }>; localUsed?: number } | null>(null)
+  const [globalAnswer, setGlobalAnswer] = useState<{ answer: string; trust: number; grounded: boolean; communitiesUsed: Array<{ title: string }>; localUsed?: number; mode?: string; followups?: string[] } | null>(null)
   const [globalLoading, setGlobalLoading] = useState(false)
   const [predictions, setPredictions] = useState<Array<{ source: string; target: string; sourceLabel: string; targetLabel: string; score: number; commonNeighbors: number; verified?: boolean; relation?: string; confidence?: number; rationale?: string }>>([])
   const [predLoading, setPredLoading] = useState(false)
+  const [deepMode, setDeepMode] = useState(false)   // DRIFT iterative fan-out on the global ask
+  const [covariates, setCovariates] = useState<Array<{ entity: string; grounded: number; covariates: Array<{ type: string; claim: string; object?: string; grounded: boolean; score: number }> }>>([])
+  const [covLoading, setCovLoading] = useState(false)
+  const [showCov, setShowCov] = useState(false)
+  const [domain, setDomain] = useState<{ domain: string; persona: string } | null>(null)
   const [showTimeline, setShowTimeline] = useState(false)
   const [timeline, setTimeline] = useState<{ from: number; to: number; total: number; buckets: Array<{ start: number; end: number; newNodes: number; cumulative: number; newConcepts: string[] }> } | null>(null)
   const [tlLoading, setTlLoading] = useState(false)
@@ -67,9 +72,17 @@ export function GraphRailPanel() {
     if (!question || globalLoading) return
     setGlobalLoading(true); setGlobalAnswer(null)
     try {
-      const res = await fetch('/api/graph/global', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question }) })
+      const res = await fetch('/api/graph/global', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question, drift: deepMode }) })
       if (res.ok) setGlobalAnswer(await res.json() as NonNullable<typeof globalAnswer>)
     } catch { /* offline */ } finally { setGlobalLoading(false) }
+  }
+  async function loadCovariates() {
+    setCovLoading(true)
+    try {
+      const [cv, tn] = await Promise.all([fetch('/api/graph/covariates'), fetch('/api/graph/tune')])
+      if (cv.ok) { const j = await cv.json() as { entities?: typeof covariates }; setCovariates(j.entities ?? []) }
+      if (tn.ok) { const j = await tn.json() as { domain: string; persona: string }; setDomain({ domain: j.domain, persona: j.persona }) }
+    } catch { /* offline */ } finally { setCovLoading(false) }
   }
   async function loadPredictions() {
     setPredLoading(true)
@@ -399,6 +412,8 @@ export function GraphRailPanel() {
             <input value={globalQ} onChange={(e) => setGlobalQ(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void askGlobal() }}
               placeholder="Ask across everything you know…"
               className="min-w-0 flex-1 rounded-lg border border-[var(--color-border-secondary)] bg-[var(--color-background-primary)] px-2.5 py-1.5 text-[11px] text-[var(--color-text-primary)] outline-none focus:border-[#7c3aed]" />
+            <button onClick={() => setDeepMode((v) => !v)} title="DRIFT: iterative follow-up reasoning (deeper, slower)"
+              className={`shrink-0 rounded-lg border px-2 py-1.5 text-[10px] transition ${deepMode ? 'border-[#7c3aed] text-[#7c3aed]' : 'border-[var(--color-border-secondary)] text-[var(--color-text-tertiary)]'}`}>⟳ deep</button>
             <button onClick={() => void askGlobal()} disabled={globalLoading || !globalQ.trim()}
               className="shrink-0 rounded-lg bg-[#7c3aed] px-2.5 py-1.5 text-[11px] font-semibold text-white transition disabled:opacity-50">
               {globalLoading ? '…' : 'Ask'}
@@ -411,11 +426,15 @@ export function GraphRailPanel() {
                 <span className={`rounded-full px-1.5 py-0.5 font-semibold ${globalAnswer.grounded ? 'bg-[#16a34a]/15 text-[#16a34a]' : 'bg-[#f59e0b]/15 text-[#f59e0b]'}`}>
                   {globalAnswer.grounded ? '✓' : '⚠'} trust {globalAnswer.trust.toFixed(2)}
                 </span>
+                {globalAnswer.mode === 'drift' && <span className="rounded-full bg-[#7c3aed]/15 px-1.5 py-0.5 font-semibold text-[#7c3aed]">⟳ drift</span>}
                 {!!globalAnswer.localUsed && <span className="rounded-full bg-[var(--color-background-secondary)] px-1.5 py-0.5 text-[var(--color-text-tertiary)]">global+{globalAnswer.localUsed} local</span>}
                 {globalAnswer.communitiesUsed.map((c, i) => (
                   <span key={i} className="rounded-full bg-[var(--color-background-secondary)] px-1.5 py-0.5 text-[var(--color-text-tertiary)]">{c.title}</span>
                 ))}
               </div>
+              {globalAnswer.followups && globalAnswer.followups.length > 0 && (
+                <div className="mt-1 text-[9px] italic text-[var(--color-text-tertiary)]">↳ explored: {globalAnswer.followups.join(' · ')}</div>
+              )}
             </div>
           )}
           {/* Community themes — one LLM report per Louvain community, each grounding-trust scored. */}
@@ -463,6 +482,30 @@ export function GraphRailPanel() {
               </div>
             ))}
           </div>
+          {/* Verified covariates — typed claims per entity, each grounding-checked. Header shows the
+              auto-detected domain (prompt tuning). */}
+          <div className="mt-2.5 flex items-center justify-between">
+            <span className="truncate text-[9px] uppercase tracking-wide text-[var(--color-text-tertiary)]">covariates {covariates.length ? `(${covariates.reduce((s, e) => s + e.grounded, 0)}✓)` : ''}{domain ? ` · ${domain.domain}` : ''}</span>
+            <button onClick={() => { setShowCov((v) => !v); if (!showCov && covariates.length === 0) void loadCovariates() }} disabled={covLoading} className="shrink-0 text-[9px] text-[#0891b2] disabled:opacity-50">{covLoading ? 'extracting…' : (showCov ? 'hide' : 'extract')}</button>
+          </div>
+          {showCov && (
+            <div className="mt-1 max-h-44 space-y-1.5 overflow-y-auto">
+              {covariates.length === 0 && !covLoading && <p className="text-[10px] text-[var(--color-text-tertiary)]">No covariates yet — extract typed verified claims per entity.</p>}
+              {covariates.map((e, i) => (
+                <div key={i} className="rounded-lg border border-[var(--color-border-secondary)] bg-[var(--color-background-primary)] px-2.5 py-1.5">
+                  <div className="truncate text-[11px] font-semibold text-[var(--color-text-primary)]">◆ {e.entity}</div>
+                  <ul className="mt-0.5 space-y-0.5">
+                    {e.covariates.map((c, k) => (
+                      <li key={k} className="flex items-start gap-1 text-[9px] leading-snug">
+                        <span className={c.grounded ? 'text-[#16a34a]' : 'text-[#f59e0b]'}>{c.grounded ? '✓' : '✗'}</span>
+                        <span className={c.grounded ? 'text-[var(--color-text-secondary)]' : 'text-[var(--color-text-tertiary)] line-through opacity-70'}><span className="text-[var(--color-text-tertiary)]">[{c.type}]</span> {c.claim}{c.object ? <span className="text-[#0891b2]"> → {c.object}</span> : null}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
