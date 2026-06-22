@@ -306,11 +306,14 @@ async function eliminateArm(question: string, choices: string[], pools: Chunk[][
 
 // ── model ──────────────────────────────────────────────────────────────────────
 const SYS = 'You are taking a multiple-choice exam. Reason in ONE short sentence, then end with a line "FINAL: X" where X is exactly one of A, B, C, or D.'
+const NO_THINK = process.env['MMLU_NO_THINK'] === '1'   // qwen3/r1: '/no_think' disables slow chain-of-thought traces → fast AND strong (the eval fix)
+const nt = (p: string): string => (NO_THINK ? `${p} /no_think` : p)
+const MAXTOK = Number(process.env['MMLU_MAX_TOKENS'] || 220)
 async function ask(prompt: string, temperature = 0): Promise<string> {
   try {
     const res = await fetch(`${API_BASE}/v1/chat/completions`, {
       method: 'POST', headers: { 'content-type': 'application/json', ...AUTH },
-      body: JSON.stringify({ model: MODEL, stream: false, temperature, max_tokens: 220, messages: [{ role: 'system', content: SYS }, { role: 'user', content: prompt }] }),
+      body: JSON.stringify({ model: MODEL, stream: false, temperature, max_tokens: MAXTOK, messages: [{ role: 'system', content: SYS }, { role: 'user', content: nt(prompt) }] }),
       signal: AbortSignal.timeout(TIMEOUT),
     })
     const d = await res.json() as { choices?: Array<{ message?: { content?: string; reasoning_content?: string } }> }
@@ -359,7 +362,7 @@ async function gen(prompt: string): Promise<string> {
   try {
     const res = await fetch(`${API_BASE}/v1/chat/completions`, {
       method: 'POST', headers: { 'content-type': 'application/json', ...AUTH },
-      body: JSON.stringify({ model: MODEL, stream: false, temperature: 0, max_tokens: 220, messages: [{ role: 'user', content: prompt }] }),
+      body: JSON.stringify({ model: MODEL, stream: false, temperature: 0, max_tokens: 220, messages: [{ role: 'user', content: nt(prompt) }] }),
       signal: AbortSignal.timeout(TIMEOUT),
     })
     const d = await res.json() as { choices?: Array<{ message?: { content?: string; reasoning_content?: string } }> }
@@ -649,6 +652,10 @@ async function main() {
             add(row['baseline_pred'], 1)        // closed-book reasoning
             add(row['brain_pred'], 1)           // retrieval
             add(row['qgen_pred'], 1)            // HyDE retrieval
+            if (process.env['MMLU_MANIP'] !== '0') {   // manipulation-layer voter (Self-Discover): compose a plan, then execute — the 'transform before solving' signal inside the council
+              const sdPlan = await ask(`Name the 2-3 reasoning steps that best fit this problem (governing principle / sub-steps / eliminate options / compute / recall definition). Short numbered plan only.\n\n${q.question}`)
+              add(extractLetter(await ask(`Execute this plan:\n${sdPlan}\n\n${base}${ANSWER_RULE}`)), 1.2)
+            }
             const sc = await askVote(`${base}${ANSWER_RULE}`, SC_K)   // diverse reasoning vote (no retrieval noise)
             add(sc.letter, 1 + sc.agree)                              // weight ≤2: breaks ties + can pair with baseline to overrule retrieval on the lanes it hurts, but never overrules a unanimous 3-arm council
             row['sc_agree'] = Number(sc.agree.toFixed(2))
