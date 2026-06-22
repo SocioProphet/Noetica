@@ -20,6 +20,7 @@ const CAPS: Capability[] = [
   { id: 'trajectory', label: 'Trajectory safety monitor', group: 'Safety', sample: { actions: [{ type: 'read' }, { type: 'delete', sensitive: true }, { type: 'delete', sensitive: true }, { type: 'exfil', sensitive: true }], opts: { maxSensitive: 2 } } },
   { id: 'gaia-export', label: 'GAIA ontology export (JSON-LD)', group: 'Ontology', sample: { places: [{ name: 'Lower Manhattan', lat: 40.71, lon: -74.01, type: 'region' }], verified: true } },
   { id: 'agui-run', label: 'AG-UI conformant run', group: 'Standards', sample: { prompt: 'Say hello in one sentence.' } },
+  { id: 'runtime-assets', label: 'Lattice-forge runtimes', group: 'Runtime', sample: {} },
 ]
 
 export function LabSurface() {

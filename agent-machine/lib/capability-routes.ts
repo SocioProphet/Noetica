@@ -158,6 +158,18 @@ export async function handleCapabilityRoute(req: http.IncomingMessage, res: http
         idx.addMany((b.vectors ?? []) as Array<{ id: string; vec: number[] }>)
         return send(200, { results: idx.search((b.query ?? []) as number[], b.k ?? 10, b.excludeId) }), true
       }
+      // ── lattice-forge: express Noetica's runtimes as governed RuntimeAsset manifests ──
+      case 'runtime-assets': {
+        const { modelRuntimeAsset, sidecarRuntimeAsset, conformsToLattice } = await import('./lattice-forge.js')
+        const now = new Date().toISOString()
+        const models = await listLocalModels()
+        const assets = [
+          ...models.map((m) => modelRuntimeAsset(m, { createdAt: now })),
+          sidecarRuntimeAsset('noetica-embed', { version: '0.1.0', createdAt: now, languages: ['rust'], runtimeClass: 'embed-sidecar' }),
+          sidecarRuntimeAsset('noetica-voice', { version: '0.1.0', createdAt: now, languages: ['python'], runtimeClass: 'tts-sidecar' }),
+        ]
+        return send(200, { apiVersion: 'lattice.socioprophet.dev/v1', count: assets.length, assets: assets.map((a) => ({ ...a, _conformance: conformsToLattice(a) })) }), true
+      }
       // ── canonical GAIA ontology export (conformant JSON-LD) ──
       case 'gaia-export': {
         const recs: GaiaRecord[] = [
