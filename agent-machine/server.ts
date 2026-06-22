@@ -5877,6 +5877,50 @@ Rules: MATCH ... RETURN ... with LIMIT 25. NO writes (no CREATE/MERGE/DELETE/SET
     return
   }
 
+  // GET /api/graph/export?format=graphml|json — data portability (anti-lock-in, sovereignty): export the
+  // clean graph + GDS metrics (PageRank/community/betweenness) to a standard format. GraphML opens in
+  // Gephi/Cytoscape/yEd; JSON is the raw nodes+edges+metrics. Your knowledge, take it anywhere.
+  if (req.method === 'GET' && url.pathname === '/api/graph/export') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const format = url.searchParams.get('format') === 'json' ? 'json' : 'graphml'
+        const { analytics } = await analyticsForGraph(false)
+        const g = getGraph()
+        const keep = g.allNodes().filter((n) => cleanLabel(n) !== null && n.properties?.['hygiene_pruned'] !== true && !/corpus-test/i.test(String(n.id)))
+        const keepIds = new Set(keep.map((n) => n.id))
+        const edges = g.allEdges().filter((e) => keepIds.has(e.from) && keepIds.has(e.to))
+        const lbl = (n: typeof keep[number]) => cleanLabel(n) ?? ''
+        const nodes = keep.map((n) => ({ id: n.id, label: lbl(n), kind: String(n.properties?.['kind'] ?? n.labels[0] ?? ''), pagerank: analytics.nodes[n.id]?.pagerank ?? 0, community: analytics.nodes[n.id]?.community ?? -1, betweenness: analytics.nodes[n.id]?.betweenness ?? 0 }))
+        if (format === 'json') {
+          res.writeHead(200, { 'content-type': 'application/json', 'content-disposition': 'attachment; filename="noetica-graph.json"' })
+          res.end(JSON.stringify({ nodes, edges: edges.map((e) => ({ source: e.from, target: e.to, rel: e.label })), exportedAt: new Date().toISOString() }, null, 2))
+          return
+        }
+        const esc = (s: string) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+        const lines = [
+          '<?xml version="1.0" encoding="UTF-8"?>',
+          '<graphml xmlns="http://graphml.graphdrawing.org/xmlns">',
+          '<key id="label" for="node" attr.name="label" attr.type="string"/>',
+          '<key id="kind" for="node" attr.name="kind" attr.type="string"/>',
+          '<key id="pagerank" for="node" attr.name="pagerank" attr.type="double"/>',
+          '<key id="community" for="node" attr.name="community" attr.type="long"/>',
+          '<key id="betweenness" for="node" attr.name="betweenness" attr.type="double"/>',
+          '<key id="rel" for="edge" attr.name="rel" attr.type="string"/>',
+          '<graph edgedefault="undirected">',
+          ...nodes.map((n) => `<node id="${esc(n.id)}"><data key="label">${esc(n.label)}</data><data key="kind">${esc(n.kind)}</data><data key="pagerank">${n.pagerank.toFixed(4)}</data><data key="community">${n.community}</data><data key="betweenness">${n.betweenness.toFixed(4)}</data></node>`),
+          ...edges.map((e, i) => `<edge id="e${i}" source="${esc(e.from)}" target="${esc(e.to)}"><data key="rel">${esc(e.label)}</data></edge>`),
+          '</graph>', '</graphml>',
+        ]
+        res.writeHead(200, { 'content-type': 'application/xml', 'content-disposition': 'attachment; filename="noetica-graph.graphml"' })
+        res.end(lines.join('\n'))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })()
+    return
+  }
+
   // GET /api/graph/anomalies — structural outliers (the investigation/fraud-platform play): bridges
   // (single points of connection), important-but-isolated concepts, and over-connected hubs — what
   // stands out in the topology, classified with an explanation. Reads analytics; cheap.
