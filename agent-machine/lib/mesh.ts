@@ -61,8 +61,8 @@ export async function generateSovereign(opts: {
   let messages = opts.messages
   let mapping: Record<string, string> = {}
   if (doRedact) {
-    const { redactMany } = await import('./redact.js')
-    const rr = redactMany(opts.messages.map((m) => m.content))
+    const { redactMany, loadPolicy } = await import('./redact.js')
+    const rr = redactMany(opts.messages.map((m) => m.content), loadPolicy())   // granular policy: user-disabled categories + custom terms
     mapping = rr.mapping
     messages = opts.messages.map((m, i) => ({ ...m, content: rr.redacted[i] ?? m.content }))
   }

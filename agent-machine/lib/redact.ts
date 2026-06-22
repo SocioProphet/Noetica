@@ -42,15 +42,23 @@ export function redact(text: string): RedactionResult {
   return { redacted: out, mapping, count: Object.keys(mapping).length, kinds }
 }
 
+/** Granular control: which categories to skip, plus user-defined sensitive terms to always mask. */
+export interface RedactPolicy { disabled?: string[]; terms?: string[] }
+function escapeRe(s: string): string { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }
+
 /** Redact several texts under ONE placeholder namespace — identical values share a placeholder across
- *  messages and no two distinct values collide on a placeholder (which per-message redaction would risk). */
-export function redactMany(texts: string[]): { redacted: string[]; mapping: Record<string, string>; count: number; kinds: Record<string, number> } {
+ *  messages and no two distinct values collide on a placeholder (which per-message redaction would risk).
+ *  An optional policy disables categories and/or adds user-defined sensitive terms. */
+export function redactMany(texts: string[], policy?: RedactPolicy): { redacted: string[]; mapping: Record<string, string>; count: number; kinds: Record<string, number> } {
   const mapping: Record<string, string> = {}
   const valueToPh = new Map<string, string>()
   const kinds: Record<string, number> = {}
+  // User terms first (most specific), then the built-in patterns minus any the policy disabled.
+  const termPats = (policy?.terms ?? []).filter((t) => t && t.length >= 2).map((t) => ({ kind: 'CUSTOM', re: new RegExp(escapeRe(t), 'gi') }))
+  const pats = [...termPats, ...PATTERNS.filter((p) => !policy?.disabled?.includes(p.kind))]
   const redacted = texts.map((text) => {
     let out = text || ''
-    for (const { kind, re } of PATTERNS) {
+    for (const { kind, re } of pats) {
       out = out.replace(re, (m) => {
         const seen = valueToPh.get(m); if (seen) return seen
         kinds[kind] = (kinds[kind] ?? 0) + 1
@@ -62,6 +70,22 @@ export function redactMany(texts: string[]): { redacted: string[]; mapping: Reco
     return out
   })
   return { redacted, mapping, count: Object.keys(mapping).length, kinds }
+}
+
+// User-managed redaction policy (granular AI data-access control). Cached; cleared on save.
+import * as os from 'node:os'
+import * as path from 'node:path'
+import * as fs from 'node:fs'
+const POLICY_FILE = path.join(os.homedir(), '.noetica', 'privacy-policy.json')
+let _policy: RedactPolicy | null | undefined
+export function loadPolicy(): RedactPolicy {
+  if (_policy !== undefined) return _policy ?? {}
+  try { _policy = JSON.parse(fs.readFileSync(POLICY_FILE, 'utf8')) as RedactPolicy } catch { _policy = null }
+  return _policy ?? {}
+}
+export function savePolicy(p: RedactPolicy): void {
+  _policy = { disabled: Array.isArray(p.disabled) ? p.disabled : [], terms: Array.isArray(p.terms) ? p.terms.filter(Boolean).slice(0, 200) : [] }
+  try { fs.mkdirSync(path.dirname(POLICY_FILE), { recursive: true }); fs.writeFileSync(POLICY_FILE, JSON.stringify(_policy)) } catch { /* best-effort */ }
 }
 
 /** Restore placeholders → original values (for un-redacting a vendor response). */

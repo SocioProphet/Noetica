@@ -4104,6 +4104,36 @@ Rules: MATCH ... RETURN ... with LIMIT 25. NO writes (no CREATE/MERGE/DELETE/SET
     return
   }
 
+  // GET/POST /api/privacy/policy — granular AI data-access control: which PII categories the firewall
+  // masks before cloud egress + user-defined sensitive terms to always mask. The user decides what the
+  // AI may see. GET returns the policy + available categories; POST { disabled, terms } saves it.
+  if (url.pathname === '/api/privacy/policy' && (req.method === 'GET' || req.method === 'POST')) {
+    if (req.method === 'GET') {
+      setCORSHeaders(res)
+      void (async () => {
+        try {
+          const { loadPolicy } = await import('./lib/redact.js')
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ policy: loadPolicy(), categories: ['EMAIL', 'PHONE', 'SSN', 'CARD', 'APIKEY', 'JWT', 'IP'] }))
+        } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+      })()
+      return
+    }
+    let body = ''
+    req.on('data', (c: Buffer) => { body += c.toString() })
+    req.on('end', () => { void (async () => {
+      setCORSHeaders(res)
+      try {
+        const p = JSON.parse(body || '{}') as { disabled?: string[]; terms?: string[] }
+        const { savePolicy, loadPolicy } = await import('./lib/redact.js')
+        savePolicy({ disabled: Array.isArray(p.disabled) ? p.disabled : [], terms: Array.isArray(p.terms) ? p.terms : [] })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ saved: true, policy: loadPolicy() }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })() })
+    return
+  }
+
   // POST /api/privacy/redact — preview the PII/secret firewall: what would be masked before any cloud
   // egress. Body: { text }. Returns the redacted text + counts by kind (NOT the secret→placeholder map).
   if (req.method === 'POST' && url.pathname === '/api/privacy/redact') {
