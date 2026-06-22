@@ -38,24 +38,36 @@ for i in \$(seq 1 60); do nvidia-smi >/dev/null 2>&1 && break; sleep 10; done
 nvidia-smi || echo "WARN: no GPU visible (will run slow)"
 
 step "install ollama (GPU)"
-curl -fsSL https://ollama.com/install.sh | sh
+timeout 300 bash -c 'curl -fsSL https://ollama.com/install.sh | sh' || { step "FATAL ollama install"; exit 1; }
 systemctl stop ollama 2>/dev/null || true
 OLLAMA_NUM_PARALLEL=8 OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_KEEP_ALIVE=30m nohup ollama serve >/var/log/ollama.log 2>&1 &
 sleep 12
-for n in 1 2 3 4 5; do ollama pull $MODEL && break; echo "model retry \$n"; sleep 8; done
-for n in 1 2 3 4 5; do ollama pull nomic-embed-text && break; echo "embed retry \$n"; sleep 8; done
-ollama list | grep -q nomic-embed-text || { echo "FATAL: embed model missing"; exit 1; }
 
-step "install node + python + pull code + brain + bank"
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs git python3-pip
-pip3 install --break-system-packages -q sympy numpy scikit-learn || pip3 install -q sympy numpy scikit-learn
-mkdir -p /opt/am && gsutil -m cp -r "\$GCS/code/agent-machine/*" /opt/am/ && cd /opt/am && npm ci
-mkdir -p /opt/OCW && gsutil cp "\$GCS/brain-complete.tar.gz" /tmp/b.tgz && tar xzf /tmp/b.tgz -C /opt/OCW
+step "pull model $MODEL (each pull timeout-bounded — a STALLED download can't hang forever)"
+for n in 1 2 3 4 5; do timeout 1200 ollama pull $MODEL && break; step "model pull retry \$n (timed out/failed)"; sleep 8; done
+ollama list | grep -q "$MODEL" || { step "FATAL: model $MODEL missing after retries"; exit 1; }
+for n in 1 2 3 4 5; do timeout 600 ollama pull nomic-embed-text && break; step "embed retry \$n"; sleep 8; done
+ollama list | grep -q nomic-embed-text || { step "FATAL: embed model missing"; exit 1; }
+
+step "install node + python"
+timeout 180 bash -c 'curl -fsSL https://deb.nodesource.com/setup_20.x | bash -' && timeout 300 apt-get install -y nodejs git python3-pip || { step "FATAL: node/python install"; exit 1; }
+PY=\$(which python3)
+\$PY -m pip install -q sympy numpy scikit-learn || \$PY -m pip install --break-system-packages -q sympy numpy scikit-learn
+\$PY -c "import sympy,numpy,sklearn" || { step "FATAL: python deps not importable by \$PY"; exit 1; }
+
+step "pull code + npm ci"
+mkdir -p /opt/am && timeout 300 gsutil -m cp -r "\$GCS/code/agent-machine/*" /opt/am/ || { step "FATAL: code pull"; exit 1; }
+cd /opt/am && timeout 600 npm ci || { step "FATAL: npm ci hung/failed"; exit 1; }
+
+step "pull brain (1.5GB) + bank"
+mkdir -p /opt/OCW && timeout 900 gsutil cp "\$GCS/brain-complete.tar.gz" /tmp/b.tgz || { step "FATAL: brain pull"; exit 1; }
+tar xzf /tmp/b.tgz -C /opt/OCW || { step "FATAL: brain extract"; exit 1; }
 mkdir -p /root/.noetica/corpus/benchmarks && gsutil cp "\$GCS/mmlu_stem.json" /root/.noetica/corpus/benchmarks/mmlu_stem.json
+step "SETUP COMPLETE ✓ — starting eval"
 
 step "run CHAMPION eval — $MODEL · arms=$ARMS · n=$PER · seed=1729"
 OLLAMA_HOST=http://127.0.0.1:11434 OCW_BRAIN=/opt/OCW/_brain \
-  MMLU_MODEL=$MODEL MMLU_ARMS=$ARMS MMLU_PER_SUBJECT=$PER MMLU_SEED=1729 MMLU_SUBJECTS=$SUBJECTS MMLU_MAX_CHUNKS=$MAXCHUNKS MMLU_CONC=8 \
+  MMLU_MODEL=$MODEL MMLU_ARMS=$ARMS MMLU_PER_SUBJECT=$PER MMLU_SEED=1729 MMLU_SUBJECTS=$SUBJECTS MMLU_MAX_CHUNKS=$MAXCHUNKS MMLU_CONC=8 MMLU_CISC=${CISC:-1} MMLU_HYBRID=${HYBRID:-1} \
   bash scripts/run-exam.sh 2>&1 | tee /var/log/scoreboard.txt || echo "EVAL EXITED \$?"
 gsutil cp /var/log/scoreboard.txt "\$GCS/bench/champion-$MODEL.txt" || true
 # keep the rich per-question transcript (sources, ktype, sc_agree, qgen) for the miss-deepdive —

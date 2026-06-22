@@ -32,10 +32,15 @@ nvidia-smi || echo "WARN: no GPU (GLiNER will run on CPU, slow)"
 
 step "install python + NLP stack (torch+gliner+spacy+nltk+keybert)"
 apt-get update -y && apt-get install -y python3-pip
-pip3 install --break-system-packages -q nltk spacy gliner keybert numpy scikit-learn scipy
-python3 -c "import nltk; [nltk.download(d,quiet=True) for d in ('punkt','punkt_tab','averaged_perceptron_tagger','averaged_perceptron_tagger_eng','wordnet')]"
-python3 -m spacy download en_core_web_sm
-python3 -c "import torch;print('CUDA:',torch.cuda.is_available())"
+# CRITICAL: install into the SAME interpreter that runs the script (DLVM has conda+system python;
+# bare pip3 last time installed numpy to the wrong one → ModuleNotFoundError on every field).
+PY=\$(which python3)
+\$PY -m pip install -q nltk spacy gliner keybert numpy scikit-learn scipy \
+  || \$PY -m pip install --break-system-packages -q nltk spacy gliner keybert numpy scikit-learn scipy
+\$PY -c "import numpy, sklearn, gliner, nltk, spacy; print('DEPS OK on', __import__('sys').executable)" || { echo "FATAL: deps not importable by \$PY"; exit 1; }
+\$PY -c "import nltk; [nltk.download(d,quiet=True) for d in ('punkt','punkt_tab','averaged_perceptron_tagger','averaged_perceptron_tagger_eng','wordnet')]"
+\$PY -m spacy download en_core_web_sm
+\$PY -c "import torch;print('CUDA:',torch.cuda.is_available())"
 
 step "pull code + brain"
 mkdir -p /opt/am/scripts && gsutil -m cp "\$GCS/code/agent-machine/scripts/concept_extract.py" "\$GCS/code/agent-machine/scripts/glossary_build.py" /opt/am/scripts/
