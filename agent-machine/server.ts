@@ -216,6 +216,24 @@ async function analyticsForGraph(refresh = false): Promise<{ analytics: import('
   return { analytics, sig, labelOf }
 }
 
+// Build (or load cached) verified covariates for the top entities — shared by /covariates +
+// /contradictions. Auto-tunes the extraction persona from the detected domain.
+async function buildOrLoadCovariates(refresh = false): Promise<{ entities: import('./lib/graph-covariates.js').EntityCovariates[]; sig: string; model: string; cached: boolean }> {
+  const { analytics, sig, labelOf } = await analyticsForGraph(refresh)
+  const model = await pickChatModel()
+  const cached = loadCovariatesCache()
+  if (!refresh && cached && cached.sig === sig && cached.model === model) return { entities: cached.entities, sig, model, cached: true }
+  const { lexicalSearch } = await import('./lib/doc-store.js')
+  const { buildCovariates } = await import('./lib/graph-covariates.js')
+  const topEntities = [...new Set(Object.values(analytics.nodes).sort((a, b) => b.pagerank - a.pagerank)
+    .map((m) => labelOf(m.id)).filter((l) => l && !/^[0-9a-f]{8}-[0-9a-f]{4}/i.test(l) && !/^\d{8,}$/.test(l.replace(/\s/g, ''))))].slice(0, 12)
+  const gather = (e: string) => { try { return lexicalSearch(e, 5).map((h) => h.text) } catch { return [] } }
+  const profile = await getDomainProfile(sig, model, async () => [...topEntities.slice(0, 10), ...topEntities.slice(0, 6).flatMap(gather).slice(0, 8)])
+  const entities = await buildCovariates(topEntities, gather, { model, maxEntities: 12, maxPerEntity: 5, persona: profile.persona })
+  saveCovariatesCache({ sig, model, entities, builtAt: new Date().toISOString() })
+  return { entities, sig, model, cached: false }
+}
+
 // Cross-process signal for the SourceOS surface (e.g. bearbrowser): when the
 // security lane is armed, bearbrowser auto-enables Tor for anonymized egress.
 // Written to the shared SourceOS config dir so the browser can poll it without
@@ -5480,28 +5498,31 @@ const server = http.createServer((req, res) => {
     void (async () => {
       try {
         const refresh = url.searchParams.get('refresh') === '1'
-        const { analytics, sig, labelOf } = await analyticsForGraph(refresh)
-        const model = url.searchParams.get('model') || await pickChatModel()
-        const cached = loadCovariatesCache()
-        const hit = !refresh && !!cached && cached.sig === sig && cached.model === model
-        let entities: import('./lib/graph-covariates.js').EntityCovariates[]
-        if (hit) { entities = cached!.entities }
-        else {
-          const { lexicalSearch } = await import('./lib/doc-store.js')
-          const { buildCovariates } = await import('./lib/graph-covariates.js')
-          // top entities by importance, real concepts only (skip bare UUIDs/timestamps)
-          const topEntities = [...new Set(Object.values(analytics.nodes).sort((a, b) => b.pagerank - a.pagerank)
-            .map((m) => labelOf(m.id)).filter((l) => l && !/^[0-9a-f]{8}-[0-9a-f]{4}/i.test(l) && !/^\d{8,}$/.test(l.replace(/\s/g, ''))))].slice(0, 12)
-          const gather = (e: string) => { try { return lexicalSearch(e, 5).map((h) => h.text) } catch { return [] } }
-          // Auto-tune: detect the corpus domain → persona, so covariate extraction adapts to the material.
-          const profile = await getDomainProfile(sig, model, async () => [...topEntities.slice(0, 10), ...topEntities.slice(0, 6).flatMap(gather).slice(0, 8)])
-          entities = await buildCovariates(topEntities, gather, { model, maxEntities: 12, maxPerEntity: 5, persona: profile.persona })
-          saveCovariatesCache({ sig, model, entities, builtAt: new Date().toISOString() })
-        }
+        const { entities, model, cached } = await buildOrLoadCovariates(refresh)
         const total = entities.reduce((s, e) => s + e.covariates.length, 0)
         const grounded = entities.reduce((s, e) => s + e.grounded, 0)
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ model, entities, entityCount: entities.length, covariateCount: total, groundedCount: grounded, cached: hit }))
+        res.end(JSON.stringify({ model, entities, entityCount: entities.length, covariateCount: total, groundedCount: grounded, cached }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })()
+    return
+  }
+
+  // GET /api/graph/contradictions — find + adjudicate contradictions among verified covariates: claims
+  // that can't both be true, surfaced as "contested" knowledge (the epistemic layer). ?refresh rebuilds.
+  if (req.method === 'GET' && url.pathname === '/api/graph/contradictions') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const refresh = url.searchParams.get('refresh') === '1'
+        const { entities, model } = await buildOrLoadCovariates(refresh)
+        const { findContradictions } = await import('./lib/graph-contradict.js')
+        const contradictions = await findContradictions(entities, { model, maxCandidates: 14 })
+        const claims = entities.reduce((s, e) => s + e.covariates.length, 0)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ model, contradictions, count: contradictions.length, claimsScanned: claims }))
       } catch (e) {
         res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
       }
