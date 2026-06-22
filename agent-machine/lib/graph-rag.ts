@@ -37,6 +37,7 @@ export interface GlobalAnswer {
   trust: number
   grounded: boolean
   communitiesUsed: Array<{ id: number; title: string; relevance: number }>
+  localUsed: number   // # of local entity-level passages blended in (DRIFT-style hybrid)
 }
 
 const STOP = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'what', 'which', 'are', 'how', 'does', 'about'])
@@ -119,7 +120,7 @@ Base the summary and claims ONLY on the concepts and evidence above. Do not inve
 }
 
 /** Global sensemaking: map a question over relevant community reports, reduce to one grounded answer. */
-export async function globalSearch(question: string, reports: CommunityReport[], opts: { model: string; maxCommunities?: number }): Promise<GlobalAnswer> {
+export async function globalSearch(question: string, reports: CommunityReport[], opts: { model: string; maxCommunities?: number; local?: boolean }): Promise<GlobalAnswer> {
   const qTok = tokens(question)
   const relevance = (r: CommunityReport): number => {
     const rTok = tokens(`${r.title} ${r.summary} ${r.claims.map((c) => c.text).join(' ')} ${r.topNodes.join(' ')}`)
@@ -141,21 +142,32 @@ export async function globalSearch(question: string, reports: CommunityReport[],
     } catch { /* skip this community */ }
   }
 
-  if (partials.length === 0) {
-    return { answer: "I don't have enough in the knowledge graph to answer that.", trust: 0, grounded: false, communitiesUsed: [] }
+  // DRIFT-style hybrid: blend the GLOBAL community themes (partials) with LOCAL entity-level evidence —
+  // specific passages from the doc store matching the question. Global gives sensemaking; local gives
+  // the specifics. The final answer is grounded against both.
+  let local: string[] = []
+  if (opts.local !== false) {
+    try { local = [...new Set(lexicalSearch(question, 6).map((h) => h.text))].slice(0, 5) } catch { /* local best-effort */ }
   }
 
-  // REDUCE — synthesize the partials into one coherent answer.
-  const reducePrompt = `Question: ${question}\n\nPartial answers, each from one community of the user's knowledge graph:\n${partials.map((p) => `[${p.title}] ${p.text}`).join('\n')}\n\nSynthesize a single coherent answer grounded ONLY in these partial answers. Be concise and concrete. Do not add facts not present above.`
-  let answer = ''
-  try { const { content } = await generateOllamaText({ model: opts.model, messages: [{ role: 'user', content: reducePrompt }], temperature: 0.3 }); answer = content.trim() } catch { answer = partials.map((p) => p.text).join(' ') }
+  if (partials.length === 0 && local.length === 0) {
+    return { answer: "I don't have enough in the knowledge graph to answer that.", trust: 0, grounded: false, communitiesUsed: [], localUsed: 0 }
+  }
 
-  // Grounding of the final answer against the partials (the map-step outputs).
-  const g = verifyGrounding(answer, partials.map((p) => ({ text: p.text })))
+  // REDUCE — synthesize global themes + local passages into one grounded answer.
+  const globalBlock = partials.length ? `GLOBAL — themes across your knowledge graph:\n${partials.map((p) => `[${p.title}] ${p.text}`).join('\n')}` : ''
+  const localBlock = local.length ? `LOCAL — specific passages:\n${local.map((t, i) => `(${i + 1}) ${t.slice(0, 300)}`).join('\n')}` : ''
+  const reducePrompt = `Question: ${question}\n\n${[globalBlock, localBlock].filter(Boolean).join('\n\n')}\n\nSynthesize a single coherent answer grounded ONLY in the material above (global themes + local passages). Be concise and concrete; do not add facts not present above.`
+  let answer = ''
+  try { const { content } = await generateOllamaText({ model: opts.model, messages: [{ role: 'user', content: reducePrompt }], temperature: 0.3 }); answer = content.trim() } catch { answer = partials.map((p) => p.text).join(' ') || local.join(' ') }
+
+  // Grounding of the final answer against BOTH global partials and local passages.
+  const g = verifyGrounding(answer, [...partials.map((p) => ({ text: p.text })), ...local.map((t) => ({ text: t }))])
   return {
     answer,
     trust: Number(g.score.toFixed(2)),
     grounded: g.grounded,
     communitiesUsed: partials.map((p) => { const s = scored.find((x) => x.r.id === p.id); return { id: p.id, title: p.title, relevance: Number((s?.rel ?? 0).toFixed(2)) } }),
+    localUsed: local.length,
   }
 }

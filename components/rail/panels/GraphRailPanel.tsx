@@ -46,7 +46,7 @@ export function GraphRailPanel() {
   const [communities, setCommunities] = useState<Array<{ id: number; title: string; summary: string; trust: number; grounded: boolean; size: number; topNodes: string[]; claims?: Array<{ text: string; grounded: boolean; score: number }> }>>([])
   const [themesLoading, setThemesLoading] = useState(false)
   const [globalQ, setGlobalQ] = useState('')
-  const [globalAnswer, setGlobalAnswer] = useState<{ answer: string; trust: number; grounded: boolean; communitiesUsed: Array<{ title: string }> } | null>(null)
+  const [globalAnswer, setGlobalAnswer] = useState<{ answer: string; trust: number; grounded: boolean; communitiesUsed: Array<{ title: string }>; localUsed?: number } | null>(null)
   const [globalLoading, setGlobalLoading] = useState(false)
   const [predictions, setPredictions] = useState<Array<{ source: string; target: string; sourceLabel: string; targetLabel: string; score: number; commonNeighbors: number; verified?: boolean; relation?: string; confidence?: number; rationale?: string }>>([])
   const [predLoading, setPredLoading] = useState(false)
@@ -411,6 +411,7 @@ export function GraphRailPanel() {
                 <span className={`rounded-full px-1.5 py-0.5 font-semibold ${globalAnswer.grounded ? 'bg-[#16a34a]/15 text-[#16a34a]' : 'bg-[#f59e0b]/15 text-[#f59e0b]'}`}>
                   {globalAnswer.grounded ? '✓' : '⚠'} trust {globalAnswer.trust.toFixed(2)}
                 </span>
+                {!!globalAnswer.localUsed && <span className="rounded-full bg-[var(--color-background-secondary)] px-1.5 py-0.5 text-[var(--color-text-tertiary)]">global+{globalAnswer.localUsed} local</span>}
                 {globalAnswer.communitiesUsed.map((c, i) => (
                   <span key={i} className="rounded-full bg-[var(--color-background-secondary)] px-1.5 py-0.5 text-[var(--color-text-tertiary)]">{c.title}</span>
                 ))}
