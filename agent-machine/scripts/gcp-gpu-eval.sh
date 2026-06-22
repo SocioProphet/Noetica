@@ -39,7 +39,8 @@ nvidia-smi || echo "WARN: no GPU visible (will run slow)"
 
 step "install ollama (GPU)"
 curl -fsSL https://ollama.com/install.sh | sh
-systemctl restart ollama 2>/dev/null || (ollama serve >/var/log/ollama.log 2>&1 &)
+systemctl stop ollama 2>/dev/null || true
+OLLAMA_NUM_PARALLEL=8 OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_KEEP_ALIVE=30m nohup ollama serve >/var/log/ollama.log 2>&1 &
 sleep 12
 for n in 1 2 3 4 5; do ollama pull $MODEL && break; echo "model retry \$n"; sleep 8; done
 for n in 1 2 3 4 5; do ollama pull nomic-embed-text && break; echo "embed retry \$n"; sleep 8; done
@@ -54,7 +55,7 @@ mkdir -p /root/.noetica/corpus/benchmarks && gsutil cp "\$GCS/mmlu_stem.json" /r
 
 step "run CHAMPION eval — $MODEL · arms=$ARMS · n=$PER · seed=1729"
 OLLAMA_HOST=http://127.0.0.1:11434 OCW_BRAIN=/opt/OCW/_brain \
-  MMLU_MODEL=$MODEL MMLU_ARMS=$ARMS MMLU_PER_SUBJECT=$PER MMLU_SEED=1729 MMLU_SUBJECTS=$SUBJECTS MMLU_MAX_CHUNKS=$MAXCHUNKS \
+  MMLU_MODEL=$MODEL MMLU_ARMS=$ARMS MMLU_PER_SUBJECT=$PER MMLU_SEED=1729 MMLU_SUBJECTS=$SUBJECTS MMLU_MAX_CHUNKS=$MAXCHUNKS MMLU_CONC=8 \
   bash scripts/run-exam.sh 2>&1 | tee /var/log/scoreboard.txt || echo "EVAL EXITED \$?"
 gsutil cp /var/log/scoreboard.txt "\$GCS/bench/champion-$MODEL.txt" || true
 

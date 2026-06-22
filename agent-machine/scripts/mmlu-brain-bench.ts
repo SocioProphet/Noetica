@@ -44,6 +44,7 @@ const K = Number(process.env['MMLU_K'] || 4)
 const SHOT_K = Number(process.env['MMLU_SHOT_K'] || 8)      // chunks injected after multi-shot union
 const PER_SHOT = Number(process.env['MMLU_PER_SHOT'] || 3)  // chunks each query (broad + per-choice) contributes
 const ARMS = (process.env['MMLU_ARMS'] || 'baseline,brain').split(',').map((s) => s.trim()).filter(Boolean)
+const CONC = Number(process.env['MMLU_CONC'] || 6)   // questions scored concurrently — ollama calls are I/O; serial left the GPU idle
 const MAX_CHUNKS = Number(process.env['MMLU_MAX_CHUNKS'] || 150_000)
 const SEED = Number(process.env['MMLU_SEED'] ?? (Date.now() % 2147483647))
 const TIMEOUT = Number(process.env['MMLU_TIMEOUT_MS'] || 120_000)
@@ -150,11 +151,21 @@ function topK(qVec: number[], pools: Chunk[][], k: number): Chunk[] {
 // the discriminating fact lands in context. For memorization subjects (biology) this is the
 // difference between "the topic is in the brain" and "the answer is in the brain". Union by best
 // cosine across shots, dedup, take the top finalK.
+// embedCached — brain, qgen, champion and verify all re-embed the SAME per-choice queries.
+// Memoize so each distinct query embeds once per run (cuts ollama calls ~half).
+const _embCache = new Map<string, Promise<number[]>>()
+function embedCached(text: string): Promise<number[]> {
+  const k = text.slice(0, 240)
+  let p = _embCache.get(k)
+  if (!p) { p = embedText(text); _embCache.set(k, p) }
+  return p
+}
+
 async function retrieveMulti(question: string, choices: string[], pools: Chunk[][], perShot: number, finalK: number, extra: string[] = []): Promise<Chunk[]> {
   const queries = [`${question}\n${choices.join(' ')}`, ...choices.map((c) => `${question}\n${c}`), ...extra.filter(Boolean)]
   const best = new Map<string, { c: Chunk; s: number }>()
   for (const query of queries) {
-    const qv = await embedText(query)
+    const qv = await embedCached(query)
     if (!qv.length) continue
     let qn = 0; for (const v of qv) qn += v * v; qn = Math.sqrt(qn) || 1
     const shot: Array<{ c: Chunk; s: number }> = []
@@ -179,7 +190,7 @@ async function ask(prompt: string, temperature = 0): Promise<string> {
   try {
     const res = await fetch(`${BASE}/v1/chat/completions`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: MODEL, stream: false, temperature, messages: [{ role: 'system', content: SYS }, { role: 'user', content: prompt }] }),
+      body: JSON.stringify({ model: MODEL, stream: false, temperature, max_tokens: 220, messages: [{ role: 'system', content: SYS }, { role: 'user', content: prompt }] }),
       signal: AbortSignal.timeout(TIMEOUT),
     })
     const d = await res.json() as { choices?: Array<{ message?: { content?: string; reasoning_content?: string } }> }
@@ -211,7 +222,7 @@ async function gen(prompt: string): Promise<string> {
   try {
     const res = await fetch(`${BASE}/v1/chat/completions`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: MODEL, stream: false, temperature: 0, messages: [{ role: 'user', content: prompt }] }),
+      body: JSON.stringify({ model: MODEL, stream: false, temperature: 0, max_tokens: 220, messages: [{ role: 'user', content: prompt }] }),
       signal: AbortSignal.timeout(TIMEOUT),
     })
     const d = await res.json() as { choices?: Array<{ message?: { content?: string; reasoning_content?: string } }> }
@@ -340,7 +351,7 @@ async function main() {
     // knowledge-type per question (the 'understand first' step) — used by the champion router
     const kt: KType[] = ARMS.includes('champion') ? ktypeBatch(sample) : []
 
-    for (let i = 0; i < sample.length; i++) {
+    const scoreQuestion = async (i: number) => {
       const q = sample[i]!
       const base = `${q.question}\n\n${q.choices.map((c, j) => `${LETTERS[j]}. ${c}`).join('\n')}`
       const gold = LETTERS[q.answer]
@@ -379,6 +390,7 @@ async function main() {
       const askQgen = async (): Promise<string> => (qgenLetter ??= extractLetter(await ask(qgenPrompt)))
       const ci = comp[i]
       const marks: string[] = []
+      const results: Array<{ arm: string; ok: boolean; attempted: boolean }> = []
       for (const arm of ARMS) {
         let letter = ''; let mode = ''; let attempted = true
         if (arm === 'compute') {                 // verified compute only (abstains where no law fits)
@@ -405,12 +417,26 @@ async function main() {
           letter = extractLetter(await ask(`${base}${ANSWER_RULE}`))
         }
         const ok = letter === gold
-        const t = tally[arm]![subject]!; t.n++; if (ok) t.c++; if (arm === 'compute' && attempted) t.a = (t.a ?? 0) + 1
+        results.push({ arm, ok, attempted })
         row[`${arm}_pred`] = letter || '?'; row[`${arm}_ok`] = ok; if (mode) row[`${arm}_mode`] = mode
         marks.push(`${arm}:${ok ? '✓' : '✗'}${arm === 'compute' && !attempted ? '·' : (letter || '?')}`)
       }
-      fs.appendFileSync(TRANSCRIPT, JSON.stringify(row) + '\n')
-      console.log(`  ${String(i + 1).padStart(3)}. ${marks.join('  ')}  /${gold}`)
+      return { i, row, marks, gold, results }
+    }
+
+    // bounded-parallel over questions (ollama I/O overlaps); apply shared state in order
+    for (let s = 0; s < sample.length; s += CONC) {
+      const batch = await Promise.all(
+        Array.from({ length: Math.min(CONC, sample.length - s) }, (_, j) => scoreQuestion(s + j)),
+      )
+      for (const r of batch) {
+        for (const res of r.results) {
+          const t = tally[res.arm]![subject]!; t.n++; if (res.ok) t.c++
+          if (res.arm === 'compute' && res.attempted) t.a = (t.a ?? 0) + 1
+        }
+        fs.appendFileSync(TRANSCRIPT, JSON.stringify(r.row) + '\n')
+        console.log(`  ${String(r.i + 1).padStart(3)}. ${r.marks.join('  ')}  /${r.gold}`)
+      }
     }
   }
 
