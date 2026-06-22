@@ -5650,6 +5650,35 @@ const server = http.createServer((req, res) => {
     return
   }
 
+  // GET /api/graph/anomalies — structural outliers (the investigation/fraud-platform play): bridges
+  // (single points of connection), important-but-isolated concepts, and over-connected hubs — what
+  // stands out in the topology, classified with an explanation. Reads analytics; cheap.
+  if (req.method === 'GET' && url.pathname === '/api/graph/anomalies') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { analytics } = await analyticsForGraph(false)
+        const g = getGraph()
+        const byId = new Map(g.allNodes().map((n) => [n.id, n]))
+        const lbl = (id: string) => { const n = byId.get(id); return n ? (cleanLabel(n) ?? '') : '' }
+        const metrics = Object.values(analytics.nodes)
+        const maxDeg = Math.max(1, ...metrics.map((m) => m.degree))
+        const bridges = metrics.filter((m) => m.betweenness >= 0.4).sort((a, b) => b.betweenness - a.betweenness).slice(0, 6)
+          .map((m) => ({ label: lbl(m.id), kind: 'bridge', detail: `betweenness ${m.betweenness.toFixed(2)} — a connector between otherwise-separate areas; its loss fragments the graph` }))
+        const isolated = metrics.filter((m) => m.pagerank >= 0.3 && m.degree <= 2).sort((a, b) => b.pagerank - a.pagerank).slice(0, 6)
+          .map((m) => ({ label: lbl(m.id), kind: 'isolated-importance', detail: `importance ${m.pagerank.toFixed(2)} but only ${m.degree} link(s) — under-connected for its weight` }))
+        const hubs = metrics.filter((m) => m.degree >= maxDeg * 0.7).sort((a, b) => b.degree - a.degree).slice(0, 4)
+          .map((m) => ({ label: lbl(m.id), kind: 'hub', detail: `${m.degree} links — an over-connected hub` }))
+        const anomalies = [...bridges, ...isolated, ...hubs].filter((a) => a.label)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ anomalies, count: anomalies.length, byKind: { bridge: bridges.length, isolatedImportance: isolated.length, hub: hubs.length } }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })()
+    return
+  }
+
   // GET /api/graph/knowledge-health — knowledge-health synthesis: one trust+completeness score over the
   // graph, aggregating community structure, grounded-claim ratio, community trust, and structural gaps.
   // Cheap (reads cached signals; never rebuilds) — an instant "is my brain trustworthy + complete" view.
