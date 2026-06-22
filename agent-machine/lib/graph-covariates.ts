@@ -31,10 +31,10 @@ function safeArr(s: string): Array<{ type?: string; claim?: string; object?: str
 }
 
 /** Extract + verify typed claims for one entity from its evidence passages. */
-export async function extractCovariates(entity: string, evidence: string[], opts: { model: string; max?: number }): Promise<Covariate[]> {
+export async function extractCovariates(entity: string, evidence: string[], opts: { model: string; max?: number; persona?: string }): Promise<Covariate[]> {
   if (!entity || evidence.length === 0) return []
   const corpus = [...new Set(evidence)].join('\n---\n').slice(0, 5000)
-  const prompt = `Extract factual claims about the entity "${entity}" from the evidence below. Each claim is a typed statement grounded in the text.
+  const prompt = `${opts.persona ? `${opts.persona}\n\n` : ''}Extract factual claims about the entity "${entity}" from the evidence below. Each claim is a typed statement grounded in the text.
 
 Evidence:
 ${corpus}
@@ -69,11 +69,11 @@ Base every claim ONLY on the evidence. Do not infer or speculate. JSON only.`
 export async function buildCovariates(
   entities: string[],
   gatherText: (entity: string) => string[],
-  opts: { model: string; maxEntities?: number; maxPerEntity?: number },
+  opts: { model: string; maxEntities?: number; maxPerEntity?: number; persona?: string },
 ): Promise<EntityCovariates[]> {
   const out: EntityCovariates[] = []
   for (const entity of entities.slice(0, opts.maxEntities ?? 12)) {
-    const covariates = await extractCovariates(entity, gatherText(entity), { model: opts.model, max: opts.maxPerEntity ?? 6 })
+    const covariates = await extractCovariates(entity, gatherText(entity), { model: opts.model, max: opts.maxPerEntity ?? 6, ...(opts.persona ? { persona: opts.persona } : {}) })
     if (covariates.length) out.push({ entity, covariates, grounded: covariates.filter((c) => c.grounded).length })
   }
   return out

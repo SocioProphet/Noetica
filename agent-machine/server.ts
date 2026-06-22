@@ -166,6 +166,28 @@ function saveCovariatesCache(c: CovariatesCache): void {
   try { fs.mkdirSync(path.dirname(COVARIATES_CACHE_FILE), { recursive: true }); fs.writeFileSync(COVARIATES_CACHE_FILE, JSON.stringify(c)) } catch { /* best-effort */ }
 }
 
+// Auto prompt-tuning: a domain profile (persona + typical entity/claim types) detected from the corpus,
+// threaded into community summarization + covariate extraction. Cached by analytics sig + model.
+const TUNE_CACHE_FILE = path.join(os.homedir(), '.noetica', 'cache', 'graph-tune.json')
+type TuneCache = { sig: string; model: string; profile: import('./lib/graph-tune.js').DomainProfile; builtAt: string }
+let _tuneCache: TuneCache | null = null
+function loadTuneCache(): TuneCache | null {
+  if (_tuneCache) return _tuneCache
+  try { _tuneCache = JSON.parse(fs.readFileSync(TUNE_CACHE_FILE, 'utf8')) as TuneCache; return _tuneCache } catch { return null }
+}
+function saveTuneCache(c: TuneCache): void {
+  _tuneCache = c
+  try { fs.mkdirSync(path.dirname(TUNE_CACHE_FILE), { recursive: true }); fs.writeFileSync(TUNE_CACHE_FILE, JSON.stringify(c)) } catch { /* best-effort */ }
+}
+async function getDomainProfile(sig: string, model: string, sampleProvider: () => Promise<string[]>, refresh = false): Promise<import('./lib/graph-tune.js').DomainProfile> {
+  const cached = loadTuneCache()
+  if (!refresh && cached && cached.sig === sig && cached.model === model) return cached.profile
+  const { detectDomain } = await import('./lib/graph-tune.js')
+  const profile = await detectDomain(await sampleProvider(), { model })
+  saveTuneCache({ sig, model, profile, builtAt: new Date().toISOString() })
+  return profile
+}
+
 // Pick the best locally-available chat model for GraphRAG summarization (prefer small+fast).
 async function pickChatModel(): Promise<string> {
   const preferred = ['qwen2.5:7b', 'qwen2.5:14b', 'deepseek-r1:8b', 'llama3.2:3b', 'qwen2.5:3b']
@@ -5428,6 +5450,29 @@ const server = http.createServer((req, res) => {
     return
   }
 
+  // GET /api/graph/tune — auto prompt-tuning: the domain profile (persona + entity/claim types)
+  // detected from the corpus and used to specialize extraction. Cached; ?refresh=1 re-detects.
+  if (req.method === 'GET' && url.pathname === '/api/graph/tune') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const refresh = url.searchParams.get('refresh') === '1'
+        const { analytics, sig, labelOf } = await analyticsForGraph(false)
+        const model = await pickChatModel()
+        const profile = await getDomainProfile(sig, model, async () => {
+          const { lexicalSearch } = await import('./lib/doc-store.js')
+          const labels = [...new Set(analytics.communities.flatMap((c) => c.topNodes.map(labelOf)).filter(Boolean))].slice(0, 10)
+          return [...labels, ...labels.slice(0, 6).flatMap((l) => { try { return lexicalSearch(l, 2).map((h) => h.text) } catch { return [] } }).slice(0, 8)]
+        }, refresh)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ model, ...profile }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })()
+    return
+  }
+
   // GET /api/graph/covariates — typed, VERIFIED claims per top entity (GraphRAG covariates, but each
   // claim grounding-checked). Cached by analytics sig + model; ?refresh=1 rebuilds.
   if (req.method === 'GET' && url.pathname === '/api/graph/covariates') {
@@ -5448,7 +5493,9 @@ const server = http.createServer((req, res) => {
           const topEntities = [...new Set(Object.values(analytics.nodes).sort((a, b) => b.pagerank - a.pagerank)
             .map((m) => labelOf(m.id)).filter((l) => l && !/^[0-9a-f]{8}-[0-9a-f]{4}/i.test(l) && !/^\d{8,}$/.test(l.replace(/\s/g, ''))))].slice(0, 12)
           const gather = (e: string) => { try { return lexicalSearch(e, 5).map((h) => h.text) } catch { return [] } }
-          entities = await buildCovariates(topEntities, gather, { model, maxEntities: 12, maxPerEntity: 5 })
+          // Auto-tune: detect the corpus domain → persona, so covariate extraction adapts to the material.
+          const profile = await getDomainProfile(sig, model, async () => [...topEntities.slice(0, 10), ...topEntities.slice(0, 6).flatMap(gather).slice(0, 8)])
+          entities = await buildCovariates(topEntities, gather, { model, maxEntities: 12, maxPerEntity: 5, persona: profile.persona })
           saveCovariatesCache({ sig, model, entities, builtAt: new Date().toISOString() })
         }
         const total = entities.reduce((s, e) => s + e.covariates.length, 0)
@@ -5478,7 +5525,12 @@ const server = http.createServer((req, res) => {
         if (hit) { reports = cached!.reports }
         else {
           const { buildCommunityReports } = await import('./lib/graph-rag.js')
-          reports = await buildCommunityReports(analytics, labelOf, { model, maxCommunities: 24, minSize: 3, level })
+          const { lexicalSearch } = await import('./lib/doc-store.js')
+          const profile = await getDomainProfile(sig, model, async () => {
+            const labels = [...new Set(analytics.communities.flatMap((c) => c.topNodes.map(labelOf)).filter(Boolean))].slice(0, 10)
+            return [...labels, ...labels.slice(0, 6).flatMap((l) => { try { return lexicalSearch(l, 2).map((h) => h.text) } catch { return [] } }).slice(0, 8)]
+          })
+          reports = await buildCommunityReports(analytics, labelOf, { model, maxCommunities: 24, minSize: 3, level, persona: profile.persona })
           saveCommunitiesCache({ sig, model, level, reports, builtAt: new Date().toISOString() })
         }
         res.writeHead(200, { 'content-type': 'application/json' })

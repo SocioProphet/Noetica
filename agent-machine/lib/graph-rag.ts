@@ -54,8 +54,9 @@ function safeJson(s: string): { title?: string; summary?: string; claims?: strin
 export async function buildCommunityReports(
   analytics: GraphAnalytics,
   labelOf: (id: string) => string,
-  opts: { model: string; maxCommunities?: number; minSize?: number; level?: 'coarse' | 'fine' },
+  opts: { model: string; maxCommunities?: number; minSize?: number; level?: 'coarse' | 'fine'; persona?: string },
 ): Promise<CommunityReport[]> {
+  const personaPrefix = opts.persona ? `${opts.persona}\n\n` : ''
   // Hierarchical: 'coarse' = top-level themes, 'fine' = sub-themes (falls back to coarse if no hierarchy).
   const source = opts.level === 'fine' && analytics.subdivisions.length ? analytics.subdivisions : analytics.communities
   const comms = source
@@ -75,7 +76,7 @@ export async function buildCommunityReports(
     const evidence = [...new Set(chunks.map((ch) => ch.text))].slice(0, 10)
     const corpus = evidence.join('\n---\n').slice(0, 6000)
 
-    const prompt = `You are analyzing one cluster of related concepts from a personal knowledge graph.
+    const prompt = `${personaPrefix}You are analyzing one cluster of related concepts from a personal knowledge graph.
 
 Concepts in this cluster (most central first): ${topLabels.slice(0, 12).join(', ')}${memberLabels.length > 12 ? ` (+${memberLabels.length - 12} more)` : ''}
 
