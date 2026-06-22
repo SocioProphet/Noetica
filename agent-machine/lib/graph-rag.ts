@@ -50,9 +50,11 @@ function safeJson(s: string): { title?: string; summary?: string; claims?: strin
 export async function buildCommunityReports(
   analytics: GraphAnalytics,
   labelOf: (id: string) => string,
-  opts: { model: string; maxCommunities?: number; minSize?: number },
+  opts: { model: string; maxCommunities?: number; minSize?: number; level?: 'coarse' | 'fine' },
 ): Promise<CommunityReport[]> {
-  const comms = analytics.communities
+  // Hierarchical: 'coarse' = top-level themes, 'fine' = sub-themes (falls back to coarse if no hierarchy).
+  const source = opts.level === 'fine' && analytics.subdivisions.length ? analytics.subdivisions : analytics.communities
+  const comms = source
     .filter((c) => c.size >= (opts.minSize ?? 3))
     .slice(0, opts.maxCommunities ?? 24)
 
