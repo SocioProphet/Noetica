@@ -5604,7 +5604,7 @@ Rules: MATCH ... RETURN ... with LIMIT 25. NO writes (no CREATE/MERGE/DELETE/SET
         for (const nb of neighbours) bump(nb, (analytics.nodes[nb]?.pagerank ?? 0) * 0.6, 'important neighbour')
 
         const recommendations = [...recs.values()].sort((a, b) => b.score - a.score).slice(0, k)
-          .map((r) => ({ label: r.label, score: Number(r.score.toFixed(3)), reasons: [...r.reasons], connected: neighbours.has(r.id) }))
+          .map((r) => ({ id: r.id, label: r.label, score: Number(r.score.toFixed(3)), reasons: [...r.reasons], connected: neighbours.has(r.id) }))
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ entity: lbl(target.id), recommendations }))
       } catch (e) {

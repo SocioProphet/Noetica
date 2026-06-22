@@ -43,6 +43,7 @@ export function GraphRailPanel() {
   const [metrics, setMetrics] = useState<Record<string, { pagerank: number; betweenness: number; community: number }>>({})
   const [insights, setInsights] = useState<{ communityCount: number; modularity: number; topImportant: string[]; topBridges: string[] } | null>(null)
   const [kHealth, setKHealth] = useState<{ score: number; gaps: string[] } | null>(null)
+  const [recs, setRecs] = useState<Array<{ id: string; label: string; reasons: string[]; connected: boolean }>>([])
   const [showThemes, setShowThemes] = useState(false)
   const [communities, setCommunities] = useState<Array<{ id: number; title: string; summary: string; trust: number; grounded: boolean; size: number; topNodes: string[]; claims?: Array<{ text: string; grounded: boolean; score: number }> }>>([])
   const [themesLoading, setThemesLoading] = useState(false)
@@ -175,6 +176,19 @@ export function GraphRailPanel() {
     })()
     return () => { cancelled = true }
   }, [view])
+
+  // Guided exploration: when a node is focused, fetch "what to look at next" recommendations.
+  useEffect(() => {
+    if (!root) { setRecs([]); return }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch(`/api/graph/recommend?entity=${encodeURIComponent(root)}&k=6`)
+        if (res.ok) { const j = (await res.json()) as { recommendations?: typeof recs }; if (!cancelled) setRecs(j.recommendations ?? []) }
+      } catch { /* offline */ }
+    })()
+    return () => { cancelled = true }
+  }, [root])
 
   // graph search — cosine + Jaccard + link expansion (debounced)
   useEffect(() => {
@@ -542,6 +556,19 @@ export function GraphRailPanel() {
                     {fn?.kind && <span className="rounded bg-[var(--color-background-secondary)] px-1 py-px">{fn.kind}</span>}
                     {fn && <span>{fn.degree} link{fn.degree === 1 ? '' : 's'}</span>}
                   </div>
+                  {recs.length > 0 && (
+                    <div className="mt-1 border-t border-[var(--color-border-secondary)] pt-1">
+                      <span className="text-[8px] uppercase tracking-wide text-[var(--color-text-tertiary)]">explore next</span>
+                      <div className="mt-0.5 flex flex-wrap gap-1">
+                        {recs.slice(0, 6).map((r) => (
+                          <button key={r.id} onClick={() => setRoot(r.id)} title={r.reasons.join(' · ')}
+                            className={`rounded-full border px-1.5 py-0.5 text-[9px] transition hover:border-[#7c3aed] hover:text-[#7c3aed] ${r.connected ? 'border-[var(--color-border-secondary)] text-[var(--color-text-secondary)]' : 'border-dashed border-[#22d3ee]/50 text-[var(--color-text-tertiary)]'}`}>
+                            {r.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   {mem && (
                     <div className="mt-1 flex items-center justify-between gap-2 border-t border-[var(--color-border-secondary)] pt-1">
                       <span className="truncate text-[9px] text-[var(--color-text-tertiary)]">({mem.kind}) {mem.preview}</span>
