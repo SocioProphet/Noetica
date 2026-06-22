@@ -5130,6 +5130,40 @@ Rules: MATCH ... RETURN ... with LIMIT 25. NO writes (no CREATE/MERGE/DELETE/SET
     return
   }
 
+  // POST /api/graph/from-image — MULTIMODAL: OCR a local image, then extract entities + typed relations
+  // from the text (image → knowledge). Body: { path, ingest? }. ?ingest adds the text to the brain too.
+  // Closes the multimodal gap (Cognee) — images become first-class graph sources.
+  if (req.method === 'POST' && url.pathname === '/api/graph/from-image') {
+    let body = ''
+    req.on('data', (c: Buffer) => { body += c.toString() })
+    req.on('end', () => { void (async () => {
+      setCORSHeaders(res)
+      try {
+        const p = JSON.parse(body || '{}') as { path?: string; ingest?: boolean }
+        const imgPath = String(p.path ?? '').trim()
+        if (!imgPath) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'path_required' })); return }
+        const { runOcr } = await import('./lib/ocr.js')
+        const text = await runOcr(imgPath)
+        if (/^OCR (error|unavailable)/i.test(text)) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: text, text: '' })); return }
+        const model = await pickChatModel()
+        const { generateOllamaText } = await import('./lib/ollama.js')
+        const prompt = `Text OCR'd from an image:\n${text.slice(0, 4000)}\n\nExtract the key entities and their typed relationships. STRICT JSON only:\n{"entities":["<entity>"],"relations":[{"subject":"<entity>","relation":"<2-3 words>","object":"<entity>"}]}`
+        let entities: string[] = []; let relations: Array<{ subject: string; relation: string; object: string }> = []
+        try {
+          const c = (await generateOllamaText({ model, messages: [{ role: 'user', content: prompt }], temperature: 0.1, numCtx: 8192 })).content
+          const m = c.match(/\{[\s\S]*\}/); if (m) { const j = JSON.parse(m[0]) as { entities?: string[]; relations?: typeof relations }; entities = (j.entities ?? []).filter((x) => typeof x === 'string').slice(0, 20); relations = (j.relations ?? []).filter((r) => r && r.subject && r.object).slice(0, 20) }
+        } catch { /* extraction best-effort */ }
+        let ingested = false
+        if (p.ingest) { try { const { ingestDocument } = await import('./lib/doc-store.js'); const pathMod = await import('node:path'); await ingestDocument(`image-${pathMod.basename(imgPath)}.txt`, text); ingested = true } catch { /* ingest best-effort */ } }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ text: text.slice(0, 1500), entities, relations, ingested, model }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })() })
+    return
+  }
+
   // POST /api/chat
   if (req.method === 'POST' && url.pathname === '/api/chat') {
     // Kill-switch: when armed, the agent fail-closes — no new turn runs until disarmed.
