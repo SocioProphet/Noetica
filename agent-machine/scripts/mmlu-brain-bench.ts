@@ -431,21 +431,29 @@ async function main() {
           const v = await verifyArm(q.question, q.choices, pools)
           letter = v.letter; mode = 'verify'
           row['verify_scores'] = v.scores.map((s) => Number(s.toFixed(2)))
-        } else if (arm === 'champion') {          // THE CROWN: reason+VOTE by default; retrieve when factual; compute only when cleanly extractable
+        } else if (arm === 'champion') {          // THE CROWN — a COUNCIL: ensemble every signal so it can't lose to a member
           const k = kt[i] ?? { types: ['BasicFacts'], solver: 'retrieve' }
           row['ktype'] = k.types
           if (k.solver === 'compute' && ci?.answer && ci.mode !== 'prog') {
-            letter = ci.answer; mode = `compute:${ci.mode}`           // exact — a clean expression was extractable
+            letter = ci.answer; mode = `compute:${ci.mode}`           // exact computation overrides the council
           } else {
-            // The OLD verify path defaulted to A on every tie (strict `>` keeps index 0) — that was
-            // champion's A-bias (picked A 2× the gold rate). Replace it with the self-consistency VOTE,
-            // which launders positional bias by construction. Retrieval lifted physics/chem/math but was
-            // NOISE on pure-symbolic (abstract_algebra) and on compute-abstained word problems → reason
-            // closed-book there; qgen-context + vote elsewhere.
-            const symbolic = /abstract_algebra/.test(subject) || ci?.mode === 'prog'
-            const v = await askVote(symbolic ? `${base}${ANSWER_RULE}` : qgenPrompt, SC_K)
-            letter = v.letter; mode = `${symbolic ? 'reason' : 'qgen'}+sc:${k.types?.[0] ?? '?'}`
-            row['sc_agree'] = Number(v.agree.toFixed(2))
+            // Reuse the answers baseline/brain/qgen ALREADY produced this question (free — they run
+            // before champion), add a diverse closed-book self-consistency reasoning vote, and take a
+            // confidence-weighted majority. Designed so champion can't do worse than its members in the
+            // typical case: agreement compounds, disagreement breaks toward the reasoning vote, and it
+            // NEVER defaults to A (the trap the old verify path fell into — it picked A 31% vs gold 19%).
+            const w = new Map<string, number>()
+            const add = (L: unknown, wt: number) => { if (typeof L === 'string' && L && L !== '?') w.set(L, (w.get(L) ?? 0) + wt) }
+            add(row['baseline_pred'], 1)        // closed-book reasoning
+            add(row['brain_pred'], 1)           // retrieval
+            add(row['qgen_pred'], 1)            // HyDE retrieval
+            const sc = await askVote(`${base}${ANSWER_RULE}`, SC_K)   // diverse reasoning vote (no retrieval noise)
+            add(sc.letter, 1 + sc.agree)                              // weight ≤2: breaks ties + can pair with baseline to overrule retrieval on the lanes it hurts, but never overrules a unanimous 3-arm council
+            row['sc_agree'] = Number(sc.agree.toFixed(2))
+            const ranked = [...w.entries()].sort((a, b) =>
+              b[1] - a[1] || (a[0] === sc.letter ? -1 : b[0] === sc.letter ? 1 : a[0] === 'A' ? 1 : b[0] === 'A' ? -1 : 0))
+            letter = ranked[0]?.[0] || sc.letter || 'B'
+            mode = `council:${k.types?.[0] ?? '?'}`
           }
         } else {                                  // baseline (closed book)
           letter = extractLetter(await ask(`${base}${ANSWER_RULE}`))
