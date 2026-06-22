@@ -38,6 +38,12 @@ const HOME = os.homedir()
 const BANK = path.join(HOME, '.noetica', 'corpus', 'benchmarks', 'mmlu_stem.json')
 const BRAIN = process.env['OCW_BRAIN'] || path.join(HOME, 'Downloads', 'MIT OCW', '_brain')
 const BASE = (process.env['OLLAMA_HOST'] || 'http://127.0.0.1:11434').replace(/\/$/, '')
+// Serverless inference API for the LLM (Together / Fireworks / OpenRouter / DeepInfra / Groq) — cheap
+// per-token strong models, no VM/stockout/setup. Defaults to BASE (local ollama). Embeddings stay
+// local (lib/ollama) so retrieval is free; only the expensive reasoning calls hit the API.
+const API_BASE = (process.env['MMLU_API_BASE'] || BASE).replace(/\/$/, '')
+const API_KEY = process.env['MMLU_API_KEY'] || ''
+const AUTH: Record<string, string> = API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {}
 const MODEL = process.env['MMLU_MODEL'] || 'llama3.2:3b'
 const PER = Number(process.env['MMLU_PER_SUBJECT'] ?? 5)
 const K = Number(process.env['MMLU_K'] || 4)
@@ -302,8 +308,8 @@ async function eliminateArm(question: string, choices: string[], pools: Chunk[][
 const SYS = 'You are taking a multiple-choice exam. Reason in ONE short sentence, then end with a line "FINAL: X" where X is exactly one of A, B, C, or D.'
 async function ask(prompt: string, temperature = 0): Promise<string> {
   try {
-    const res = await fetch(`${BASE}/v1/chat/completions`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
+    const res = await fetch(`${API_BASE}/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...AUTH },
       body: JSON.stringify({ model: MODEL, stream: false, temperature, max_tokens: 220, messages: [{ role: 'system', content: SYS }, { role: 'user', content: prompt }] }),
       signal: AbortSignal.timeout(TIMEOUT),
     })
@@ -347,8 +353,8 @@ async function askVote(prompt: string, k: number): Promise<{ letter: string; agr
 // answers "FINAL: X" instead of writing the passage we want to embed.
 async function gen(prompt: string): Promise<string> {
   try {
-    const res = await fetch(`${BASE}/v1/chat/completions`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
+    const res = await fetch(`${API_BASE}/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...AUTH },
       body: JSON.stringify({ model: MODEL, stream: false, temperature: 0, max_tokens: 220, messages: [{ role: 'user', content: prompt }] }),
       signal: AbortSignal.timeout(TIMEOUT),
     })
