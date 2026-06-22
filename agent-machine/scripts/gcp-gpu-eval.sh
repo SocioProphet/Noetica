@@ -19,8 +19,9 @@ MACHINE="${MACHINE:-g2-standard-8}"          # 1x NVIDIA L4 (24GB) — fits 7B a
 GCS="gs://sourceos-artifacts-socioprophet/ocw-corpus"
 SA="${GCP_SA:-sourceos-ci@socioprophet-platform.iam.gserviceaccount.com}"
 MODEL="${MODEL:-qwen2.5:7b}"
-ARMS="${ARMS:-baseline,brain,champion}"
+ARMS="${ARMS:-baseline,brain}"           # the core run; champion(verify) is too slow over big fields on CPU
 PER="${PER:-30}"
+MAXCHUNKS="${MAXCHUNKS:-30000}"          # per-field pool cap — keeps JS cosine fast (math is 150k otherwise)
 SUBJECTS="${SUBJECTS:-high_school_biology,conceptual_physics,electrical_engineering,college_chemistry,high_school_statistics,college_mathematics,abstract_algebra}"
 TERM_TIME="${TERM_TIME:-$(python3 -c "import datetime;print((datetime.datetime.now().astimezone()+datetime.timedelta(hours=4)).replace(microsecond=0).isoformat())")}"
 
@@ -53,7 +54,7 @@ mkdir -p /root/.noetica/corpus/benchmarks && gsutil cp "\$GCS/mmlu_stem.json" /r
 
 step "run CHAMPION eval — $MODEL · arms=$ARMS · n=$PER · seed=1729"
 OLLAMA_HOST=http://127.0.0.1:11434 OCW_BRAIN=/opt/OCW/_brain \
-  MMLU_MODEL=$MODEL MMLU_ARMS=$ARMS MMLU_PER_SUBJECT=$PER MMLU_SEED=1729 MMLU_SUBJECTS=$SUBJECTS \
+  MMLU_MODEL=$MODEL MMLU_ARMS=$ARMS MMLU_PER_SUBJECT=$PER MMLU_SEED=1729 MMLU_SUBJECTS=$SUBJECTS MMLU_MAX_CHUNKS=$MAXCHUNKS \
   bash scripts/run-exam.sh 2>&1 | tee /var/log/scoreboard.txt || echo "EVAL EXITED \$?"
 gsutil cp /var/log/scoreboard.txt "\$GCS/bench/champion-$MODEL.txt" || true
 
