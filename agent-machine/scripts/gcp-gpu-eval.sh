@@ -44,7 +44,8 @@ for n in 1 2 3 4 5; do ollama pull $MODEL && break; echo "model retry \$n"; slee
 for n in 1 2 3 4 5; do ollama pull nomic-embed-text && break; echo "embed retry \$n"; sleep 8; done
 ollama list | grep -q nomic-embed-text || { echo "FATAL: embed model missing"; exit 1; }
 
-step "pull code + brain + bank"
+step "install node + pull code + brain + bank"
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs git
 mkdir -p /opt/am && gsutil -m cp -r "\$GCS/code/agent-machine/*" /opt/am/ && cd /opt/am && npm ci
 mkdir -p /opt/OCW && gsutil cp "\$GCS/brain-complete.tar.gz" /tmp/b.tgz && tar xzf /tmp/b.tgz -C /opt/OCW
 mkdir -p /root/.noetica/corpus/benchmarks && gsutil cp "\$GCS/mmlu_stem.json" /root/.noetica/corpus/benchmarks/mmlu_stem.json
@@ -65,7 +66,7 @@ STARTUP
 echo "# creating $VM ($MACHINE · L4 GPU) — champion eval on $MODEL, HARD SHUTDOWN at $TERM_TIME"
 gcloud compute instances create "$VM" --project="$PROJECT" --zone="$ZONE" \
   --machine-type="$MACHINE" --maintenance-policy=TERMINATE \
-  --image-family=common-cu123-debian-11 --image-project=deeplearning-platform-release \
+  --image-family=common-cu129-ubuntu-2204-nvidia-580 --image-project=deeplearning-platform-release \
   --metadata="install-nvidia-driver=True" --metadata-from-file startup-script=/tmp/gpu-eval-startup.sh \
   --boot-disk-size=120GB --service-account="$SA" --scopes=cloud-platform \
   --termination-time="$TERM_TIME" --instance-termination-action=DELETE
