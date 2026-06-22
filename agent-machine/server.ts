@@ -153,6 +153,19 @@ function saveCommunitiesCache(c: CommunitiesCache): void {
   try { fs.mkdirSync(path.dirname(COMMUNITIES_CACHE_FILE), { recursive: true }); fs.writeFileSync(COMMUNITIES_CACHE_FILE, JSON.stringify(c)) } catch { /* best-effort */ }
 }
 
+// Verified covariates (typed claims per entity) — expensive (LLM per entity), cache by sig + model.
+const COVARIATES_CACHE_FILE = path.join(os.homedir(), '.noetica', 'cache', 'graph-covariates.json')
+type CovariatesCache = { sig: string; model: string; entities: import('./lib/graph-covariates.js').EntityCovariates[]; builtAt: string }
+let _covariatesCache: CovariatesCache | null = null
+function loadCovariatesCache(): CovariatesCache | null {
+  if (_covariatesCache) return _covariatesCache
+  try { _covariatesCache = JSON.parse(fs.readFileSync(COVARIATES_CACHE_FILE, 'utf8')) as CovariatesCache; return _covariatesCache } catch { return null }
+}
+function saveCovariatesCache(c: CovariatesCache): void {
+  _covariatesCache = c
+  try { fs.mkdirSync(path.dirname(COVARIATES_CACHE_FILE), { recursive: true }); fs.writeFileSync(COVARIATES_CACHE_FILE, JSON.stringify(c)) } catch { /* best-effort */ }
+}
+
 // Pick the best locally-available chat model for GraphRAG summarization (prefer small+fast).
 async function pickChatModel(): Promise<string> {
   const preferred = ['qwen2.5:7b', 'qwen2.5:14b', 'deepseek-r1:8b', 'llama3.2:3b', 'qwen2.5:3b']
@@ -5372,6 +5385,40 @@ const server = http.createServer((req, res) => {
         let run = 0; for (const b of out) { run += b.newNodes; b.cumulative = run }
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ from, to, total: dated.length, buckets: out }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })()
+    return
+  }
+
+  // GET /api/graph/covariates — typed, VERIFIED claims per top entity (GraphRAG covariates, but each
+  // claim grounding-checked). Cached by analytics sig + model; ?refresh=1 rebuilds.
+  if (req.method === 'GET' && url.pathname === '/api/graph/covariates') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const refresh = url.searchParams.get('refresh') === '1'
+        const { analytics, sig, labelOf } = await analyticsForGraph(refresh)
+        const model = url.searchParams.get('model') || await pickChatModel()
+        const cached = loadCovariatesCache()
+        const hit = !refresh && !!cached && cached.sig === sig && cached.model === model
+        let entities: import('./lib/graph-covariates.js').EntityCovariates[]
+        if (hit) { entities = cached!.entities }
+        else {
+          const { lexicalSearch } = await import('./lib/doc-store.js')
+          const { buildCovariates } = await import('./lib/graph-covariates.js')
+          // top entities by importance, real concepts only (skip bare UUIDs/timestamps)
+          const topEntities = [...new Set(Object.values(analytics.nodes).sort((a, b) => b.pagerank - a.pagerank)
+            .map((m) => labelOf(m.id)).filter((l) => l && !/^[0-9a-f]{8}-[0-9a-f]{4}/i.test(l) && !/^\d{8,}$/.test(l.replace(/\s/g, ''))))].slice(0, 12)
+          const gather = (e: string) => { try { return lexicalSearch(e, 5).map((h) => h.text) } catch { return [] } }
+          entities = await buildCovariates(topEntities, gather, { model, maxEntities: 12, maxPerEntity: 5 })
+          saveCovariatesCache({ sig, model, entities, builtAt: new Date().toISOString() })
+        }
+        const total = entities.reduce((s, e) => s + e.covariates.length, 0)
+        const grounded = entities.reduce((s, e) => s + e.grounded, 0)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ model, entities, entityCount: entities.length, covariateCount: total, groundedCount: grounded, cached: hit }))
       } catch (e) {
         res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
       }
