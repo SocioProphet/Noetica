@@ -44,6 +44,9 @@ export function GraphRailPanel() {
   const [metrics, setMetrics] = useState<Record<string, { pagerank: number; betweenness: number; community: number }>>({})
   const [insights, setInsights] = useState<{ communityCount: number; modularity: number; topImportant: string[]; topBridges: string[] } | null>(null)
   const [kHealth, setKHealth] = useState<{ score: number; gaps: string[] } | null>(null)
+  const [digest, setDigest] = useState<Array<{ severity: string; icon: string; message: string }>>([])
+  const [digestIdx, setDigestIdx] = useState(0)
+  const [digestDismissed, setDigestDismissed] = useState(false)
   const [recs, setRecs] = useState<Array<{ id: string; label: string; reasons: string[]; connected: boolean }>>([])
   // unsurfaced-capability state: NL→Cypher, alerts (anomalies+contradictions), entity resolution, inference, impact
   const [nlResult, setNlResult] = useState<{ cypher: string; executed?: boolean; error?: string; results?: unknown } | null>(null)
@@ -209,6 +212,8 @@ export function GraphRailPanel() {
         if (!cancelled && j.summary) setInsights({ communityCount: j.summary.communityCount, modularity: j.modularity ?? 0, topImportant: j.summary.topByPagerank.slice(0, 4).map((x) => x.label), topBridges: j.summary.topByBetweenness.slice(0, 3).map((x) => x.label) })
         // knowledge-health synthesis — cheap, aggregates the verified-stack signals into one score
         try { const hr = await fetch('/api/graph/knowledge-health'); if (hr.ok) { const hj = (await hr.json()) as { score: number; gaps: string[] }; if (!cancelled) setKHealth({ score: hj.score, gaps: hj.gaps ?? [] }) } } catch { /* offline */ }
+        // proactive digest — the graph surfaces what needs attention without being asked
+        try { const dr = await fetch('/api/graph/digest'); if (dr.ok) { const dj = (await dr.json()) as { insights?: typeof digest }; if (!cancelled) { setDigest(dj.insights ?? []); setDigestIdx(0); setDigestDismissed(false) } } } catch { /* offline */ }
       } catch { /* offline */ }
     })()
     return () => { cancelled = true }
@@ -443,6 +448,15 @@ export function GraphRailPanel() {
             </div>
             <span className="text-[10px] font-semibold" style={{ color: kHealth.score >= 75 ? '#16a34a' : kHealth.score >= 50 ? '#0891b2' : '#f59e0b' }}>{kHealth.score}</span>
             {kHealth.gaps.length > 0 && <span className="text-[9px] text-[var(--color-text-tertiary)]">· {kHealth.gaps.length} gap{kHealth.gaps.length === 1 ? '' : 's'}</span>}
+          </div>
+        )}
+        {/* Proactive insight — the graph surfaces what needs attention, unprompted (the #1 PKM ask). */}
+        {!digestDismissed && digest.length > 0 && digest[digestIdx] && (
+          <div className={`mt-1.5 flex items-start gap-1.5 rounded-lg border px-2.5 py-1.5 text-[10px] leading-snug ${digest[digestIdx]!.severity === 'high' ? 'border-[#f59e0b]/50 bg-[#f59e0b]/5' : 'border-[var(--color-border-secondary)] bg-[var(--color-background-secondary)]'}`}>
+            <span className="shrink-0">{digest[digestIdx]!.icon}</span>
+            <span className="flex-1 text-[var(--color-text-secondary)]">{digest[digestIdx]!.message}</span>
+            {digest.length > 1 && <button onClick={() => setDigestIdx((i) => (i + 1) % digest.length)} title="Next insight" className="shrink-0 text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]">→</button>}
+            <button onClick={() => setDigestDismissed(true)} title="Dismiss" className="shrink-0 text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]">✕</button>
           </div>
         )}
         {/* GDS insights readout — the analytics that drive node size/colour, made legible. */}

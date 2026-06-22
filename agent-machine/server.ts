@@ -5802,6 +5802,51 @@ Rules: MATCH ... RETURN ... with LIMIT 25. NO writes (no CREATE/MERGE/DELETE/SET
     return
   }
 
+  // GET /api/graph/digest — PROACTIVE insights: the graph tells you what needs attention without being
+  // asked (the #1 PKM complaint is tools that store but don't help). Cheap synthesis of cached/structural
+  // signals — under-connected important concepts, critical bridges, the most likely missing link, and
+  // knowledge-health gaps — ranked by severity. No LLM; instant.
+  if (req.method === 'GET' && url.pathname === '/api/graph/digest') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { analytics } = await analyticsForGraph(false)
+        const g = getGraph()
+        const byId = new Map(g.allNodes().map((n) => [n.id, n]))
+        const lbl = (id: string) => { const n = byId.get(id); return n ? (cleanLabel(n) ?? '') : '' }
+        const metrics = Object.values(analytics.nodes)
+        const insights: Array<{ severity: 'high' | 'medium' | 'low'; icon: string; message: string }> = []
+        // important but under-connected
+        for (const m of metrics.filter((x) => x.pagerank >= 0.3 && x.degree <= 2).sort((a, b) => b.pagerank - a.pagerank).slice(0, 2)) {
+          if (lbl(m.id)) insights.push({ severity: 'high', icon: '💡', message: `"${lbl(m.id)}" is important but only has ${m.degree} link${m.degree === 1 ? '' : 's'} — likely under-connected` })
+        }
+        // critical bridge
+        const bridge = metrics.filter((m) => m.betweenness >= 0.5).sort((a, b) => b.betweenness - a.betweenness)[0]
+        if (bridge && lbl(bridge.id)) insights.push({ severity: 'medium', icon: '🌉', message: `"${lbl(bridge.id)}" is a critical connector — its loss would fragment the graph` })
+        // most likely missing link (structural, no LLM)
+        try {
+          const keep = g.allNodes().filter((n) => cleanLabel(n) !== null && n.properties?.['hygiene_pruned'] !== true && !/corpus-test/i.test(String(n.id)))
+          const keepIds = new Set(keep.map((n) => n.id))
+          const { predictLinks } = await import('./lib/graph-predict.js')
+          const top = predictLinks(keep.map((n) => ({ id: n.id })), g.allEdges().filter((e) => keepIds.has(e.from) && keepIds.has(e.to)).map((e) => ({ from: e.from, to: e.to })), { topK: 1 })[0]
+          if (top && lbl(top.source) && lbl(top.target)) insights.push({ severity: 'low', icon: '🔗', message: `"${lbl(top.source)}" and "${lbl(top.target)}" share many connections but aren't linked` })
+        } catch { /* prediction optional */ }
+        // health gaps from cached covariates / communities
+        const cov = loadCovariatesCache()
+        if (cov) { const t = cov.entities.reduce((s, e) => s + e.covariates.length, 0); const ung = t - cov.entities.reduce((s, e) => s + e.grounded, 0); if (ung > 0) insights.push({ severity: 'medium', icon: '⚠', message: `${ung} extracted claim${ung === 1 ? '' : 's'} couldn't be grounded in the evidence` }) }
+        const orphans = metrics.filter((m) => m.community < 0).length
+        if (orphans / Math.max(1, metrics.length) > 0.15) insights.push({ severity: 'low', icon: '🧩', message: `${orphans} concepts are orphaned (disconnected from any theme)` })
+        const order = { high: 0, medium: 1, low: 2 }
+        insights.sort((a, b) => order[a.severity] - order[b.severity])
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ insights, count: insights.length }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })()
+    return
+  }
+
   // GET /api/graph/anomalies — structural outliers (the investigation/fraud-platform play): bridges
   // (single points of connection), important-but-isolated concepts, and over-connected hubs — what
   // stands out in the topology, classified with an explanation. Reads analytics; cheap.
