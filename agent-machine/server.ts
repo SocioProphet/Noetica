@@ -5347,12 +5347,48 @@ const server = http.createServer((req, res) => {
         const labelOf = (id: string) => { const n = nodeById.get(id); return (n ? cleanLabel(n) : null) ?? '' }
         const { predictLinks, verifyPredictions } = await import('./lib/graph-predict.js')
         let preds = predictLinks(fNodes.map((n) => ({ id: n.id })), fEdges.map((e) => ({ from: e.from, to: e.to })), { topK })
+        // Semantic axis (GraphRAG "embed entities"): blend in entity-embedding similarity so meaning-
+        // related concepts surface even without shared neighbours. Degrades cleanly if the embedder is cold.
+        try {
+          const { embedEntities, blendSemantic } = await import('./lib/graph-embed.js')
+          const vectors = await embedEntities(fNodes.map((n) => ({ id: n.id, text: labelOf(n.id) || (n.labels[0] ?? '') })))
+          if (vectors.size) preds = blendSemantic(preds, vectors, fEdges.map((e) => ({ from: e.from, to: e.to })), topK)
+        } catch { /* embedder optional */ }
         if (verify) { const model = await pickChatModel(); preds = await verifyPredictions(preds, labelOf, { model }) }
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({
           predictions: preds.map((p) => ({ ...p, sourceLabel: labelOf(p.source), targetLabel: labelOf(p.target) })),
           count: preds.length, verified: verify,
         }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })()
+    return
+  }
+
+  // GET /api/graph/similar?entity=<label|id> — semantically nearest entities via entity embeddings
+  // (GraphRAG "embed entities"). Powers richer local search: meaning-related concepts, not just neighbours.
+  if (req.method === 'GET' && url.pathname === '/api/graph/similar') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const q = (url.searchParams.get('entity') || url.searchParams.get('id') || '').trim()
+        if (!q) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'entity_required' })); return }
+        const k = Math.min(20, Math.max(1, Number(url.searchParams.get('k') ?? 8)))
+        const g = getGraph()
+        const allNodes = g.allNodes()
+        const keep = allNodes.filter((n) => cleanLabel(n) !== null && n.properties?.['hygiene_pruned'] !== true && !/corpus-test/i.test(String(n.id)))
+        const labelOf = (n: typeof keep[number]) => cleanLabel(n) ?? ''
+        // resolve the target by exact id, else case-insensitive label match
+        const target = keep.find((n) => n.id === q) ?? keep.find((n) => labelOf(n).toLowerCase() === q.toLowerCase())
+        if (!target) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'entity_not_found' })); return }
+        const { embedEntities, similarEntities } = await import('./lib/graph-embed.js')
+        const vectors = await embedEntities(keep.map((n) => ({ id: n.id, text: labelOf(n) || (n.labels[0] ?? '') })))
+        const byId = new Map(keep.map((n) => [n.id, n]))
+        const sims = similarEntities(target.id, vectors, k).map((s) => ({ id: s.id, label: labelOf(byId.get(s.id)!), sim: Number(s.sim.toFixed(3)) }))
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ entity: labelOf(target), similar: sims, embedderAvailable: vectors.size > 0 }))
       } catch (e) {
         res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
       }
