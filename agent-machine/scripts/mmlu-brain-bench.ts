@@ -175,17 +175,34 @@ async function retrieveMulti(question: string, choices: string[], pools: Chunk[]
 
 // ── model ──────────────────────────────────────────────────────────────────────
 const SYS = 'You are taking a multiple-choice exam. Reason in ONE short sentence, then end with a line "FINAL: X" where X is exactly one of A, B, C, or D.'
-async function ask(prompt: string): Promise<string> {
+async function ask(prompt: string, temperature = 0): Promise<string> {
   try {
     const res = await fetch(`${BASE}/v1/chat/completions`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: MODEL, stream: false, temperature: 0, messages: [{ role: 'system', content: SYS }, { role: 'user', content: prompt }] }),
+      body: JSON.stringify({ model: MODEL, stream: false, temperature, messages: [{ role: 'system', content: SYS }, { role: 'user', content: prompt }] }),
       signal: AbortSignal.timeout(TIMEOUT),
     })
     const d = await res.json() as { choices?: Array<{ message?: { content?: string; reasoning_content?: string } }> }
     const m = d.choices?.[0]?.message
     return (m?.content || m?.reasoning_content || '').trim()
   } catch { return '' }
+}
+
+// askVote — self-consistency: sample K answers at temperature, return the MAJORITY letter.
+// The single biggest universal MMLU lift in the literature, and it launders positional A-bias out
+// of the answer (a bias toward "A" washes out across diverse samples). Unaffordable on CPU; cheap
+// on the L4. k<=1 collapses to one temp-0 answer (voting off), so non-champion arms are unaffected.
+const SC_K = Number(process.env['MMLU_SC_K'] || 5)
+async function askVote(prompt: string, k: number): Promise<{ letter: string; agree: number }> {
+  if (k <= 1) return { letter: extractLetter(await ask(prompt)), agree: 1 }
+  const votes = new Map<string, number>()
+  for (let s = 0; s < k; s++) {
+    const l = extractLetter(await ask(prompt, 0.7))
+    if (l) votes.set(l, (votes.get(l) || 0) + 1)
+  }
+  if (!votes.size) return { letter: extractLetter(await ask(prompt)), agree: 0 }
+  const [letter, n] = [...votes.entries()].sort((a, b) => b[1] - a[1])[0]!
+  return { letter, agree: n / k }
 }
 
 // gen — neutral-system generation for query generation. MUST NOT use the MCQ SYS, or the model
@@ -341,8 +358,9 @@ async function main() {
 
       // queryGen arm: identical retriever + model, but with HyDE + step-back query shots added.
       // Same answer path as brain → the column isolates the retrieval lift from query generation.
+      // Also built for champion, whose retrieve path uses this same HyDE/qgen context.
       let qgenContext = ''
-      if (ARMS.includes('qgen')) {
+      if (ARMS.includes('qgen') || ARMS.includes('champion')) {
         const extra = await queryGen(q.question, q.choices)
         row['qgen'] = extra.map((e) => e.slice(0, 70))
         const hits = await retrieveMulti(q.question, q.choices, pools, PER_SHOT, SHOT_K, extra)
@@ -375,12 +393,14 @@ async function main() {
           const v = await verifyArm(q.question, q.choices, pools)
           letter = v.letter; mode = 'verify'
           row['verify_scores'] = v.scores.map((s) => Number(s.toFixed(2)))
-        } else if (arm === 'champion') {          // UNDERSTAND FIRST, then route to the right method
+        } else if (arm === 'champion') {          // THE CROWN: understand first → route → best technique per type
           const k = kt[i] ?? { types: ['BasicFacts'], solver: 'retrieve' }
           row['ktype'] = k.types
-          if (k.solver === 'compute' && ci?.answer) { letter = ci.answer; mode = `compute:${ci.mode}` }       // computational → verified compute
-          else if (k.solver === 'retrieve') { letter = await askBrain(); mode = `retrieve:${k.types[0]}` }     // factual → multishot lookup
-          else { const v = await verifyArm(q.question, q.choices, pools); letter = v.letter; mode = `verify:${k.types[0]}` }  // conceptual → plug-in verify
+          if (k.solver === 'compute' && ci?.answer && ci.mode !== 'prog') { letter = ci.answer; mode = `compute:${ci.mode}` }   // computational → verified sympy (exact; prog falls through — it mis-sets-up word problems)
+          else if (k.solver === 'retrieve') {                                                                  // factual → HyDE/qgen retrieval + self-consistency vote
+            const v = await askVote(qgenPrompt, SC_K); letter = v.letter; mode = `retrieve+sc:${k.types[0]}`; row['sc_agree'] = Number(v.agree.toFixed(2))
+          }
+          else { const v = await verifyArm(q.question, q.choices, pools); letter = v.letter; mode = `verify:${k.types[0]}` }      // conceptual → plug-in-each-choice verify (an ensemble itself)
         } else {                                  // baseline (closed book)
           letter = extractLetter(await ask(`${base}${ANSWER_RULE}`))
         }
