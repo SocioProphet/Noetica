@@ -338,6 +338,10 @@ export function GraphRailPanel() {
                 {health.status}
               </span>
             )}
+            <a href="/api/graph/export?format=graphml" download title="Export graph (GraphML — opens in Gephi/Cytoscape)" aria-label="Export graph"
+              className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]">
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M8 1v9M5 7l3 3 3-3M3 13h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            </a>
             <button onClick={() => setExpanded(true)} title="Expand graph" aria-label="Expand graph"
               className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]">
               <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M6 2H2v4M10 2h4v4M6 14H2v-4M10 14h4v-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/></svg>
