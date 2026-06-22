@@ -2879,7 +2879,10 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
   // layer — a clean "what is X" answer (Wikipedia/DBpedia + word-sense disambiguation), LOCAL +
   // instant + grounded (verbatim, cannot hallucinate). The lookup-vs-generate UX win. Falls through
   // to retrieval+generation when X isn't an enriched concept. Skipped with a doc focus or an image.
-  if (isFlagOn('NOETICA_CONCEPT_LOOKUP') && STUDY_BRAIN_LANES.has(intentPlan.name) && !hasDoc && !hasImages) {
+  // ROUTING (not just logging): the knowledge-type classifier's dominance now GATES this short-circuit
+  // — a clean "what is X" lookup-dominated turn can resolve to an instant grounded definition, but a
+  // reasoning- or compute-dominated turn skips it and goes to the model. The classification decides.
+  if (isFlagOn('NOETICA_CONCEPT_LOOKUP') && knowledge.dominance === 'lookup' && STUDY_BRAIN_LANES.has(intentPlan.name) && !hasDoc && !hasImages) {
     try {
       const { conceptLookup } = await import('./lib/concept-defs.js')
       const concept = conceptLookup(latestUserContent)
