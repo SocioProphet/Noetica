@@ -421,9 +421,9 @@ async function main() {
     process.stdout.write(`\n## ${subject}  (fields: ${fields.join('+')} · ${poolN.toLocaleString()} chunks · ${sample.length} q)\n`)
     for (const arm of ARMS) tally[arm]![subject] = { c: 0, n: 0, a: 0 }
     // verified-compute arm scored up front (one python call per subject); used by compute + route + champion
-    const comp: CompRes[] = (ARMS.includes('compute') || ARMS.includes('route') || ARMS.includes('champion')) ? computeBatch(sample) : []
+    const comp: CompRes[] = (ARMS.includes('compute') || ARMS.includes('route') || ARMS.includes('champion') || ARMS.includes('gate')) ? computeBatch(sample) : []
     // knowledge-type per question (the 'understand first' step) — used by the champion router
-    const kt: KType[] = ARMS.includes('champion') ? ktypeBatch(sample) : []
+    const kt: KType[] = (ARMS.includes('champion') || ARMS.includes('gate')) ? ktypeBatch(sample) : []
 
     const scoreQuestion = async (i: number) => {
       const q = sample[i]!
@@ -445,7 +445,7 @@ async function main() {
       // Same answer path as brain → the column isolates the retrieval lift from query generation.
       // Also built for champion, whose retrieve path uses this same HyDE/qgen context.
       let qgenContext = ''
-      if (ARMS.includes('qgen') || ARMS.includes('champion')) {
+      if (ARMS.includes('qgen') || ARMS.includes('champion') || ARMS.includes('gate')) {
         const extra = await queryGen(q.question, q.choices)
         row['qgen'] = extra.map((e) => e.slice(0, 70))
         const hits = await retrieveMulti(q.question, q.choices, pools, PER_SHOT, SHOT_K, extra)
@@ -475,6 +475,19 @@ async function main() {
           letter = await askBrain()
         } else if (arm === 'qgen') {              // brain + HyDE/step-back query generation
           letter = await askQgen(); mode = 'qgen'
+        } else if (arm === 'gate') {              // CRAG adaptive retrieval: only retrieve when the model ISN'T already confident
+          const k = kt[i] ?? { types: ['BasicFacts'], solver: 'retrieve' }
+          const scClosed = await askVote(`${base}${ANSWER_RULE}`, SC_K)   // closed-book confidence probe (calibrated by SC agreement)
+          row['gate_conf'] = Number(scClosed.agree.toFixed(2))
+          if (scClosed.agree >= 0.8) {                                    // CONFIDENT → skip retrieval (don't inject noise — fixes saturated bio)
+            letter = scClosed.letter; mode = 'gate:skip'
+          } else if (k.solver === 'compute' && ci?.answer && ci.mode !== 'prog') {
+            letter = ci.answer; mode = `gate:compute:${ci.mode}`          // computational → deterministic (stats/math)
+          } else {
+            const scRetr = await askVote(qgenPrompt, SC_K)                // uncertain → retrieve + vote
+            if (scRetr.agree >= scClosed.agree) { letter = scRetr.letter; mode = `gate:retrieve:${k.types?.[0] ?? '?'}` }
+            else { letter = scClosed.letter; mode = 'gate:retrieve-rejected' }   // weak/ambiguous retrieval → keep reasoning (CRAG correction)
+          }
         } else if (arm === 'elim') {              // Monty-Hall: per-choice confirm/REFUTE, posterior, coverage-gated widening
           const e = await eliminateArm(q.question, q.choices, pools, widerPools)
           letter = e.letter; mode = `elim:cov${Math.round(e.coverage * 100)}:r${e.rounds}`
