@@ -17,6 +17,7 @@ export interface Covariate {
   object?: string       // the related entity/object, when the claim is relational
   grounded: boolean     // does the claim's content actually appear in the entity's evidence?
   score: number         // grounding score 0..1
+  validFrom?: number    // bi-temporal: when this knowledge entered the graph (entity createdAt, epoch ms)
 }
 
 export interface EntityCovariates {
@@ -31,7 +32,7 @@ function safeArr(s: string): Array<{ type?: string; claim?: string; object?: str
 }
 
 /** Extract + verify typed claims for one entity from its evidence passages. */
-export async function extractCovariates(entity: string, evidence: string[], opts: { model: string; max?: number; persona?: string }): Promise<Covariate[]> {
+export async function extractCovariates(entity: string, evidence: string[], opts: { model: string; max?: number; persona?: string; validFrom?: number }): Promise<Covariate[]> {
   if (!entity || evidence.length === 0) return []
   const corpus = [...new Set(evidence)].join('\n---\n').slice(0, 5000)
   const prompt = `${opts.persona ? `${opts.persona}\n\n` : ''}Extract factual claims about the entity "${entity}" from the evidence below. Each claim is a typed statement grounded in the text.
@@ -61,6 +62,7 @@ Base every claim ONLY on the evidence. Do not infer or speculate. JSON only.`
         ...(c.object ? { object: String(c.object).slice(0, 80) } : {}),
         grounded: g.grounded,
         score: Number(g.score.toFixed(2)),
+        ...(opts.validFrom ? { validFrom: opts.validFrom } : {}),
       }
     })
 }
@@ -69,11 +71,12 @@ Base every claim ONLY on the evidence. Do not infer or speculate. JSON only.`
 export async function buildCovariates(
   entities: string[],
   gatherText: (entity: string) => string[],
-  opts: { model: string; maxEntities?: number; maxPerEntity?: number; persona?: string },
+  opts: { model: string; maxEntities?: number; maxPerEntity?: number; persona?: string; validFromOf?: (entity: string) => number },
 ): Promise<EntityCovariates[]> {
   const out: EntityCovariates[] = []
   for (const entity of entities.slice(0, opts.maxEntities ?? 12)) {
-    const covariates = await extractCovariates(entity, gatherText(entity), { model: opts.model, max: opts.maxPerEntity ?? 6, ...(opts.persona ? { persona: opts.persona } : {}) })
+    const vf = opts.validFromOf?.(entity)
+    const covariates = await extractCovariates(entity, gatherText(entity), { model: opts.model, max: opts.maxPerEntity ?? 6, ...(opts.persona ? { persona: opts.persona } : {}), ...(vf ? { validFrom: vf } : {}) })
     if (covariates.length) out.push({ entity, covariates, grounded: covariates.filter((c) => c.grounded).length })
   }
   return out

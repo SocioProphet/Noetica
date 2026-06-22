@@ -18,7 +18,9 @@ export interface Contradiction {
   claimA: string
   claimB: string
   contradictory: boolean
-  resolution: string     // which claim is better supported + why, or why both can hold
+  kind: 'contested' | 'superseded'   // contested = live conflict; superseded = newer fact replaces older
+  current?: string                   // when superseded, the claim that's currently valid (the newer one)
+  resolution: string                 // which claim is better supported + why, or why both can hold
 }
 
 const STOP = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'does', 'not', 'are', 'has', 'its', 'a', 'an', 'of', 'in', 'to', 'is'])
@@ -35,7 +37,7 @@ function safeJson(s: string): { contradictory?: boolean; resolution?: string } |
 /** Find + adjudicate contradictions among verified covariates. Bounded LLM calls (capped candidates). */
 export async function findContradictions(covariates: EntityCovariates[], opts: { model: string; maxCandidates?: number }): Promise<Contradiction[]> {
   // Flatten claims; keep only grounded ones (an ungrounded claim contradicting anything is just noise).
-  const claims = covariates.flatMap((e) => e.covariates.filter((c) => c.grounded).map((c) => ({ subject: e.entity, type: c.type, claim: c.claim, tok: toks(c.claim) })))
+  const claims = covariates.flatMap((e) => e.covariates.filter((c) => c.grounded).map((c) => ({ subject: e.entity, type: c.type, claim: c.claim, validFrom: c.validFrom, tok: toks(c.claim) })))
 
   // Candidate pairs: same claim TYPE (e.g. two "ownership" claims), topically overlapping, but different
   // text — the shape of a real disagreement. Cross-entity too (different subjects asserting the same role).
@@ -60,7 +62,16 @@ export async function findContradictions(covariates: EntityCovariates[], opts: {
       const { content } = await generateOllamaText({ model: opts.model, messages: [{ role: 'user', content: prompt }], temperature: 0.1, numCtx: 4096 })
       const j = safeJson(content)
       if (j?.contradictory) {
-        out.push({ subject: a.subject, type: a.type, claimA: a.claim, claimB: b.claim, contradictory: true, resolution: (j.resolution || '').slice(0, 280) })
+        // Bi-temporal: if the two claims entered the graph at different times, the conflict is most
+        // likely a SUPERSESSION (newer fact replaces older), not a live contestation.
+        const aF = a.validFrom, bF = b.validFrom
+        const superseded = !!(aF && bF && Math.abs(aF - bF) > 1000)
+        out.push({
+          subject: a.subject, type: a.type, claimA: a.claim, claimB: b.claim, contradictory: true,
+          kind: superseded ? 'superseded' : 'contested',
+          ...(superseded ? { current: (aF! > bF! ? a.claim : b.claim) } : {}),
+          resolution: (j.resolution || '').slice(0, 280),
+        })
       }
     } catch { /* skip this pair */ }
   }

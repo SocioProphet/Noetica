@@ -228,8 +228,13 @@ async function buildOrLoadCovariates(refresh = false): Promise<{ entities: impor
   const topEntities = [...new Set(Object.values(analytics.nodes).sort((a, b) => b.pagerank - a.pagerank)
     .map((m) => labelOf(m.id)).filter((l) => l && !/^[0-9a-f]{8}-[0-9a-f]{4}/i.test(l) && !/^\d{8,}$/.test(l.replace(/\s/g, ''))))].slice(0, 12)
   const gather = (e: string) => { try { return lexicalSearch(e, 5).map((h) => h.text) } catch { return [] } }
+  // Bi-temporal: each entity's claims inherit the entity's createdAt as their validFrom, so contradiction
+  // detection can tell a live conflict from a newer fact superseding an older one.
+  const vfMap = new Map<string, number>()
+  for (const n of getGraph().allNodes()) { const l = cleanLabel(n); if (l) { const t = typeof n.createdAt === 'number' ? n.createdAt : Date.parse(String(n.createdAt)); if (Number.isFinite(t) && t > 0 && !vfMap.has(l)) vfMap.set(l, t) } }
+  const validFromOf = (e: string) => vfMap.get(e) ?? 0
   const profile = await getDomainProfile(sig, model, async () => [...topEntities.slice(0, 10), ...topEntities.slice(0, 6).flatMap(gather).slice(0, 8)])
-  const entities = await buildCovariates(topEntities, gather, { model, maxEntities: 12, maxPerEntity: 5, persona: profile.persona })
+  const entities = await buildCovariates(topEntities, gather, { model, maxEntities: 12, maxPerEntity: 5, persona: profile.persona, validFromOf })
   saveCovariatesCache({ sig, model, entities, builtAt: new Date().toISOString() })
   return { entities, sig, model, cached: false }
 }
@@ -5498,11 +5503,14 @@ const server = http.createServer((req, res) => {
     void (async () => {
       try {
         const refresh = url.searchParams.get('refresh') === '1'
-        const { entities, model, cached } = await buildOrLoadCovariates(refresh)
+        const asOf = Number(url.searchParams.get('asOf') ?? 0) || Infinity   // bi-temporal: claims known by T
+        const raw = await buildOrLoadCovariates(refresh)
+        const entities = asOf === Infinity ? raw.entities
+          : raw.entities.map((e) => { const cv = e.covariates.filter((c) => !c.validFrom || c.validFrom <= asOf); return { ...e, covariates: cv, grounded: cv.filter((c) => c.grounded).length } }).filter((e) => e.covariates.length)
         const total = entities.reduce((s, e) => s + e.covariates.length, 0)
         const grounded = entities.reduce((s, e) => s + e.grounded, 0)
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ model, entities, entityCount: entities.length, covariateCount: total, groundedCount: grounded, cached }))
+        res.end(JSON.stringify({ model: raw.model, entities, entityCount: entities.length, covariateCount: total, groundedCount: grounded, cached: raw.cached }))
       } catch (e) {
         res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
       }
@@ -5577,7 +5585,7 @@ const server = http.createServer((req, res) => {
         const contradictions = await findContradictions(entities, { model, maxCandidates: 14 })
         const claims = entities.reduce((s, e) => s + e.covariates.length, 0)
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ model, contradictions, count: contradictions.length, claimsScanned: claims }))
+        res.end(JSON.stringify({ model, contradictions, count: contradictions.length, contested: contradictions.filter((c) => c.kind === 'contested').length, superseded: contradictions.filter((c) => c.kind === 'superseded').length, claimsScanned: claims }))
       } catch (e) {
         res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
       }
