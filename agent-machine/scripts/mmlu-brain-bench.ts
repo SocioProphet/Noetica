@@ -343,6 +343,10 @@ async function askVote(prompt: string, k: number): Promise<{ letter: string; agr
     if (!l) continue
     const w = CISC ? extractConf(raw) : 1        // CISC: weight the vote by stated confidence
     votes.set(l, (votes.get(l) || 0) + w); total += w
+    if (s >= 2) {                                 // Adaptive-SC (Snell/NeurIPS'24): LOSSLESS early-stop when the
+      const v = [...votes.values()].sort((a, b) => b - a)   // leader can't be caught by the remaining samples
+      if ((v[0]! - (v[1] ?? 0)) > (k - 1 - s)) break        // → fewer calls on easy questions, zero accuracy cost
+    }
   }
   if (!votes.size) return { letter: extractLetter(await ask(prompt)), agree: 0 }
   const [letter, n] = [...votes.entries()].sort((a, b) => b[1] - a[1])[0]!
@@ -666,6 +670,18 @@ async function main() {
           let best = -1, bn = -1
           for (const [oi, c] of votes) if (c > bn) { bn = c; best = oi }
           letter = best >= 0 ? LETTERS[best]! : ''; mode = `medprompt×${M}`
+        } else if (arm === 'l2m') {               // Least-to-Most (Google): decompose into sub-questions, solve in order
+          const sub = await ask(`Break this exam question into 2–3 simpler sub-questions whose answers build to the solution. List them only, no answers.\n\n${q.question}`)
+          letter = extractLetter(await ask(`Work through these sub-questions first, then the main question:\n${sub}\n\n${base}${ANSWER_RULE}`))
+          mode = 'l2m'
+        } else if (arm === 'selfdiscover') {      // Self-Discover (DeepMind): compose a reasoning structure, then follow it
+          const plan = await ask(`Pick the 2–3 reasoning steps that best fit this problem (from: identify the governing principle/law, break into sub-steps, eliminate wrong options, compute/derive, recall the definition). Output a short numbered plan.\n\n${q.question}`)
+          letter = extractLetter(await ask(`Execute this reasoning plan:\n${plan}\n\nOn:\n${base}${ANSWER_RULE}`))
+          mode = 'selfdiscover'
+        } else if (arm === 'tot') {               // Tree-of-Thoughts (Princeton/DeepMind): propose approaches, self-evaluate, solve with the best
+          const appr = await ask(`List 3 distinct approaches to solve this question, one short line each.\n\n${q.question}`)
+          letter = extractLetter(await ask(`Candidate approaches:\n${appr}\n\nPick the single most promising approach (one line on why), then carry it out on:\n${base}${ANSWER_RULE}`))
+          mode = 'tot'
         } else {                                  // baseline (closed book)
           letter = extractLetter(await ask(`${base}${ANSWER_RULE}`))
         }
