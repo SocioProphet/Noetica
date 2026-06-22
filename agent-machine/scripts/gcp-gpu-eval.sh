@@ -23,6 +23,8 @@ ARMS="${ARMS:-baseline,brain}"           # the core run; champion(verify) is too
 PER="${PER:-30}"
 MAXCHUNKS="${MAXCHUNKS:-30000}"          # per-field pool cap — keeps JS cosine fast (math is 150k otherwise)
 SUBJECTS="${SUBJECTS:-high_school_biology,conceptual_physics,electrical_engineering,college_chemistry,high_school_statistics,college_mathematics,abstract_algebra}"
+RUN_TAG="${RUN_TAG:-}"                                   # suffix to isolate parallel runs (log + VM)
+LOG="$GCS/eval-run${RUN_TAG:+-$RUN_TAG}.log"             # per-run GCS log path so two evals don't clobber each other
 TERM_TIME="${TERM_TIME:-$(python3 -c "import datetime;print((datetime.datetime.now().astimezone()+datetime.timedelta(hours=4)).replace(microsecond=0).isoformat())")}"
 
 cat > /tmp/gpu-eval-startup.sh <<STARTUP
@@ -30,8 +32,8 @@ cat > /tmp/gpu-eval-startup.sh <<STARTUP
 exec >/var/log/eval-run.log 2>&1; set -x
 export HOME=/root
 GCS="$GCS"
-( while true; do gsutil -q cp /var/log/eval-run.log "\$GCS/eval-run.log" 2>/dev/null; sleep 30; done ) & LOGPID=\$!
-step(){ echo "==== \$(date '+%H:%M:%S') \$* ===="; gsutil -q cp /var/log/eval-run.log "\$GCS/eval-run.log" 2>/dev/null||true; }
+( while true; do gsutil -q cp /var/log/eval-run.log "$LOG" 2>/dev/null; sleep 30; done ) & LOGPID=\$!
+step(){ echo "==== \$(date '+%H:%M:%S') \$* ===="; gsutil -q cp /var/log/eval-run.log "$LOG" 2>/dev/null||true; }
 
 step "wait for NVIDIA driver"
 for i in \$(seq 1 60); do nvidia-smi >/dev/null 2>&1 && break; sleep 10; done
@@ -76,7 +78,7 @@ LATEST_T=\$(ls -t /root/.noetica/mmlu-brain-*.jsonl 2>/dev/null | head -1)
 [ -n "\$LATEST_T" ] && gsutil cp "\$LATEST_T" "\$GCS/bench/transcript-$MODEL.jsonl" || true
 
 step "DONE — self-deleting"
-kill \$LOGPID 2>/dev/null||true; gsutil -q cp /var/log/eval-run.log "\$GCS/eval-run.log"||true
+kill \$LOGPID 2>/dev/null||true; gsutil -q cp /var/log/eval-run.log "$LOG"||true
 N=\$(curl -s -H "Metadata-Flavor: Google" http://metadata/computeMetadata/v1/instance/name)
 Z=\$(curl -s -H "Metadata-Flavor: Google" http://metadata/computeMetadata/v1/instance/zone | awk -F/ '{print \$NF}')
 gcloud compute instances delete "\$N" --zone="\$Z" --quiet
