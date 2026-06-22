@@ -4061,6 +4061,49 @@ const server = http.createServer((req, res) => {
     return
   }
 
+  // POST /api/graph/nlquery — natural-language → Cypher (text-to-Cypher, the modern graph-platform
+  // staple): generate a READ-ONLY Cypher query from the question + the graph schema, guard against any
+  // write, execute it, and return query + rows. Body: { question }.
+  if (req.method === 'POST' && url.pathname === '/api/graph/nlquery') {
+    let body = ''
+    req.on('data', (c: Buffer) => { body += c.toString() })
+    req.on('end', () => { void (async () => {
+      setCORSHeaders(res)
+      try {
+        const question = String((JSON.parse(body || '{}') as { question?: string }).question ?? '').trim()
+        if (!question) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'question_required' })); return }
+        const g = getGraph()
+        const kinds = [...new Set(g.allNodes().map((n) => String(n.properties?.['kind'] ?? n.labels[0] ?? '')).filter(Boolean))].slice(0, 16)
+        const edgeLabels = [...new Set(g.allEdges().map((e) => e.label))].filter(Boolean).slice(0, 16)
+        const sampleNames = [...new Set(g.allNodes().map((n) => cleanLabel(n)).filter(Boolean))].slice(0, 12)
+        const model = await pickChatModel()
+        const { generateOllamaText } = await import('./lib/ollama.js')
+        const prompt = `Translate the question into a single READ-ONLY Cypher query for a knowledge graph.
+Node labels (kinds): ${kinds.join(', ')}
+Relationship types: ${edgeLabels.join(', ')}
+Example node names: ${sampleNames.join(', ')}
+Node display label is the first label or a 'name'/'title' property.
+
+Question: ${question}
+
+Rules: MATCH ... RETURN ... with LIMIT 25. NO writes (no CREATE/MERGE/DELETE/SET/REMOVE). Return ONLY the Cypher, no prose, no markdown fences.`
+        let cypher = ''
+        try { cypher = (await generateOllamaText({ model, messages: [{ role: 'user', content: prompt }], temperature: 0.1, numCtx: 4096 })).content.trim() } catch { cypher = '' }
+        cypher = cypher.replace(/```(?:cypher)?/gi, '').replace(/^cypher\s*/i, '').trim()
+        if (!cypher) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ question, cypher: '', error: 'no_query_generated' })); return }
+        if (/\b(CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|CALL\s+db\.)\b/i.test(cypher)) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ question, cypher, error: 'rejected_non_read_query', executed: false })); return }
+        try {
+          const upstream = await fetch('http://127.0.0.1:8137/cypher', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: cypher }), signal: AbortSignal.timeout(8_000) })
+          const results = await upstream.json()
+          res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ question, cypher, executed: upstream.ok, results }))
+        } catch { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ question, cypher, executed: false, error: 'execution_failed' })) }
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })() })
+    return
+  }
+
   // GET /api/governance/recent — last N completed run traces for Govern surface
   if (req.method === 'GET' && url.pathname === '/api/governance/recent') {
     setCORSHeaders(res)
