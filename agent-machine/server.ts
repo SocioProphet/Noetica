@@ -5510,10 +5510,11 @@ const server = http.createServer((req, res) => {
     return
   }
 
-  // GET /api/graph/health — knowledge-health synthesis: one trust+completeness score over the graph,
-  // aggregating community structure, grounded-claim ratio, community trust, and structural gaps. Cheap
-  // (reads cached signals; never rebuilds), so it's an instant "is my brain trustworthy + complete" view.
-  if (req.method === 'GET' && url.pathname === '/api/graph/health') {
+  // GET /api/graph/knowledge-health — knowledge-health synthesis: one trust+completeness score over the
+  // graph, aggregating community structure, grounded-claim ratio, community trust, and structural gaps.
+  // Cheap (reads cached signals; never rebuilds) — an instant "is my brain trustworthy + complete" view.
+  // (Distinct from /api/graph/health, which reports graph-store status + node/edge counts.)
+  if (req.method === 'GET' && url.pathname === '/api/graph/knowledge-health') {
     setCORSHeaders(res)
     void (async () => {
       try {
