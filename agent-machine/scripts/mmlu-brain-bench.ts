@@ -178,6 +178,40 @@ function chunkCos(a: Chunk, b: Chunk): number {
   return dot / ((a.norm || 1) * (b.norm || 1))
 }
 
+// ── hybrid retrieval: dense + BM25 lexical, fused by Reciprocal Rank Fusion (Anthropic contextual
+// retrieval's contextual-BM25 + rank-fusion core). Catches exact-term matches dense embeddings miss.
+const HYBRID = process.env['MMLU_HYBRID'] === '1'
+const STOP_BM = new Set('the a an of to in is are and or for with on at by as be it this that which from we you i if then than into over under not no all any each its their his her our these those such can may will would could should has have had do does did but also more most some many one two'.split(' '))
+function terms(s: string): string[] {
+  return s.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).filter((w) => w.length > 2 && !STOP_BM.has(w))
+}
+const bm25Cache = new WeakMap<Chunk[][], { df: Map<string, number>; avgdl: number; N: number }>()
+function bm25Index(pools: Chunk[][]) {
+  let idx = bm25Cache.get(pools)
+  if (idx) return idx
+  const df = new Map<string, number>(); let totLen = 0, N = 0
+  for (const pool of pools) for (const c of pool) {
+    N++; const ts = terms(c.text); totLen += ts.length
+    for (const t of new Set(ts)) df.set(t, (df.get(t) || 0) + 1)
+  }
+  idx = { df, avgdl: totLen / (N || 1), N }
+  bm25Cache.set(pools, idx)
+  return idx
+}
+function bm25Score(qTerms: Set<string>, text: string, idx: { df: Map<string, number>; avgdl: number; N: number }): number {
+  const k1 = 1.5, b = 0.75
+  const dts = terms(text), tf = new Map<string, number>()
+  for (const t of dts) tf.set(t, (tf.get(t) || 0) + 1)
+  const dl = dts.length || 1
+  let score = 0
+  for (const t of qTerms) {
+    const f = tf.get(t); if (!f) continue
+    const n = idx.df.get(t) || 0.5
+    score += Math.log(1 + (idx.N - n + 0.5) / (n + 0.5)) * (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl / idx.avgdl))
+  }
+  return score
+}
+
 async function retrieveMulti(question: string, choices: string[], pools: Chunk[][], perShot: number, finalK: number, extra: string[] = []): Promise<Chunk[]> {
   const queries = [`${question}\n${choices.join(' ')}`, ...choices.map((c) => `${question}\n${c}`), ...extra.filter(Boolean)]
   const best = new Map<string, { c: Chunk; s: number }>()
@@ -198,7 +232,16 @@ async function retrieveMulti(question: string, choices: string[], pools: Chunk[]
       if (!prev || hit.s > prev.s) best.set(key, hit)
     }
   }
-  const ranked = [...best.values()].sort((a, b) => b.s - a.s)
+  const cands = [...best.values()]
+  if (HYBRID && cands.length > 1) {                       // fuse dense + BM25 via Reciprocal Rank Fusion
+    const idx = bm25Index(pools)
+    const qt = new Set(terms(`${question} ${choices.join(' ')} ${extra.join(' ')}`))
+    const bm = new Map(cands.map((x) => [x.c, bm25Score(qt, x.c.text, idx)]))
+    const dRank = new Map([...cands].sort((a, b) => b.s - a.s).map((x, i) => [x.c, i]))
+    const bRank = new Map([...cands].sort((a, b) => bm.get(b.c)! - bm.get(a.c)!).map((x, i) => [x.c, i]))
+    for (const x of cands) x.s = 1 / (60 + (dRank.get(x.c) ?? 99)) + 1 / (60 + (bRank.get(x.c) ?? 99))
+  }
+  const ranked = cands.sort((a, b) => b.s - a.s)
   if (MMR_LAMBDA <= 0 || ranked.length <= finalK) return ranked.slice(0, finalK).map((x) => x.c)
   // MMR: greedily pick finalK balancing relevance (cosine to query) against novelty (low similarity
   // to already-picked). Fixes the redundancy where brute-force top hits collapse into one sub-topic,
@@ -275,16 +318,28 @@ async function ask(prompt: string, temperature = 0): Promise<string> {
 // of the answer (a bias toward "A" washes out across diverse samples). Unaffordable on CPU; cheap
 // on the L4. k<=1 collapses to one temp-0 answer (voting off), so non-champion arms are unaffected.
 const SC_K = Number(process.env['MMLU_SC_K'] || 5)
+const CISC = process.env['MMLU_CISC'] === '1'   // confidence-weighted self-consistency (Google 2025) — weight each vote by the model's stated confidence
+function extractConf(raw: string): number {
+  const m = /conf(?:idence)?[:\s]*([01]?(?:\.\d+)?|\d{1,3})\s*%?/i.exec(raw)
+  if (!m) return 0.6
+  let c = Number(m[1]); if (c > 1) c = c / 100
+  return Math.min(1, Math.max(0.1, c || 0.6))
+}
 async function askVote(prompt: string, k: number): Promise<{ letter: string; agree: number }> {
   if (k <= 1) return { letter: extractLetter(await ask(prompt)), agree: 1 }
+  const p = CISC ? `${prompt}\nThen output your confidence as "CONFIDENCE: 0.NN".` : prompt
   const votes = new Map<string, number>()
+  let total = 0
   for (let s = 0; s < k; s++) {
-    const l = extractLetter(await ask(prompt, 0.7))
-    if (l) votes.set(l, (votes.get(l) || 0) + 1)
+    const raw = await ask(p, 0.7)
+    const l = extractLetter(raw)
+    if (!l) continue
+    const w = CISC ? extractConf(raw) : 1        // CISC: weight the vote by stated confidence
+    votes.set(l, (votes.get(l) || 0) + w); total += w
   }
   if (!votes.size) return { letter: extractLetter(await ask(prompt)), agree: 0 }
   const [letter, n] = [...votes.entries()].sort((a, b) => b[1] - a[1])[0]!
-  return { letter, agree: n / k }
+  return { letter, agree: total ? n / total : 0 }   // agree = winning fraction of the (weighted) mass
 }
 
 // gen — neutral-system generation for query generation. MUST NOT use the MCQ SYS, or the model

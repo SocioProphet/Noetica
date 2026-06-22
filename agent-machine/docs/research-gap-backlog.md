@@ -16,9 +16,9 @@ implement → measure → **repeat**. Each pass adds rows here, ships the top on
 
 | P | Gap | Lab · paper | Gives us | Status |
 |---|-----|-------------|----------|--------|
-| 1 | **Contextual Retrieval + rerank** | Anthropic 2024 | −67% retrieval failure; fixes chunk-context-loss + missing reranker/BM25 | **next** |
+| 1 | **Contextual Retrieval — hybrid BM25 + RRF** | Anthropic 2024 | catches exact-term matches dense misses | ✅ `MMLU_HYBRID` (full contextual-embeddings re-embed = GPU upgrade) |
 | 1 | **VSA problem-manipulation** (concept compose, CBR structure-match, abductive MCQ) | IBM NVSA | manipulate problems algebraically in vector space | substrate built → apply |
-| 2 | **CISC** (confidence-weighted SC) | Google 2025 | 40% fewer samples, +acc on the council vote | backlog |
+| 2 | **CISC** (confidence-weighted SC) | Google 2025 | 40% fewer samples, +acc on the council vote | ✅ `MMLU_CISC` |
 | 2 | **Self-Discover routing** | DeepMind NeurIPS'24 | learned per-type reasoning structure (replaces hand-coded knowledge_type) | backlog |
 | 2 | **Least-to-Most decomposition** | Google | subproblem decomposition for math/compositional lanes | backlog |
 | 2 | **Gödel-abstraction arm** | (ours + abstraction lit) | lift problem to its canonical form, solve the form | backlog |
