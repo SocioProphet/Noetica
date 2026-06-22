@@ -63,6 +63,15 @@ const SUBJECT_FIELDS: Record<string, string[]> = {
   college_computer_science: ['eecs'], electrical_engineering: ['eecs'],
 }
 
+// FIELD_ADJ — co-prime / adjacent fields to WIDEN into when per-choice coverage is thin. The
+// elimination retriever pulls these only when the in-field posterior isn't peaked (biochem needs
+// chemistry+biology; a genetics problem needs probability from mathematics; astrophysics spans both).
+const FIELD_ADJ: Record<string, string[]> = {
+  mathematics: ['physics', 'eecs'], physics: ['mathematics', 'chemistry', 'earth_planetary'],
+  chemistry: ['physics', 'biology', 'biological_eng'], biology: ['chemistry', 'biological_eng'],
+  biological_eng: ['biology', 'chemistry'], eecs: ['mathematics', 'physics'], earth_planetary: ['physics'],
+}
+
 const FRONTIER = { 'Llama-3.2-3B (reported)': 63.4, 'Qwen2.5-7B (reported)': 74.2, 'GPT-4': 86.4 }
 
 interface Q { subject: string; question: string; choices: string[]; answer: number }
@@ -208,6 +217,42 @@ async function retrieveMulti(question: string, choices: string[], pools: Chunk[]
     picked.push(pool.splice(bi, 1)[0]!)
   }
   return picked.map((x) => x.c)
+}
+
+// eliminateArm — the Monty-Hall MCQ play. Instead of a quick top-k match, gather confirm/REFUTE
+// evidence per CHOICE (the doors), score them, and treat the choices as competing (ruling one out
+// lifts the others). A three-way verdict — SUPPORT / REFUTE / INSUFFICIENT — makes elimination
+// explicit and, crucially, marks which choices we DON'T yet have coverage for. The saturation gate:
+// if the posterior isn't peaked OR a choice is still uncovered, WIDEN into adjacent/co-prime fields
+// and probe again. Only then commit. Never defaults to A.
+async function eliminateArm(question: string, choices: string[], pools: Chunk[][], wider: Chunk[][]):
+  Promise<{ letter: string; coverage: number; rounds: number; margin: number }> {
+  const n = choices.length
+  const score = new Array<number>(n).fill(0)
+  const covered = new Array<boolean>(n).fill(false)
+  let rounds = 0
+  const probe = async (ps: Chunk[][]) => {
+    if (!ps.length) return
+    rounds++
+    await Promise.all(choices.map(async (ch, i) => {
+      const hits = await retrieveMulti(question, [ch], ps, PER_SHOT, 5)
+      const ctx = hits.map((h, k) => `[${k + 1}] ${h.text.slice(0, 380)}`).join('\n\n')
+      const raw = await ask(`MIT course evidence:\n${ctx}\n\nQuestion: ${question}\nCandidate answer: "${ch}"\n\nWeighing the evidence and sound reasoning on THIS candidate only, reply ONE line exactly: "VERDICT: SUPPORT|REFUTE|INSUFFICIENT conf 0.NN".`)
+      const m = /VERDICT:\s*(SUPPORT|REFUTE|INSUFFICIENT)\D*([01](?:\.\d+)?)?/i.exec(raw)
+      const v = m ? m[1]!.toUpperCase() : 'INSUFFICIENT'
+      const conf = m && m[2] != null ? Math.min(1, Math.max(0, Number(m[2]))) : 0.5
+      if (v === 'SUPPORT') { score[i]! += conf; covered[i] = true }
+      else if (v === 'REFUTE') { score[i]! -= conf; covered[i] = true }   // elimination — pushes mass to the rest
+    }))
+  }
+  await probe(pools)
+  const margin = () => { const s = [...score].sort((a, b) => b - a); return (s[0] ?? 0) - (s[1] ?? 0) }
+  const peaked = () => covered.every(Boolean) && margin() > 0.3
+  if (!peaked()) await probe(wider)                        // coverage gate → widen into co-prime fields
+  const mx = Math.max(...score)
+  const top = score.map((s, i) => ({ s, i })).filter((x) => x.s === mx)
+  const best = top.length > 1 ? (top.find((x) => x.i !== 0)?.i ?? top[0]!.i) : top[0]!.i   // tie-break away from A
+  return { letter: LETTERS[best]!, coverage: covered.filter(Boolean).length / n, rounds, margin: margin() }
 }
 
 // ── model ──────────────────────────────────────────────────────────────────────
@@ -368,6 +413,9 @@ async function main() {
   for (const subject of subjects) {
     const fields = SUBJECT_FIELDS[subject]!.filter(fieldReady)
     const pools = fields.map(loadField)
+    const widerPools = ARMS.includes('elim')
+      ? [...new Set(fields.flatMap((f) => FIELD_ADJ[f] ?? []).filter((f) => !fields.includes(f) && fieldReady(f)))].map(loadField)
+      : []
     const poolN = pools.reduce((a, p) => a + p.length, 0)
     const sample = shuffle(mmlu[subject]!, rand).slice(0, PER > 0 ? PER : mmlu[subject]!.length)
     process.stdout.write(`\n## ${subject}  (fields: ${fields.join('+')} · ${poolN.toLocaleString()} chunks · ${sample.length} q)\n`)
@@ -427,6 +475,10 @@ async function main() {
           letter = await askBrain()
         } else if (arm === 'qgen') {              // brain + HyDE/step-back query generation
           letter = await askQgen(); mode = 'qgen'
+        } else if (arm === 'elim') {              // Monty-Hall: per-choice confirm/REFUTE, posterior, coverage-gated widening
+          const e = await eliminateArm(q.question, q.choices, pools, widerPools)
+          letter = e.letter; mode = `elim:cov${Math.round(e.coverage * 100)}:r${e.rounds}`
+          row['coverage'] = e.coverage; row['elim_rounds'] = e.rounds; row['elim_margin'] = Number(e.margin.toFixed(2))
         } else if (arm === 'verify') {            // plug EACH choice in, verify vs its evidence, pick best
           const v = await verifyArm(q.question, q.choices, pools)
           letter = v.letter; mode = 'verify'
