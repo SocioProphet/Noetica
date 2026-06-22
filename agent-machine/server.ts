@@ -2352,10 +2352,18 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
     const armed = routerDecision.securityLane?.armed === true
     if (provider !== 'ollama') {
       const tier: MeshTier = 'frontier'
-      const target = provider === 'anthropic' ? 'api.anthropic.com'
-        : provider === 'openrouter' ? 'openrouter.ai'
-        : provider === 'huggingface' ? 'router.huggingface.co'
-        : 'api.openai.com'
+      // Derive the egress target from the ACTUAL outbound host. A custom/overridden baseUrl (OpenRouter, HF,
+      // or any OpenAI-compatible endpoint) must be the host scope-d's authorizedTargets matches against —
+      // otherwise routing through a custom base URL would bypass the egress allowlist. Fall back to the
+      // provider's canonical host only when no explicit baseUrl was resolved.
+      let target: string
+      try { target = resolvedBaseUrl ? new URL(resolvedBaseUrl).host : '' } catch { target = '' }
+      if (!target) {
+        target = provider === 'anthropic' ? 'api.anthropic.com'
+          : provider === 'openrouter' ? 'openrouter.ai'
+          : provider === 'huggingface' ? 'router.huggingface.co'
+          : 'api.openai.com'
+      }
       const verdict = checkEgress({
         scope: scopeName, policyProfile: body.policy_profile, securityArmed: armed,
         tier, provider, model, target,
