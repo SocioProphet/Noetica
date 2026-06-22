@@ -58,6 +58,7 @@ export function GraphRailPanel() {
   const [inferred, setInferred] = useState<Array<{ subject: string; predicate: string; object: string; via: string; verified?: boolean }>>([])
   const [toolsLoading, setToolsLoading] = useState('')
   const [impact, setImpact] = useState<{ totalAffected: number; levels: Array<{ distance: number; count: number }> } | null>(null)
+  const [gaia, setGaia] = useState<{ phases: Array<{ phase: string; count: number }>; signals: Array<{ signal: string; count: number; examples: string[] }> } | null>(null)
 
   async function askGraphQuery() {
     const question = globalQ.trim()
@@ -71,13 +72,14 @@ export function GraphRailPanel() {
   async function loadTools() {
     setToolsLoading('all')
     try {
-      const [an, co, rs, inf] = await Promise.all([
-        fetch('/api/graph/anomalies'), fetch('/api/graph/contradictions'), fetch('/api/graph/resolve'), fetch('/api/graph/infer'),
+      const [an, co, rs, inf, on] = await Promise.all([
+        fetch('/api/graph/anomalies'), fetch('/api/graph/contradictions'), fetch('/api/graph/resolve'), fetch('/api/graph/infer'), fetch('/api/graph/ontology'),
       ])
       if (an.ok) setAnomalies(((await an.json()) as { anomalies?: typeof anomalies }).anomalies ?? [])
       if (co.ok) setContradictions(((await co.json()) as { contradictions?: typeof contradictions }).contradictions ?? [])
       if (rs.ok) setMergeCands(((await rs.json()) as { candidates?: typeof mergeCands }).candidates ?? [])
       if (inf.ok) setInferred(((await inf.json()) as { inferred?: typeof inferred }).inferred ?? [])
+      if (on.ok) setGaia(((await on.json()) as { census?: typeof gaia }).census ?? null)
     } catch { /* offline */ } finally { setToolsLoading('') }
   }
   const [showThemes, setShowThemes] = useState(false)
@@ -447,6 +449,18 @@ export function GraphRailPanel() {
               <div className="border-t border-[var(--color-border-tertiary)] pt-1.5">
                 <span className="text-[9px] uppercase tracking-wide text-[var(--color-text-tertiary)]">inferred facts ({inferred.length})</span>
                 {inferred.slice(0, 4).map((f, i) => (<div key={i} className="text-[9px] leading-snug" title={f.via}><span className="text-[#22d3ee]">⊢{f.verified ? '✓' : ''}</span> <span className="text-[var(--color-text-secondary)]">{f.subject} {f.predicate} {f.object}</span></div>))}
+              </div>
+            )}
+            {/* GAIA ontology census — developmental phases + stewardship abandonment signals (IOES). */}
+            {gaia && (gaia.phases.length > 0 || gaia.signals.length > 0) && (
+              <div className="border-t border-[var(--color-border-tertiary)] pt-1.5" title="GAIA Ontogenesis Stewardship ontology — concepts classified by developmental phase + abandonment signals">
+                <span className="text-[9px] uppercase tracking-wide text-[var(--color-text-tertiary)]">🌱 ontogenesis (GAIA)</span>
+                <div className="mt-0.5 flex flex-wrap gap-1">
+                  {gaia.phases.map((p) => (<span key={p.phase} className="rounded-full bg-[#16a34a]/10 px-1.5 py-px text-[9px] text-[#16a34a]">{p.phase} {p.count}</span>))}
+                </div>
+                {gaia.signals.map((s) => (
+                  <div key={s.signal} className="mt-0.5 text-[9px] leading-snug" title={s.examples.join(', ')}><span className="text-[#ef4444]">⚑ {s.signal.replace(/_/g, ' ')}</span> <span className="text-[var(--color-text-tertiary)]">({s.count}) — {s.examples.slice(0, 3).join(', ')}</span></div>
+                ))}
               </div>
             )}
           </div>
