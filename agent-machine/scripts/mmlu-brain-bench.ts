@@ -150,8 +150,8 @@ function topK(qVec: number[], pools: Chunk[][], k: number): Chunk[] {
 // the discriminating fact lands in context. For memorization subjects (biology) this is the
 // difference between "the topic is in the brain" and "the answer is in the brain". Union by best
 // cosine across shots, dedup, take the top finalK.
-async function retrieveMulti(question: string, choices: string[], pools: Chunk[][], perShot: number, finalK: number): Promise<Chunk[]> {
-  const queries = [`${question}\n${choices.join(' ')}`, ...choices.map((c) => `${question}\n${c}`)]
+async function retrieveMulti(question: string, choices: string[], pools: Chunk[][], perShot: number, finalK: number, extra: string[] = []): Promise<Chunk[]> {
+  const queries = [`${question}\n${choices.join(' ')}`, ...choices.map((c) => `${question}\n${c}`), ...extra.filter(Boolean)]
   const best = new Map<string, { c: Chunk; s: number }>()
   for (const query of queries) {
     const qv = await embedText(query)
@@ -186,6 +186,39 @@ async function ask(prompt: string): Promise<string> {
     const m = d.choices?.[0]?.message
     return (m?.content || m?.reasoning_content || '').trim()
   } catch { return '' }
+}
+
+// gen — neutral-system generation for query generation. MUST NOT use the MCQ SYS, or the model
+// answers "FINAL: X" instead of writing the passage we want to embed.
+async function gen(prompt: string): Promise<string> {
+  try {
+    const res = await fetch(`${BASE}/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: MODEL, stream: false, temperature: 0, messages: [{ role: 'user', content: prompt }] }),
+      signal: AbortSignal.timeout(TIMEOUT),
+    })
+    const d = await res.json() as { choices?: Array<{ message?: { content?: string; reasoning_content?: string } }> }
+    const m = d.choices?.[0]?.message
+    return (m?.content || m?.reasoning_content || '').trim()
+  } catch { return '' }
+}
+
+// queryGen — proper query generation + expansion BEFORE retrieval. nomic-embed matches surface form,
+// so a terse MCQ stem sits in question-space, not the textbook-prose-space the corpus lives in.
+// We add two extra query shots (cheap on a GPU model; was unaffordable on CPU, cached per question):
+//   • HyDE      — a hypothetical textbook passage answering the question, embedded in document-space
+//   • step-back — the general concept/principle/theorem being tested, to surface governing material
+const qgCache = new Map<string, string[]>()
+async function queryGen(question: string, choices: string[]): Promise<string[]> {
+  if (qgCache.has(question)) return qgCache.get(question)!
+  const out: string[] = []
+  const hyde = await gen(`Write a 2-3 sentence factual passage, in the style of a textbook, stating the facts, definitions, or laws needed to answer the following. Do NOT mention the question or the options; just assert the relevant knowledge directly.\n\nQuestion: ${question}\nOptions: ${choices.join(' | ')}`)
+  if (hyde.replace(/\s+/g, ' ').trim().length > 20) out.push(hyde.replace(/\s+/g, ' ').trim().slice(0, 600))
+  const sb = await gen(`Name the single general concept, principle, theorem, or topic this question tests. Reply with ONLY a short noun phrase (3-8 words), no sentence, no punctuation.\n\n${question}`)
+  const sbc = (sb.split('\n')[0] || '').replace(/^[^a-zA-Z]+/, '').replace(/[."']+$/, '').trim()
+  if (sbc.length > 2 && sbc.length < 80) out.push(sbc)
+  qgCache.set(question, out)
+  return out
 }
 
 // "Plug in each answer" — what a good student does. Instead of "pick one of four" (which a weak
@@ -306,12 +339,26 @@ async function main() {
         row['sources'] = hits.map((h) => `${h.slug}:${h.material}`)
       }
 
+      // queryGen arm: identical retriever + model, but with HyDE + step-back query shots added.
+      // Same answer path as brain → the column isolates the retrieval lift from query generation.
+      let qgenContext = ''
+      if (ARMS.includes('qgen')) {
+        const extra = await queryGen(q.question, q.choices)
+        row['qgen'] = extra.map((e) => e.slice(0, 70))
+        const hits = await retrieveMulti(q.question, q.choices, pools, PER_SHOT, SHOT_K, extra)
+        qgenContext = hits.map((h, n) => `[${n + 1}] ${h.text.slice(0, 500)}`).join('\n\n')
+        row['qgen_sources'] = hits.map((h) => `${h.slug}:${h.material}`)
+      }
+
       // Same answer-format rule on every model-answered arm — the only difference is the injected
       // context (brain) or the path taken (route), so the comparison stays fair.
       const ANSWER_RULE = '\n\nReason in ONE short sentence, then output exactly one final line: "FINAL: X" (X = A, B, C, or D).'
       const brainPrompt = `Relevant MIT course notes (use only what helps; ignore noise and fragments):\n\n${context}\n\nExam question:\n${base}${ANSWER_RULE}`
       let brainLetter: string | undefined // memoize so brain + route don't double-ask the model
       const askBrain = async (): Promise<string> => (brainLetter ??= extractLetter(await ask(brainPrompt)))
+      const qgenPrompt = `Relevant MIT course notes (use only what helps; ignore noise and fragments):\n\n${qgenContext}\n\nExam question:\n${base}${ANSWER_RULE}`
+      let qgenLetter: string | undefined
+      const askQgen = async (): Promise<string> => (qgenLetter ??= extractLetter(await ask(qgenPrompt)))
       const ci = comp[i]
       const marks: string[] = []
       for (const arm of ARMS) {
@@ -322,6 +369,8 @@ async function main() {
           if (ci?.answer) { letter = ci.answer; mode = ci.mode } else { letter = await askBrain(); mode = 'retrieve' }
         } else if (arm === 'brain') {
           letter = await askBrain()
+        } else if (arm === 'qgen') {              // brain + HyDE/step-back query generation
+          letter = await askQgen(); mode = 'qgen'
         } else if (arm === 'verify') {            // plug EACH choice in, verify vs its evidence, pick best
           const v = await verifyArm(q.question, q.choices, pools)
           letter = v.letter; mode = 'verify'
