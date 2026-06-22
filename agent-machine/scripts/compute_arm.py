@@ -17,7 +17,7 @@ than the model alone, and it *knows* which subset that is.
 Run:  OLLAMA_HOST=http://127.0.0.1:11434 python3 scripts/compute_arm.py
       MMLU_SUBJECTS=college_physics,high_school_physics MMLU_PER_SUBJECT=40 python3 ...
 """
-import os, sys, re, json, urllib.request
+import os, sys, re, json, signal, urllib.request
 import sympy as sp
 from units import parse_unit, to_si, dimension_of, DimError
 from model_verify import MODELS, DIMS, verify_and_solve
@@ -30,6 +30,26 @@ MODEL = os.environ.get('MMLU_MODEL', 'llama3.2:3b')
 PER = int(os.environ.get('MMLU_PER_SUBJECT', '40'))
 SUBJECTS = os.environ.get('MMLU_SUBJECTS', 'college_physics,high_school_physics,conceptual_physics').split(',')
 LETTERS = ['A', 'B', 'C', 'D']
+
+
+class _Timeout(Exception):
+    pass
+
+
+def _timed(secs, fn, *a, **k):
+    """Run fn with a hard wall-clock cap — LLM-written sympy (solve/factorial/integrate) can run
+    forever; the compute must never hang the loop. SIGALRM (main thread); no-op on non-Unix."""
+    if not hasattr(signal, 'SIGALRM'):
+        return fn(*a, **k)
+    def _h(_s, _f):
+        raise _Timeout()
+    old = signal.signal(signal.SIGALRM, _h)
+    signal.alarm(secs)
+    try:
+        return fn(*a, **k)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
 
 
 _SYMPY_NS = {'sqrt', 'exp', 'log', 'factorial', 'binomial', 'sin', 'cos', 'tan',
@@ -408,7 +428,7 @@ def math_solve_question(question, choices):
     if not mx or not mx.get('expr'):
         return None, None
     try:
-        ans = solve_math(mx['expr'], mx.get('op') or op, mx.get('var') or 'x', mx.get('at'))
+        ans = _timed(5, solve_math, mx['expr'], mx.get('op') or op, mx.get('var') or 'x', mx.get('at'))
         idx = _match_math(ans, choices)
         if idx is not None:
             return LETTERS[idx], 'math:' + (mx.get('op') or op)
@@ -417,9 +437,57 @@ def math_solve_question(question, choices):
     return None, None
 
 
+PROG_SYS = (
+    'Translate the math/science problem into ONE sympy expression that COMPUTES the answer — '
+    'program-of-thought. Use sympy: binomial, factorial, sqrt, solve([eqs],[vars]), Rational, '
+    'simplify, pi, exp, log, and the symbols in the problem. Output ONLY JSON: {"sympy":"<expr>"}.\n'
+    'Examples: "ways to choose 5 from 6" -> {"sympy":"binomial(6,5)"}; '
+    '"two numbers sum to 19, product 70" -> {"sympy":"solve([x+y-19, x*y-70],[x,y])"}; '
+    '"20% markdown on 325" -> {"sympy":"325*(1-Rational(20,100))"}; '
+    '"value of 3! + 2^4" -> {"sympy":"factorial(3)+2**4"}.'
+)
+_PROG_NS = {n: getattr(sp, n) for n in ('binomial', 'factorial', 'sqrt', 'solve', 'Rational',
+            'simplify', 'pi', 'E', 'exp', 'log', 'sin', 'cos', 'tan', 'Sum', 'Integer', 'Eq',
+            'Symbol', 'symbols', 'gcd', 'lcm', 'Abs', 'floor', 'ceiling', 'prime', 'factorint')}
+_PROG_NS.update({c: sp.Symbol(c) for c in 'abcdefghijklmnopqrstuvwxyz'})
+
+
+def prog_extract(question, choices):
+    raw = ollama([{'role': 'system', 'content': PROG_SYS},
+                  {'role': 'user', 'content': f'Question:\n{question}\nChoices: {choices}'}])
+    m = re.search(r'\{.*\}', raw, re.S)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(0)).get('sympy')
+    except Exception:
+        return None
+
+
+def prog_solve_question(question, choices):
+    """Program-of-thought: the model writes ONE sympy expression; we execute it in a sympy-only
+    namespace (no builtins) and match the choice. The model sets up; sympy computes exactly."""
+    src = prog_extract(question, choices)
+    if not src or len(src) > 240:
+        return None, None
+    try:
+        val = _timed(5, eval, src, {'__builtins__': {}}, _PROG_NS)   # restricted ns + 5s wall cap
+    except Exception:
+        return None, None
+    # normalize: solve() returns dict/list of dicts/tuples → flatten to value(s)
+    if isinstance(val, dict):
+        val = list(val.values())
+    elif isinstance(val, list) and val and isinstance(val[0], (dict,)):
+        val = [v for d in val for v in d.values()]
+    elif isinstance(val, list) and val and isinstance(val[0], (tuple,)):
+        val = [v for t in val for v in t]
+    idx = _match_math(val, choices)
+    return (LETTERS[idx], 'prog') if idx is not None else (None, None)
+
+
 def solve_question(question, choices):
-    """Verified compute: the right-maths (calculus/algebra) path, then multi-hop chain over the
-    physics catalog, then the free-equation escape hatch. Returns (answer_letter or None, mode)."""
+    """Verified compute: the right-maths (calculus/algebra) path, the physics catalog chain, the
+    free-equation hatch, then program-of-thought sympy. Returns (answer_letter or None, mode)."""
     # 0. RIGHT-MATHS — calculus/algebra computed exactly (Gödel form → sympy method)
     if infer_op(question):
         ans, mode = math_solve_question(question, choices)
@@ -449,6 +517,11 @@ def solve_question(question, choices):
                     return LETTERS[idx], 'free'
         except Exception:
             pass
+    # 3. PROGRAM-OF-THOUGHT — the model writes a sympy program (systems, combinatorics, arithmetic),
+    #    executed exactly. Catches the word-problem math the explicit-op path can't gate on.
+    ans, mode = prog_solve_question(question, choices)
+    if ans is not None:
+        return ans, mode
     return None, 'abstain'
 
 
