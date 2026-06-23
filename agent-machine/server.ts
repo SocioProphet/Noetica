@@ -3775,7 +3775,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
         if (c) { const ep = path.join(os.homedir(), '.noetica', 'eval-cases.jsonl'); fs.mkdirSync(path.dirname(ep), { recursive: true }); fs.appendFileSync(ep, `${JSON.stringify(c)}\n`) }
       } catch { /* eval-capture best-effort */ }
       // #5b — capture VERIFIED turns as SFT positives (rejection sampling: the success/training half).
-      // The shard feeds the Atlas causal_lm_lora trainer (tritfabric) via /api/tune submit → POST /v1/train.
+      // The shard feeds the Atlas causal_lm_lora trainer (tritfabric) via /api/tune submit → POST /v1/tune.
       try {
         const { captureVerified, toSftLine } = await import('./lib/sft-harvest.js')
         const v = captureVerified({ input: latestUserContent, output: fullContent, verified: turnGrounded, coverage: valueJudgment.grounding, decision: routerDecision.task }, Date.now())
@@ -5359,7 +5359,7 @@ Question: ${question}`
   }
 
   // /api/tune/* — the rejection-sampling→LoRA submit. Harvests VERIFIED production traces
-  // (lib/sft-harvest) and submits them to the Atlas training substrate (tritfabric, POST /v1/train)
+  // (lib/sft-harvest) and submits them to the Atlas training substrate (tritfabric, POST /v1/tune)
   // as a causal_lm_lora job. GET /status reports the shard; POST /submit packages + ships it.
   if (url.pathname.startsWith('/api/tune/')) {
     setCORSHeaders(res)
@@ -5394,7 +5394,8 @@ Question: ${question}`
             res.end(JSON.stringify({ ok: true, staged: true, submitted: false, unique: deduped.length, shardPath, request: tuneReq, hint: 'set ATLAS_HTTP to submit to the Atlas training substrate' }))
             return
           }
-          const r = await fetch(`${endpoint}/v1/train`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(tuneReq) })
+          // Atlas (atlasd) serves /v1/tune as the submit route; entrypoint=causal_lm_lora routes it to the trainer.
+          const r = await fetch(`${endpoint}/v1/tune`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(tuneReq) })
           const atlas = await r.json().catch(() => ({})) as { id?: string; job_id?: string }
           res.writeHead(r.ok ? 200 : 502, { 'content-type': 'application/json' })
           res.end(JSON.stringify({ ok: r.ok, submitted: r.ok, jobId: atlas?.id ?? atlas?.job_id ?? null, unique: deduped.length, atlas }))
