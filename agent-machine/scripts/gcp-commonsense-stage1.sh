@@ -30,7 +30,8 @@ step(){ echo "==== \$(date '+%H:%M:%S') \$* ===="; gsutil -q cp /var/log/cs-run.
 
 step "driver + ollama(GPU) + nomic"
 for i in \$(seq 1 60); do nvidia-smi >/dev/null 2>&1 && break; sleep 10; done; nvidia-smi||echo "WARN no GPU"
-timeout 300 bash -c 'curl -fsSL https://ollama.com/install.sh | sh' || { step "FATAL ollama"; exit 1; }
+for t in 1 2 3; do timeout 300 bash -c 'curl -fsSL https://ollama.com/install.sh | sh' || true; command -v ollama && break; step "ollama install retry \$t"; sleep 6; done
+command -v ollama || { step "FATAL ollama not on PATH after 3 tries"; exit 1; }
 systemctl stop ollama 2>/dev/null||true; OLLAMA_NUM_PARALLEL=16 OLLAMA_KEEP_ALIVE=30m nohup ollama serve >/var/log/ollama.log 2>&1 & sleep 12
 for n in 1 2 3 4 5; do timeout 1200 ollama pull $MODEL && break; sleep 8; done
 ollama list | grep -q "$MODEL" || { step "FATAL model"; exit 1; }
