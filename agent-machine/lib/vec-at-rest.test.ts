@@ -37,3 +37,22 @@ test('tampered ciphertext → empty vector (no embedding), never throws', () => 
   const tampered = `${enc.slice(0, -6)}AAAAAA`
   assert.equal(decodeVecEncrypted(tampered).length, 0)
 })
+
+import { encryptEmbeddingVal, decryptEmbeddingVal } from './vec-at-rest.js'
+
+test('embedding-val encrypt/decrypt round-trips at the atom-property level', () => {
+  const vals = { text: 'a chunk', embedding: JSON.stringify([0.1, 0.2, 0.3]), other: 1 }
+  const enc = encryptEmbeddingVal(vals)
+  assert.ok((enc.embedding as string).startsWith('enc:v1:'))   // ciphertext in vals_json
+  assert.equal(enc.text, 'a chunk')                            // other props untouched
+  const dec = decryptEmbeddingVal(enc)
+  assert.equal(dec.embedding, JSON.stringify([0.1, 0.2, 0.3])) // exact plaintext back
+})
+
+test('embedding-val helpers are idempotent + lazy-migrate + no-op without embedding', () => {
+  const plain = { embedding: JSON.stringify([1, 2]) }
+  assert.equal(decryptEmbeddingVal(plain).embedding, plain.embedding)   // legacy plaintext passes through
+  const enc = encryptEmbeddingVal(plain)
+  assert.deepEqual(encryptEmbeddingVal(enc), enc)                        // idempotent (already encrypted)
+  assert.deepEqual(encryptEmbeddingVal({ text: 'x' }), { text: 'x' })   // no embedding → unchanged
+})

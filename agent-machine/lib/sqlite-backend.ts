@@ -17,6 +17,7 @@ import type {
 import * as path from 'node:path'
 import * as os from 'node:os'
 import * as fs from 'node:fs'
+import { encryptEmbeddingVal, decryptEmbeddingVal } from './vec-at-rest.js'
 
 // ─── Minimal bun:sqlite interface (avoid hard dep on @types/bun) ─────────────
 
@@ -144,7 +145,9 @@ export class SQLiteAtomSpaceBackend implements AtomSpaceBackend {
         if (row) {
           const vals = JSON.parse(row.vals_json) as Record<string, Value>
           vals[p['key'] as string] = p['value'] as Value
-          this.stmtUpdateVals.run(JSON.stringify(vals), p['handle'])
+          // Encrypt the `embedding` value at rest (vec2text recovers ~92% text from a stored vector).
+          // In-memory stays plaintext; only vals_json on disk carries ciphertext. Idempotent.
+          this.stmtUpdateVals.run(JSON.stringify(encryptEmbeddingVal(vals as Record<string, unknown>)), p['handle'])
         }
         break
       }
@@ -171,8 +174,10 @@ export class SQLiteAtomSpaceBackend implements AtomSpaceBackend {
         },
       })
 
-      // Restore values as separate set_value entries (applyLogEntry needs atom indexed first)
-      const vals = JSON.parse(row.vals_json) as Record<string, Value>
+      // Restore values as separate set_value entries (applyLogEntry needs atom indexed first).
+      // Decrypt the embedding here so the IN-MEMORY graph holds the plaintext vector (retrieval is
+      // unchanged + fast). Legacy plaintext passes through and re-encrypts on its next write.
+      const vals = decryptEmbeddingVal(JSON.parse(row.vals_json) as Record<string, unknown>) as Record<string, Value>
       for (const [key, value] of Object.entries(vals)) {
         apply({ seq: row.seq, ts: row.created_at, op: 'set_value', payload: { handle: row.handle, key, value } })
       }

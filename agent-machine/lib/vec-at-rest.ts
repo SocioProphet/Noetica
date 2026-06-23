@@ -35,3 +35,27 @@ export function decodeVecEncrypted(s: string, dims?: number): Float32Array {
   }
   return decodeVec(s, dims)
 }
+
+// ── atom-property variant: encrypt the `embedding` VAL of an AtomSpace atom's vals record ──────────
+// The live graph stores the embedding as a property value (a JSON-array string), persisted in the
+// SQLite `vals_json`. These format-AGNOSTIC helpers encrypt/decrypt just that value at the persistence
+// boundary, so the in-memory graph keeps the plaintext vector (retrieval is unchanged + fast) while
+// the on-disk vals_json carries ciphertext. Idempotent + lazy-migrating (an already-encrypted or
+// legacy-plaintext value passes through correctly).
+const EMB = 'embedding'
+
+export function encryptEmbeddingVal(vals: Record<string, unknown>): Record<string, unknown> {
+  const cur = vals[EMB]
+  if (!enabled() || cur == null) return vals
+  if (typeof cur === 'string' && cur.startsWith(MAGIC)) return vals // already encrypted
+  return { ...vals, [EMB]: encryptLine({ e: cur }) }
+}
+
+export function decryptEmbeddingVal(vals: Record<string, unknown>): Record<string, unknown> {
+  const cur = vals[EMB]
+  if (typeof cur === 'string' && cur.startsWith(MAGIC)) {
+    const o = decryptLine(cur) as { e?: unknown } | null
+    if (o && 'e' in o) return { ...vals, [EMB]: o.e }
+  }
+  return vals // plaintext (legacy) or no embedding — passes through (lazy-migrates on next write)
+}
