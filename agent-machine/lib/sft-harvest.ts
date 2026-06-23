@@ -83,8 +83,10 @@ export function buildTuneRequest(opts: {
     tenant: 'noetica',
     task: 'generation',
     entrypoint: 'causal_lm_lora',
-    metric: 'train_loss',
-    mode: 'min',
+    // The promotion gate compares this metric base-vs-adapter on a held-out set (promote-never-demote).
+    // pass_at_1 (higher better) is the meaningful comparison — train_loss can't tell us if it got better.
+    metric: 'pass_at_1',
+    mode: 'max',
     base_model: opts.baseModel,
     train: { uri: opts.datasetUri },
     peft: { r: 16, alpha: 32 },
