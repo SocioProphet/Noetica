@@ -47,6 +47,7 @@ import { routeForAction, meshrushPhase } from './lib/action-cell.js'
 import { selectSurface, cleanLabel } from './lib/graph-surface.js'
 import { generateSovereign, meshLadder } from './lib/mesh.js'
 import { AGENT_ROLES, DISPATCHABLE_ROLES, resolveRole } from './lib/sub-agent.js'
+import { listCustomAgents, getCustomAgent, saveCustomAgent, deleteCustomAgent } from './lib/agent-registry.js'
 import { buildReport } from './lib/graph-hygiene.js'
 import { TAXONOMY_WORDS } from './lib/slash-topics.js'
 import { createSQLiteBackend, migrateJSONLToSQLite } from './lib/sqlite-backend.js'
@@ -1385,7 +1386,7 @@ async function runSubAgent(
   context: string,
   keys: { anthropic?: string; openai?: string; serper?: string },
 ): Promise<string> {
-  const role = resolveRole(roleId)
+  const role = getCustomAgent(roleId) ?? resolveRole(roleId)   // user-defined agents resolve before built-ins
   const subTools = BUILTIN_TOOLS.filter((t) => role.tools.includes(t.name) && t.name !== 'dispatch_agent')
   const subToolNames = new Set(subTools.map((t) => t.name))
   const model = role.model === 'coder' ? 'qwen2.5-coder:7b' : 'qwen2.5:7b'
@@ -1503,7 +1504,7 @@ async function executeTool(
       } catch { /* swarm best-effort */ }
       const result = await runSubAgent(role, task, context + blackboard, keys)
       try { const sw = await import('./lib/swarm-volume.js'); sw.writeBlackboard(swarmId, agentId, { role, task: task.slice(0, 200), result: result.slice(0, 4000), at: Date.now() }) } catch { /* */ }
-      return `[${resolveRole(role).label} sub-agent → result]\n${result}`
+      return `[${(getCustomAgent(role) ?? resolveRole(role)).label} sub-agent → result]\n${result}`
     }
     case 'web_search': {
       const query = String(input['query'] ?? '').trim().slice(0, 500)
@@ -4087,6 +4088,34 @@ const server = http.createServer((req, res) => {
     return
   }
 
+  // /api/agents — the no-code agent builder. GET lists built-in roles + the user's custom agents; POST upserts a
+  // custom agent {label, description, systemPrompt, tools[], maxTurns, model}; DELETE?id=… removes one. Custom
+  // agents become dispatchable exactly like built-ins (dispatch_agent resolves them first). Token-gated (writes).
+  if (url.pathname === '/api/agents') {
+    if (req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
+      res.end(JSON.stringify({ builtin: Object.values(AGENT_ROLES).map((r) => ({ id: r.id, label: r.label, description: r.description, tools: r.tools, maxTurns: r.maxTurns, model: r.model, builtin: true })), custom: listCustomAgents() }))
+      return
+    }
+    if (req.method === 'POST') {
+      if (!requireApiToken(req, res)) return
+      let body = ''
+      req.on('data', (c: Buffer) => { body += c.toString(); if (body.length > 64 * 1024) { try { req.destroy() } catch { /* */ } } })
+      req.on('end', () => {
+        try { const saved = saveCustomAgent(JSON.parse(body || '{}')); res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }); res.end(JSON.stringify({ ok: true, agent: saved })) }
+        catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_agent' })) }
+      })
+      return
+    }
+    if (req.method === 'DELETE') {
+      if (!requireApiToken(req, res)) return
+      const ok = deleteCustomAgent(url.searchParams.get('id') ?? '')
+      res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
+      res.end(JSON.stringify({ ok }))
+      return
+    }
+  }
+
   // GET /api/learning/stats — make the production-learning loop visible: how many skills the agent has
   // distilled from successes (procedural-memory) and how many failures it has captured for replay (eval-capture).
   if (req.method === 'GET' && url.pathname === '/api/learning/stats') {
@@ -4095,11 +4124,56 @@ const server = http.createServer((req, res) => {
     }
     const skills = loadSkills()
     const evalCases = readJsonl(path.join(os.homedir(), '.noetica', 'eval-cases.jsonl'))
+    // The felt-win: the latest replay of captured failures against the current system ("fixed X of N").
+    let replay: Record<string, unknown> | null = null
+    try { replay = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.noetica', 'learning-replay.json'), 'utf8')) as Record<string, unknown> } catch { /* none run yet */ }
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
     res.end(JSON.stringify({
       skills: { count: skills.length, recent: skills.slice(-5).map((s) => ({ task: s.task, abstraction: s.abstraction, steps: s.steps })) },
       evalCases: { count: evalCases.length, recent: evalCases.slice(-5).map((c) => ({ input: String(c['input'] ?? '').slice(0, 80), failureMode: c['failureMode'], coverage: c['coverage'] })) },
+      replay,
     }))
+    return
+  }
+
+  // POST /api/learning/replay — re-run captured production FAILURES against the CURRENT system
+  // (today's retrieval + model) and report how many now pass: "fixed X of N of your real failures".
+  // The felt-win surface for the verifier→learning loop. Bounded (NOETICA_REPLAY_MAX, default 25) and
+  // cached to ~/.noetica/learning-replay.json so /api/learning/stats can show it without re-running.
+  if (req.method === 'POST' && url.pathname === '/api/learning/replay') {
+    void (async () => {
+      try {
+        const { parseEvalCases, selectForReplay, replayCase, summarizeReplay } = await import('./lib/eval-replay.js')
+        const { searchDocsReranked } = await import('./lib/doc-store.js')
+        const { verifyGrounding } = await import('./lib/research-verify.js')
+        const { generateOllamaText } = await import('./lib/ollama.js')
+        const casesPath = path.join(os.homedir(), '.noetica', 'eval-cases.jsonl')
+        const all = fs.existsSync(casesPath) ? parseEvalCases(fs.readFileSync(casesPath, 'utf8')) : []
+        const sel = selectForReplay(all, Math.max(1, Number(process.env['NOETICA_REPLAY_MAX'] || 25)))
+        const model = process.env['NOETICA_REPLAY_MODEL'] || 'qwen2.5:7b'
+        const regenerate = async (input: string) => {
+          const chunks = await searchDocsReranked(input, 8).catch(() => [])
+          const sources = chunks.map((ch) => ({ text: ch.text }))
+          const ctx = sources.map((s) => s.text).join('\n---\n').slice(0, 6000)
+          const { content } = await generateOllamaText({ model, temperature: 0.2, messages: [
+            { role: 'system', content: 'Answer using ONLY the provided context. Be concise. If the context does not support an answer, say so.' },
+            { role: 'user', content: `Context:\n${ctx}\n\nQuestion: ${input}` },
+          ] })
+          return { answer: content, sources }
+        }
+        const judge = (answer: string, sources: { text: string }[]) => { const r = verifyGrounding(answer, sources); return { grounded: r.grounded, score: r.score } }
+        const outcomes = []
+        for (const c of sel) outcomes.push(await replayCase(c, regenerate, judge))
+        const summary = summarizeReplay(outcomes, Date.now())
+        const cache = { total: summary.total, fixed: summary.fixed, stillFailing: summary.stillFailing, fixedRate: summary.fixedRate, ts: summary.ts }
+        try { fs.writeFileSync(path.join(os.homedir(), '.noetica', 'learning-replay.json'), JSON.stringify(cache)) } catch { /* best-effort cache */ }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
+        res.end(JSON.stringify({ ok: true, ...cache, outcomes: summary.outcomes.slice(0, 12) }))
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: 'replay_error' }))
+      }
+    })()
     return
   }
 
