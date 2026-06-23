@@ -5454,7 +5454,7 @@ Question: ${question}`
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
     void (async () => {
       try {
-        const { readSftShard, dedupeVerified, toSftLine, buildTuneRequest } = await import('./lib/sft-harvest.js')
+        const { readSftShard, dedupeVerified, toSftLine, buildTuneRequest, exampleHash, excludeTrained } = await import('./lib/sft-harvest.js')
         const shardPath = path.join(os.homedir(), '.noetica', 'distill', 'verified.sft.jsonl')
         const raw = fs.existsSync(shardPath) ? readSftShard(fs.readFileSync(shardPath, 'utf8')) : []
         const deduped = dedupeVerified(raw)
@@ -5463,10 +5463,15 @@ Question: ${question}`
         // generality. Require a real floor before a run is eligible (configurable; default 50 — raise
         // toward several hundred as the harvest grows).
         const minToSubmit = Math.max(1, Number(process.env['NOETICA_TUNE_MIN'] || 50))
+        // CROSS-ROUND DEDUP ledger: content hashes of examples already trained on in prior rounds.
+        const ledgerPath = path.join(os.homedir(), '.noetica', 'distill', 'trained-hashes.json')
+        let trainedArr: string[] = []
+        try { trainedArr = JSON.parse(fs.readFileSync(ledgerPath, 'utf8')) as string[] } catch { trainedArr = [] }
+        const trained = new Set(trainedArr)
 
         if (req.method === 'GET' && url.pathname === '/api/tune/status') {
           res.writeHead(200, { 'content-type': 'application/json' })
-          res.end(JSON.stringify({ ok: true, shardPath, captured: raw.length, unique: deduped.length, minToSubmit, submitTarget: endpoint || null, ready: deduped.length >= minToSubmit }))
+          res.end(JSON.stringify({ ok: true, shardPath, captured: raw.length, unique: deduped.length, alreadyTrained: trainedArr.length, minToSubmit, submitTarget: endpoint || null, ready: deduped.length >= minToSubmit }))
           return
         }
 
@@ -5487,21 +5492,32 @@ Question: ${question}`
           // device, in case a pre-redaction trace exists in the shard.
           const { redact } = await import('./lib/redact.js')
           const clean = deduped.map((e) => ({ ...e, input: redact(e.input).redacted, output: redact(e.output).redacted }))
-          // Canonicalize the shard to the cleaned, deduped set (the uri Atlas will read).
-          fs.writeFileSync(shardPath, `${clean.map(toSftLine).join('\n')}\n`)
+          // CROSS-ROUND DEDUP: drop examples already trained on in a prior round. Re-training on the
+          // same easy wins every round narrows the distribution and accelerates collapse.
+          const fresh = excludeTrained(clean, trained)
+          if (fresh.length < minToSubmit) {
+            res.writeHead(409, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'not enough NEW verified examples since last training', unique: clean.length, fresh: fresh.length, alreadyTrained: trainedArr.length, needed: minToSubmit }))
+            return
+          }
+          // Canonicalize the shard to the FRESH set (drops already-trained — stops re-accumulation).
+          fs.writeFileSync(shardPath, `${fresh.map(toSftLine).join('\n')}\n`)
           const datasetUri = process.env['NOETICA_SFT_URI'] || shardPath
           const baseModel = process.env['NOETICA_TUNE_BASE'] || 'Qwen/Qwen2.5-Coder-7B-Instruct'
-          const tuneReq = buildTuneRequest({ datasetUri, baseModel, examples: clean.length })
+          const tuneReq = buildTuneRequest({ datasetUri, baseModel, examples: fresh.length })
+          // Mark these examples trained ONLY once they're actually submitted (not when merely staged).
+          const recordTrained = () => { try { fs.writeFileSync(ledgerPath, JSON.stringify([...trained, ...fresh.map(exampleHash)].slice(-100000))) } catch { /* best-effort ledger */ } }
           if (!endpoint) {
             res.writeHead(200, { 'content-type': 'application/json' })
-            res.end(JSON.stringify({ ok: true, staged: true, submitted: false, unique: deduped.length, shardPath, request: tuneReq, hint: 'set ATLAS_HTTP to submit to the Atlas training substrate' }))
+            res.end(JSON.stringify({ ok: true, staged: true, submitted: false, unique: deduped.length, fresh: fresh.length, shardPath, request: tuneReq, hint: 'set ATLAS_HTTP to submit to the Atlas training substrate' }))
             return
           }
           // Atlas (atlasd) serves /v1/tune as the submit route; entrypoint=causal_lm_lora routes it to the trainer.
           const r = await fetch(`${endpoint}/v1/tune`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(tuneReq) })
           const atlas = await r.json().catch(() => ({})) as { id?: string; job_id?: string }
+          if (r.ok) recordTrained()
           res.writeHead(r.ok ? 200 : 502, { 'content-type': 'application/json' })
-          res.end(JSON.stringify({ ok: r.ok, submitted: r.ok, jobId: atlas?.id ?? atlas?.job_id ?? null, unique: deduped.length, atlas }))
+          res.end(JSON.stringify({ ok: r.ok, submitted: r.ok, jobId: atlas?.id ?? atlas?.job_id ?? null, unique: deduped.length, fresh: fresh.length, atlas }))
           return
         }
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { captureVerified, toSftLine, readSftShard, dedupeVerified, buildTuneRequest } from './sft-harvest.js'
+import { captureVerified, toSftLine, readSftShard, dedupeVerified, buildTuneRequest, exampleHash, excludeTrained } from './sft-harvest.js'
 
 const base = { input: 'Write fib(n) in Python', output: 'def fib(n):\n    a,b=0,1\n    for _ in range(n): a,b=b,a+b\n    return a', verified: true, coverage: 0.9, decision: 'coding', independent: true }
 
@@ -48,4 +48,14 @@ test('buildTuneRequest emits the Atlas causal_lm_lora contract', () => {
   assert.deepEqual(req['train'], { uri: 'gs://x/verified.sft.jsonl' })
   assert.equal((req['resources'] as any).GPU, 1)
   assert.equal(req['use_ray'], true)
+})
+
+test('exampleHash + excludeTrained dedupe across rounds', () => {
+  const a = { input: 'q1', output: 'a1', coverage: 0.9, capturedAt: 1 }
+  const b = { input: 'q2', output: 'a2', coverage: 0.9, capturedAt: 2 }
+  assert.equal(exampleHash(a), exampleHash({ input: 'q1', output: 'a1' }))   // stable, content-only
+  assert.notEqual(exampleHash(a), exampleHash(b))
+  const trained = new Set([exampleHash(a)])
+  assert.deepEqual(excludeTrained([a, b], trained).map((x) => x.input), ['q2'])  // a already trained → dropped
+  assert.deepEqual(excludeTrained([a, b], new Set<string>()).length, 2)          // none trained → all fresh
 })
