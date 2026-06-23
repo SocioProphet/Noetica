@@ -34,6 +34,7 @@ import * as path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { embedText } from '../lib/ollama.js'
 import { councilVote, learnedCouncilVote } from '../lib/council.js'
+import { fetchConceptDef, cleanTerm } from '../lib/concept-defs.js'
 import { decodeVec, l2norm } from '../lib/brain-vec.js'
 
 const HOME = os.homedir()
@@ -137,6 +138,9 @@ const MATERIAL_BOOST: Record<string, number> = {
   lecture: 1.05, reference: 0.92, syllabus: 0.80,
 }
 const materialBoost = (m: string): number => MATERIAL_BOOST[m] ?? 1.0
+// defs arm: cache clean KG definitions across the board run (`${field}|${term}` → def | null). One live
+// Wikipedia lookup per UNIQUE term; repeats within a field are free. null is cached too (don't re-miss).
+const defsCache = new Map<string, string | null>()
 
 function loadField(field: string): Chunk[] {
   if (fieldCache.has(field)) return fieldCache.get(field)!
@@ -700,6 +704,22 @@ async function main() {
           if (ci?.answer) { letter = ci.answer; mode = ci.mode } else { letter = await askBrain(); mode = 'retrieve' }
         } else if (arm === 'brain') {
           letter = await askBrain()
+        } else if (arm === 'defs') {              // STRUCTURAL definition-grounding (concept-defs): CLEAN KG defs, not noisy transcripts
+          // Tests the thesis (Wolfson §4 / audit #1): retrieval is bounded by ONTOLOGICAL alignment, not the
+          // model — so ground on disambiguated Wikipedia definitions (field-qualified + embedding-WSD) instead
+          // of lecture-transcript chunks. Term-ambiguity is fixed at the KG layer, not the router.
+          const field = fields[0] ?? ''
+          const termLine = await ask(`List the 2-3 key technical terms or named concepts needed to answer this question. Comma-separated, terms only, no explanation.\n\n${q.question}`)
+          const terms = [...new Set(termLine.split(',').map((t) => cleanTerm(t) ?? t.trim().toLowerCase()).filter((t) => t.length > 2))].slice(0, 3)
+          const defs: string[] = []
+          for (const t of terms) {
+            const key = `${field}|${t}`
+            let def = defsCache.get(key)
+            if (def === undefined) { def = (await fetchConceptDef(t, field))?.definition ?? null; defsCache.set(key, def) }
+            if (def) defs.push(`- ${t}: ${def}`)
+          }
+          if (defs.length) { letter = extractLetter(await ask(`Relevant definitions:\n${defs.join('\n')}\n\n${base}${ANSWER_RULE}`)); mode = `defs:${defs.length}/${terms.length}` }
+          else { letter = extractLetter(await ask(`${base}${ANSWER_RULE}`)); mode = 'defs:miss' }   // no clean def → closed-book (never worse than baseline for lack of grounding)
         } else if (arm === 'qgen') {              // brain + HyDE/step-back query generation
           letter = await askQgen(); mode = 'qgen'
         } else if (arm === 'autoform') {          // autoformalization: LLM→sympy→execute→vote (abstains on non-numeric)
