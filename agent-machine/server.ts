@@ -3774,6 +3774,13 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
         const c = captureFailure({ input: latestUserContent, output: fullContent, verified: turnGrounded, coverage: valueJudgment.grounding, decision: routerDecision.task }, Date.now(), { minCoverage: 0.5 })
         if (c) { const ep = path.join(os.homedir(), '.noetica', 'eval-cases.jsonl'); fs.mkdirSync(path.dirname(ep), { recursive: true }); fs.appendFileSync(ep, `${JSON.stringify(c)}\n`) }
       } catch { /* eval-capture best-effort */ }
+      // #5b — capture VERIFIED turns as SFT positives (rejection sampling: the success/training half).
+      // The shard feeds the Atlas causal_lm_lora trainer (tritfabric) via /api/tune submit → POST /v1/train.
+      try {
+        const { captureVerified, toSftLine } = await import('./lib/sft-harvest.js')
+        const v = captureVerified({ input: latestUserContent, output: fullContent, verified: turnGrounded, coverage: valueJudgment.grounding, decision: routerDecision.task }, Date.now())
+        if (v) { const sp = path.join(os.homedir(), '.noetica', 'distill', 'verified.sft.jsonl'); fs.mkdirSync(path.dirname(sp), { recursive: true }); fs.appendFileSync(sp, `${toSftLine(v)}\n`) }
+      } catch { /* sft-harvest best-effort */ }
       // #6 — distill SUCCESSFUL turns (high worth + a real tool sequence) into reusable procedural skills (the
       // success half; retrieved into the system prompt on future similar tasks above).
       try {
@@ -5351,16 +5358,56 @@ Question: ${question}`
     return
   }
 
-  // /api/tune/* — KD training stubs (real distillation requires separate distill server)
+  // /api/tune/* — the rejection-sampling→LoRA submit. Harvests VERIFIED production traces
+  // (lib/sft-harvest) and submits them to the Atlas training substrate (tritfabric, POST /v1/train)
+  // as a causal_lm_lora job. GET /status reports the shard; POST /submit packages + ships it.
   if (url.pathname.startsWith('/api/tune/')) {
     setCORSHeaders(res)
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
-    res.writeHead(503, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({
-      ok: false,
-      error: 'Distillation server not running. Start the Noetica distillation server (separate process) to enable KD training.',
-      hint: 'See docs/tune-server.md for setup instructions.',
-    }))
+    void (async () => {
+      try {
+        const { readSftShard, dedupeVerified, toSftLine, buildTuneRequest } = await import('./lib/sft-harvest.js')
+        const shardPath = path.join(os.homedir(), '.noetica', 'distill', 'verified.sft.jsonl')
+        const raw = fs.existsSync(shardPath) ? readSftShard(fs.readFileSync(shardPath, 'utf8')) : []
+        const deduped = dedupeVerified(raw)
+        const endpoint = (process.env['ATLAS_HTTP'] || process.env['NOETICA_TUNE_ENDPOINT'] || '').replace(/\/+$/, '')
+
+        if (req.method === 'GET' && url.pathname === '/api/tune/status') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, shardPath, captured: raw.length, unique: deduped.length, minToSubmit: 8, submitTarget: endpoint || null, ready: deduped.length >= 8 }))
+          return
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/tune/submit') {
+          if (deduped.length < 8) {
+            res.writeHead(409, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'not enough verified examples yet', unique: deduped.length, needed: 8 }))
+            return
+          }
+          // Canonicalize the shard to the deduped set (the uri Atlas will read).
+          fs.writeFileSync(shardPath, `${deduped.map(toSftLine).join('\n')}\n`)
+          const datasetUri = process.env['NOETICA_SFT_URI'] || shardPath
+          const baseModel = process.env['NOETICA_TUNE_BASE'] || 'Qwen/Qwen2.5-Coder-7B-Instruct'
+          const tuneReq = buildTuneRequest({ datasetUri, baseModel, examples: deduped.length })
+          if (!endpoint) {
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ ok: true, staged: true, submitted: false, unique: deduped.length, shardPath, request: tuneReq, hint: 'set ATLAS_HTTP to submit to the Atlas training substrate' }))
+            return
+          }
+          const r = await fetch(`${endpoint}/v1/train`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(tuneReq) })
+          const atlas = await r.json().catch(() => ({})) as { id?: string; job_id?: string }
+          res.writeHead(r.ok ? 200 : 502, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: r.ok, submitted: r.ok, jobId: atlas?.id ?? atlas?.job_id ?? null, unique: deduped.length, atlas }))
+          return
+        }
+
+        res.writeHead(404, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: 'unknown tune route (use GET /api/tune/status or POST /api/tune/submit)' }))
+      } catch {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: 'tune_error' }))
+      }
+    })()
     return
   }
 
