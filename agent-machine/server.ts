@@ -3776,10 +3776,17 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
       } catch { /* eval-capture best-effort */ }
       // #5b — capture VERIFIED turns as SFT positives (rejection sampling: the success/training half).
       // The shard feeds the Atlas causal_lm_lora trainer (tritfabric) via /api/tune submit → POST /v1/tune.
+      // SOVEREIGNTY: harvesting is OFF by default (NOETICA_LEARN_OPT_IN) — this data could leave the
+      // device for training. Only with explicit operator opt-in, and only AFTER the PII/secret
+      // firewall (redact) scrubs BOTH the prompt and the response, does a verified turn enter the
+      // shard — so secrets/PII are never written to disk or shipped, even under cloud training.
       try {
-        const { captureVerified, toSftLine } = await import('./lib/sft-harvest.js')
-        const v = captureVerified({ input: latestUserContent, output: fullContent, verified: turnGrounded, coverage: valueJudgment.grounding, decision: routerDecision.task }, Date.now())
-        if (v) { const sp = path.join(os.homedir(), '.noetica', 'distill', 'verified.sft.jsonl'); fs.mkdirSync(path.dirname(sp), { recursive: true }); fs.appendFileSync(sp, `${toSftLine(v)}\n`) }
+        if (isFlagOn('NOETICA_LEARN_OPT_IN')) {
+          const { captureVerified, toSftLine } = await import('./lib/sft-harvest.js')
+          const { redact } = await import('./lib/redact.js')
+          const v = captureVerified({ input: redact(latestUserContent).redacted, output: redact(fullContent).redacted, verified: turnGrounded, coverage: valueJudgment.grounding, decision: routerDecision.task }, Date.now())
+          if (v) { const sp = path.join(os.homedir(), '.noetica', 'distill', 'verified.sft.jsonl'); fs.mkdirSync(path.dirname(sp), { recursive: true }); fs.appendFileSync(sp, `${toSftLine(v)}\n`) }
+        }
       } catch { /* sft-harvest best-effort */ }
       // #6 — distill SUCCESSFUL turns (high worth + a real tool sequence) into reusable procedural skills (the
       // success half; retrieved into the system prompt on future similar tasks above).
@@ -5379,16 +5386,27 @@ Question: ${question}`
         }
 
         if (req.method === 'POST' && url.pathname === '/api/tune/submit') {
+          // SOVEREIGNTY: submitting ships the shard off-device (potentially to a cloud GPU). Gate it
+          // behind the same explicit opt-in as capture — never egress training data implicitly.
+          if (!isFlagOn('NOETICA_LEARN_OPT_IN')) {
+            res.writeHead(403, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'learning is opt-in', hint: 'set NOETICA_LEARN_OPT_IN=1 to harvest + submit verified traces for training' }))
+            return
+          }
           if (deduped.length < 8) {
             res.writeHead(409, { 'content-type': 'application/json' })
             res.end(JSON.stringify({ ok: false, error: 'not enough verified examples yet', unique: deduped.length, needed: 8 }))
             return
           }
-          // Canonicalize the shard to the deduped set (the uri Atlas will read).
-          fs.writeFileSync(shardPath, `${deduped.map(toSftLine).join('\n')}\n`)
+          // Defense-in-depth: re-run the PII/secret firewall over every example before it leaves the
+          // device, in case a pre-redaction trace exists in the shard.
+          const { redact } = await import('./lib/redact.js')
+          const clean = deduped.map((e) => ({ ...e, input: redact(e.input).redacted, output: redact(e.output).redacted }))
+          // Canonicalize the shard to the cleaned, deduped set (the uri Atlas will read).
+          fs.writeFileSync(shardPath, `${clean.map(toSftLine).join('\n')}\n`)
           const datasetUri = process.env['NOETICA_SFT_URI'] || shardPath
           const baseModel = process.env['NOETICA_TUNE_BASE'] || 'Qwen/Qwen2.5-Coder-7B-Instruct'
-          const tuneReq = buildTuneRequest({ datasetUri, baseModel, examples: deduped.length })
+          const tuneReq = buildTuneRequest({ datasetUri, baseModel, examples: clean.length })
           if (!endpoint) {
             res.writeHead(200, { 'content-type': 'application/json' })
             res.end(JSON.stringify({ ok: true, staged: true, submitted: false, unique: deduped.length, shardPath, request: tuneReq, hint: 'set ATLAS_HTTP to submit to the Atlas training substrate' }))
