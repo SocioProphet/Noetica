@@ -293,18 +293,21 @@ async function retrieveMulti(question: string, choices: string[], pools: Chunk[]
   return picked.map((x) => ({ ...x.c, score: x.s }))
 }
 
-// eliminateArm — the Monty-Hall MCQ play. Instead of a quick top-k match, gather confirm/REFUTE
-// evidence per CHOICE (the doors), score them, and treat the choices as competing (ruling one out
-// lifts the others). A three-way verdict — SUPPORT / REFUTE / INSUFFICIENT — makes elimination
-// explicit and, crucially, marks which choices we DON'T yet have coverage for. The saturation gate:
-// if the posterior isn't peaked OR a choice is still uncovered, WIDEN into adjacent/co-prime fields
-// and probe again. Only then commit. Never defaults to A.
+// eliminateArm — the Monty-Hall MCQ play, done as a PROPER conditional posterior (the part that's easy to
+// botch). The choices are the doors; exactly ONE hides the car (is correct). Per-choice evidence gives a
+// log-likelihood-ratio, and we keep a NORMALIZED posterior over all choices, updated sequentially (Bayes)
+// across probe rounds. The Monty-Hall nuance the old code MISSED: refuting a door must not merely lower
+// that door — normalization transfers its mass to the SURVIVORS, because P sums to 1 and one of them is
+// correct. So three refuted doors drive the fourth toward certainty even on neutral evidence: you SWITCH
+// to the unopened door. The saturation gate reads off the posterior (a majority by a clear margin); until
+// one door actually wins we WIDEN into adjacent/co-prime fields and update again. Never defaults to A.
 async function eliminateArm(question: string, choices: string[], pools: Chunk[][], wider: Chunk[][]):
   Promise<{ letter: string; coverage: number; rounds: number; margin: number }> {
   const n = choices.length
-  const score = new Array<number>(n).fill(0)
-  const covered = new Array<boolean>(n).fill(false)
+  const logit = new Array<number>(n).fill(0)          // log-odds per door; uniform prior ⇒ all 0. Evidence is
+  const covered = new Array<boolean>(n).fill(false)   // multiplicative in P = additive in log (sequential Bayes)
   let rounds = 0
+  const K = Number(process.env['MMLU_ELIM_K'] || 2)   // evidence temperature: how hard one verdict moves the odds
   const probe = async (ps: Chunk[][]) => {
     if (!ps.length) return
     rounds++
@@ -315,18 +318,29 @@ async function eliminateArm(question: string, choices: string[], pools: Chunk[][
       const m = /VERDICT:\s*(SUPPORT|REFUTE|INSUFFICIENT)\D*([01](?:\.\d+)?)?/i.exec(raw)
       const v = m ? m[1]!.toUpperCase() : 'INSUFFICIENT'
       const conf = m && m[2] != null ? Math.min(1, Math.max(0, Number(m[2]))) : 0.5
-      if (v === 'SUPPORT') { score[i]! += conf; covered[i] = true }
-      else if (v === 'REFUTE') { score[i]! -= conf; covered[i] = true }   // elimination — pushes mass to the rest
+      // log-likelihood-ratio: SUPPORT raises this door's odds, REFUTE lowers them, INSUFFICIENT is neutral
+      // (0) — yet normalization still LIFTS it when the OTHER doors get refuted. That's the conditional part.
+      if (v === 'SUPPORT') { logit[i]! += K * conf; covered[i] = true }
+      else if (v === 'REFUTE') { logit[i]! -= K * conf; covered[i] = true }
     }))
   }
+  const posterior = (): number[] => {                 // softmax = the normalized P(correct | evidence), Σ=1
+    const mx = Math.max(...logit)
+    const ex = logit.map((z) => Math.exp(z - mx))
+    const Z = ex.reduce((a, b) => a + b, 0) || 1
+    return ex.map((e) => e / Z)
+  }
+  const gap = (p: number[]): number => { const s = [...p].sort((a, b) => b - a); return (s[0] ?? 0) - (s[1] ?? 0) }
   await probe(pools)
-  const margin = () => { const s = [...score].sort((a, b) => b - a); return (s[0] ?? 0) - (s[1] ?? 0) }
-  const peaked = () => covered.every(Boolean) && margin() > 0.3
-  if (!peaked()) await probe(wider)                        // coverage gate → widen into co-prime fields
-  const mx = Math.max(...score)
-  const top = score.map((s, i) => ({ s, i })).filter((x) => x.s === mx)
+  let p = posterior()
+  // commit only when the posterior is PEAKED: every door probed, one door past a majority (>0.5) by a clear
+  // margin. Otherwise WIDEN into co-prime fields and update the SAME posterior again (the saturation gate).
+  const peaked = (): boolean => covered.every(Boolean) && Math.max(...p) > 0.5 && gap(p) > 0.2
+  if (!peaked()) { await probe(wider); p = posterior() }
+  const mx = Math.max(...p)
+  const top = p.map((s, i) => ({ s, i })).filter((x) => mx - x.s < 1e-9)
   const best = top.length > 1 ? (top.find((x) => x.i !== 0)?.i ?? top[0]!.i) : top[0]!.i   // tie-break away from A
-  return { letter: LETTERS[best]!, coverage: covered.filter(Boolean).length / n, rounds, margin: margin() }
+  return { letter: LETTERS[best]!, coverage: covered.filter(Boolean).length / n, rounds, margin: gap(p) }
 }
 
 // ── model ──────────────────────────────────────────────────────────────────────
