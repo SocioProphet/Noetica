@@ -79,6 +79,7 @@ import { CANONICAL_SHAPES, QUARANTINE_PROP } from './lib/canonical-shapes.js'
 import { judgeAnswer, type ValueJudgment } from './lib/value-judgment.js'
 import { runAgentLoop, type ProviderAdapter } from './lib/agent-loop.js'
 import { validateToolCall, type ToolSchema, type ArgSpec } from './lib/constrained-decode.js'
+import { appendJsonl as appendEncrypted, readJsonl as readEncrypted, writeJson as writeEncryptedJson, readJson as readEncryptedJson } from './lib/at-rest.js'
 import { critique, bestOfTemps, type Candidate as CriticCandidate } from './lib/critic.js'
 import { programOfThought, codeVerifyRepair } from './lib/exec-verify.js'
 import { applyEdit, editSummary } from './lib/apply-patch.js'
@@ -339,15 +340,15 @@ function readSecurityState(): unknown {
   catch { return { armed: false, tor: false, updated_at: null, source: 'noetica-agent-machine' } }
 }
 try {
-  const arr = JSON.parse(fs.readFileSync(GOVERNANCE_FILE, 'utf8'))
-  if (Array.isArray(arr)) _governanceRuns.push(...(arr as GovernanceRun[]).slice(-GOVERNANCE_RING_SIZE))
+  const arr = readEncryptedJson<GovernanceRun[]>(GOVERNANCE_FILE)   // encrypted at rest (lazy-migrates plaintext)
+  if (Array.isArray(arr)) _governanceRuns.push(...arr.slice(-GOVERNANCE_RING_SIZE))
 } catch { /* no prior governance log */ }
 let _govSaveTimer: ReturnType<typeof setTimeout> | null = null
 function saveGovernance(): void {
   if (_govSaveTimer) return
   _govSaveTimer = setTimeout(() => {
     _govSaveTimer = null
-    try { fs.mkdirSync(path.dirname(GOVERNANCE_FILE), { recursive: true }); fs.writeFileSync(GOVERNANCE_FILE, JSON.stringify(_governanceRuns)) } catch { /* best-effort */ }
+    try { writeEncryptedJson(GOVERNANCE_FILE, _governanceRuns) } catch { /* best-effort */ }
   }, 1500)
   _govSaveTimer.unref?.()
 }
@@ -1822,11 +1823,50 @@ function getAmSessionDir(sessionId: string): string {
   return dir
 }
 
+// A real node/bun executable we can spawn to host an ISOLATED JS sandbox (separate process + filtered env), or
+// null. The compiled standalone (bun --compile) binary can't `-e`, so we detect node/bun on execPath or PATH.
+let _jsRuntimeCache: string | null | undefined
+function jsSubprocessRuntime(): string | null {
+  if (_jsRuntimeCache !== undefined) return _jsRuntimeCache
+  const base = path.basename(process.execPath).toLowerCase().replace(/\.exe$/, '')
+  if (base === 'node' || base === 'bun') { _jsRuntimeCache = process.execPath; return _jsRuntimeCache }
+  for (const rt of ['node', 'bun']) {
+    try { cp.execFileSync('/usr/bin/env', [rt, '--version'], { stdio: 'ignore', timeout: 3000 }); _jsRuntimeCache = rt; return rt } catch { /* not on PATH */ }
+  }
+  _jsRuntimeCache = null
+  return null
+}
+
 function executeCode(language: 'python' | 'javascript', code: string, sessionId?: string): Promise<string> {
   const TIMEOUT_MS = 30_000
   const MAX_OUTPUT = 100_000
 
   if (language === 'javascript') {
+    const runtime = jsSubprocessRuntime()
+    if (runtime) {
+      // ISOLATED path: run the vm sandbox inside a SEPARATE process whose env is stripped to PATH + the code
+      // file only. A vm escape there reaches no API keys, no parent memory — true process isolation.
+      return new Promise((resolve) => {
+        const runDir = sessionId ? getAmSessionDir(sessionId) : os.tmpdir()
+        const codeFile = path.join(runDir, `_jsrun_${process.pid}_${Date.now()}.js`)
+        try { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(codeFile, code) } catch { resolve('RuntimeError: could not stage code for execution'); return }
+        const runner = `const fs=require('fs'),vm=require('vm');const code=fs.readFileSync(process.env.NJS_FILE,'utf8');const logs=[];const console={log:(...a)=>logs.push(a.map(String).join(' ')),error:(...a)=>logs.push('ERROR: '+a.map(String).join(' ')),warn:(...a)=>logs.push('WARN: '+a.map(String).join(' ')),info:(...a)=>logs.push('INFO: '+a.map(String).join(' '))};const sandbox={console,Math,JSON,Array,Object,String,Number,Boolean,Date,Error,Map,Set,Promise,parseInt,parseFloat,isNaN,isFinite,encodeURIComponent,decodeURIComponent};try{vm.createContext(sandbox);const r=vm.runInContext(code,sandbox,{timeout:${TIMEOUT_MS}});const out=logs.join('\\n');const rl=(r!==undefined&&r!==null)?'\\nResult: '+(typeof r==='object'?JSON.stringify(r,null,2):String(r)):'';process.stdout.write((out+rl).trim()||'(no output)');}catch(e){process.stdout.write('RuntimeError: '+(e&&e.message?e.message:String(e)));}`
+        let out = ''; let done = false
+        // Stripped env: PATH + the code file + NODE_ENV only (no secrets). NODE_ENV is required by the augmented
+        // ProcessEnv type and isn't sensitive; everything else (API keys, tokens) is deliberately absent.
+        const childEnv: NodeJS.ProcessEnv = { PATH: process.env['PATH'] ?? '', NJS_FILE: codeFile, NODE_ENV: process.env['NODE_ENV'] ?? 'production' }
+        const child = cp.spawn(runtime, ['-e', runner], { cwd: runDir, env: childEnv })
+        const finish = (s: string) => { if (done) return; done = true; clearTimeout(timer); try { fs.unlinkSync(codeFile) } catch { /* */ }; resolve(s.slice(0, MAX_OUTPUT).trim() || '(no output)') }
+        const timer = setTimeout(() => { try { child.kill('SIGKILL') } catch { /* */ }; finish(out || 'RuntimeError: execution timed out') }, TIMEOUT_MS + 2000)
+        child.stdout.on('data', (d: Buffer) => { out += d.toString(); if (out.length > MAX_OUTPUT) { try { child.kill('SIGKILL') } catch { /* */ } } })
+        child.stderr.on('data', (d: Buffer) => { out += d.toString() })
+        child.on('close', () => finish(out))
+        child.on('error', () => finish('RuntimeError: could not start the JS sandbox subprocess'))
+      })
+    }
+    // FALLBACK (compiled standalone with no node/bun to subprocess into): in-process vm. The vm escape surface
+    // is real but needs malicious model code; isolated-vm is the full-coverage follow-up for this path.
+    console.warn('[code_execute] no node/bun runtime available for an isolated JS subprocess — using in-process vm (reduced isolation)')
     return new Promise((resolve) => {
       const logs: string[] = []
       const consoleMock = {
@@ -1836,43 +1876,20 @@ function executeCode(language: 'python' | 'javascript', code: string, sessionId?
         info: (...args: unknown[]) => logs.push('INFO: ' + args.map(String).join(' ')),
       }
       const sandbox: Record<string, unknown> = {
-        console: consoleMock,
-        Math,
-        JSON,
-        Array,
-        Object,
-        String,
-        Number,
-        Boolean,
-        Date,
-        Error,
-        Map,
-        Set,
-        Promise,
-        parseInt,
-        parseFloat,
-        isNaN,
-        isFinite,
-        encodeURIComponent,
-        decodeURIComponent,
-        setTimeout: undefined, // blocked in sandbox
-        setInterval: undefined,
-        fetch: undefined, // blocked — use web_search for HTTP
+        console: consoleMock, Math, JSON, Array, Object, String, Number, Boolean, Date, Error, Map, Set, Promise,
+        parseInt, parseFloat, isNaN, isFinite, encodeURIComponent, decodeURIComponent,
+        setTimeout: undefined, setInterval: undefined, fetch: undefined,
       }
       try {
         vm.createContext(sandbox)
         const result = vm.runInContext(code, sandbox, { timeout: TIMEOUT_MS })
         const out = logs.join('\n')
-        const resultLine =
-          result !== undefined && result !== null
-            ? `\nResult: ${typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result)}`
-            : ''
-        const combined = (out + resultLine).trim()
-        resolve(combined.slice(0, MAX_OUTPUT) || '(no output)')
+        const resultLine = result !== undefined && result !== null
+          ? `\nResult: ${typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result)}`
+          : ''
+        resolve((out + resultLine).trim().slice(0, MAX_OUTPUT) || '(no output)')
       } catch (err) {
-        resolve(
-          `RuntimeError: ${err instanceof Error ? err.message : String(err)}`,
-        )
+        resolve(`RuntimeError: ${err instanceof Error ? err.message : String(err)}`)
       }
     })
   }
@@ -1914,6 +1931,9 @@ except ImportError:
       PYTHONDONTWRITEBYTECODE: '1',
       MPLBACKEND: 'Agg',
     }
+    // Defense-in-depth: even if a secret-shaped var is ever added to safeEnv above, strip it before handing the
+    // env to model-authored code. The allowlist is correct today; this makes a future careless addition safe too.
+    for (const k of Object.keys(safeEnv)) if (/KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL/i.test(k)) delete safeEnv[k]
     const proc = cp.spawn('python3', ['-c', fullCode], {
       cwd: sessionDir,
       env: safeEnv as NodeJS.ProcessEnv,
@@ -2239,7 +2259,8 @@ async function* streamOpenAI(params: {
 // Procedural-memory store (#6): skills distilled from successful turns, persisted across runs.
 function skillsPath(): string { return path.join(os.homedir(), '.noetica', 'skills.jsonl') }
 function loadSkills(): Array<import('./lib/procedural-memory.js').Skill> {
-  try { return fs.readFileSync(skillsPath(), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as import('./lib/procedural-memory.js').Skill).slice(-200) } catch { return [] }
+  // Encrypted at rest (lazy-migrates plaintext); keep the most recent 200.
+  return readEncrypted<import('./lib/procedural-memory.js').Skill>(skillsPath()).slice(-200)
 }
 function jaccardSim(a: string, b: string): number {
   const ta = new Set(a.toLowerCase().split(/\W+/).filter((w) => w.length > 2))
@@ -3773,7 +3794,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
       try {
         const { captureFailure } = await import('./lib/eval-capture.js')
         const c = captureFailure({ input: latestUserContent, output: fullContent, verified: turnGrounded, coverage: valueJudgment.grounding, decision: routerDecision.task }, Date.now(), { minCoverage: 0.5 })
-        if (c) { const ep = path.join(os.homedir(), '.noetica', 'eval-cases.jsonl'); fs.mkdirSync(path.dirname(ep), { recursive: true }); fs.appendFileSync(ep, `${JSON.stringify(c)}\n`) }
+        if (c) appendEncrypted(path.join(os.homedir(), '.noetica', 'eval-cases.jsonl'), c)   // encrypted at rest
       } catch { /* eval-capture best-effort */ }
       // #5b — capture VERIFIED turns as SFT positives (rejection sampling: the success/training half).
       // The shard feeds the Atlas causal_lm_lora trainer (tritfabric) via /api/tune submit → POST /v1/tune.
@@ -3802,7 +3823,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
         if (valueJudgment.worth >= 0.6 && trajectoryActions.length >= 2) {
           const { distillSkill } = await import('./lib/procedural-memory.js')
           const skill = distillSkill(latestUserContent.slice(0, 120), routerDecision.task ?? 'general', trajectoryActions.map((a) => a.type))
-          const sp = skillsPath(); fs.mkdirSync(path.dirname(sp), { recursive: true }); fs.appendFileSync(sp, `${JSON.stringify(skill)}\n`)
+          appendEncrypted(skillsPath(), skill)   // encrypted at rest
         }
       } catch { /* procedural-memory best-effort */ }
     } catch { /* VJ is best-effort — never block the response */ }
@@ -4126,11 +4147,8 @@ const server = http.createServer((req, res) => {
   // GET /api/learning/stats — make the production-learning loop visible: how many skills the agent has
   // distilled from successes (procedural-memory) and how many failures it has captured for replay (eval-capture).
   if (req.method === 'GET' && url.pathname === '/api/learning/stats') {
-    const readJsonl = (p: string): Record<string, unknown>[] => {
-      try { return fs.readFileSync(p, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>) } catch { return [] }
-    }
     const skills = loadSkills()
-    const evalCases = readJsonl(path.join(os.homedir(), '.noetica', 'eval-cases.jsonl'))
+    const evalCases = readEncrypted<Record<string, unknown>>(path.join(os.homedir(), '.noetica', 'eval-cases.jsonl'))
     // The felt-win: the latest replay of captured failures against the current system ("fixed X of N").
     let replay: Record<string, unknown> | null = null
     try { replay = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.noetica', 'learning-replay.json'), 'utf8')) as Record<string, unknown> } catch { /* none run yet */ }
@@ -4150,12 +4168,15 @@ const server = http.createServer((req, res) => {
   if (req.method === 'POST' && url.pathname === '/api/learning/replay') {
     void (async () => {
       try {
-        const { parseEvalCases, selectForReplay, replayCase, summarizeReplay } = await import('./lib/eval-replay.js')
+        const { selectForReplay, replayCase, summarizeReplay } = await import('./lib/eval-replay.js')
         const { searchDocsReranked } = await import('./lib/doc-store.js')
         const { verifyGrounding } = await import('./lib/research-verify.js')
         const { generateOllamaText } = await import('./lib/ollama.js')
         const casesPath = path.join(os.homedir(), '.noetica', 'eval-cases.jsonl')
-        const all = fs.existsSync(casesPath) ? parseEvalCases(fs.readFileSync(casesPath, 'utf8')) : []
+        // eval-cases is encrypted at rest (readEncrypted lazy-migrates legacy plaintext) → read records.
+        const all = readEncrypted<{ input?: string; output?: string; failureMode?: string; coverage?: number; capturedAt?: number }>(casesPath)
+          .filter((c) => typeof c.input === 'string' && c.input.trim())
+          .map((c) => ({ input: c.input as string, output: c.output ?? '', failureMode: c.failureMode ?? 'unknown', coverage: Number(c.coverage ?? 0), capturedAt: Number(c.capturedAt ?? 0) }))
         const sel = selectForReplay(all, Math.max(1, Number(process.env['NOETICA_REPLAY_MAX'] || 25)))
         const model = process.env['NOETICA_REPLAY_MODEL'] || 'qwen2.5:7b'
         const regenerate = async (input: string) => {
@@ -4484,8 +4505,8 @@ const server = http.createServer((req, res) => {
     void (async () => {
       setCORSHeaders(res)
       try {
-        const { readFileSync } = await import('fs'); const { homedir } = await import('os'); const { join } = await import('path')
-        res.writeHead(200, { 'content-type': 'application/json' }); res.end(readFileSync(join(homedir(), '.noetica', 'sessions.json'), 'utf8'))
+        const data = readEncryptedJson(path.join(os.homedir(), '.noetica', 'sessions.json'))   // decrypt at rest
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(data ?? null))
       } catch { res.writeHead(200, { 'content-type': 'application/json' }); res.end('null') }
     })()
     return
@@ -4496,9 +4517,8 @@ const server = http.createServer((req, res) => {
     req.on('end', () => { void (async () => {
       setCORSHeaders(res)
       try {
-        const { writeFileSync, mkdirSync } = await import('fs'); const { homedir } = await import('os'); const { join } = await import('path')
-        const dir = join(homedir(), '.noetica'); mkdirSync(dir, { recursive: true })
-        writeFileSync(join(dir, 'sessions.json'), body || 'null')
+        let parsed: unknown = null; try { parsed = JSON.parse(body || 'null') } catch { parsed = null }
+        writeEncryptedJson(path.join(os.homedir(), '.noetica', 'sessions.json'), parsed)   // encrypt at rest
         res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"ok":true}')
       } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })() })
@@ -4571,6 +4591,10 @@ const server = http.createServer((req, res) => {
   // tool-shaped intents (e.g. research → web_search): the dialogue layer fires the tool
   // and shows results in ~2s instead of spinning up the slow generative agent to decide.
   if (req.method === 'POST' && url.pathname === '/api/tool') {
+    // /api/tool runs a built-in tool DIRECTLY (incl. run_command / code_execute). The origin-guard blocks
+    // drive-by cross-site calls, but require the API token too when the operator configured one — parity with
+    // the other mutating routes, and the only gate left if NOETICA_ORIGIN_GUARD is disabled. No-op in dev.
+    if (!requireApiToken(req, res)) return
     void (async () => {
       setCORSHeaders(res)
       try {

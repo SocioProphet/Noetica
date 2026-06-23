@@ -33,7 +33,9 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { embedText } from '../lib/ollama.js'
-import { councilVote } from '../lib/council.js'
+import { councilVote, learnedCouncilVote } from '../lib/council.js'
+import { fetchConceptDef, cleanTerm } from '../lib/concept-defs.js'
+import { associativeRetrieve } from '../lib/graph-ppr.js'
 import { decodeVec, l2norm } from '../lib/brain-vec.js'
 
 const HOME = os.homedir()
@@ -69,6 +71,9 @@ const SUBJECT_FIELDS: Record<string, string[]> = {
   college_chemistry: ['chemistry'], high_school_chemistry: ['chemistry'],
   college_biology: ['biology', 'biological_eng'], high_school_biology: ['biology', 'biological_eng'],
   college_computer_science: ['eecs'], electrical_engineering: ['eecs'],
+  // commonsense-KG ablation (Stage 1) — 4-choice retrieval benches graded against the 'commonsense' brain
+  // (CSKG+ConceptNet+DBpedia). A0=baseline vs A1=brain measures whether commonsense retrieval lifts the 7B.
+  openbookqa: ['commonsense'], arc_challenge: ['commonsense'], arc_easy: ['commonsense'],
 }
 
 // FIELD_ADJ — co-prime / adjacent fields to WIDEN into when per-choice coverage is thin. The
@@ -134,6 +139,38 @@ const MATERIAL_BOOST: Record<string, number> = {
   lecture: 1.05, reference: 0.92, syllabus: 0.80,
 }
 const materialBoost = (m: string): number => MATERIAL_BOOST[m] ?? 1.0
+// defs arm: cache clean KG definitions across the board run (`${field}|${term}` → def | null). One live
+// Wikipedia lookup per UNIQUE term; repeats within a field are free. null is cached too (don't re-miss).
+const defsCache = new Map<string, string | null>()
+
+// hop arm: iterative HippoRAG query-graph expansion (#14). HOP_MAX rounds; stop when self-consistency
+// agreement ≥ HOP_CONF (confident) — only the uncertain questions pay for extra hops.
+const HOP_MAX = Number(process.env['MMLU_HOP_MAX'] || 2)
+const HOP_CONF = Number(process.env['MMLU_HOP_CONF'] || 0.7)
+
+/**
+ * hippoExpand — local HippoRAG: build a concept graph from the retrieved chunks (nodes = cleanTerm concepts,
+ * edges = co-occurrence within a chunk), seed personalized-PageRank with the query → the associatively-central
+ * concepts the lexical retrieval missed. These become the next hop's expansion queries (the multi-hop bridge).
+ */
+function hippoExpand(chunks: Array<{ text: string }>, query: string, topK = 5): string[] {
+  const labelById = new Map<string, string>()
+  const nodes: Array<{ id: string }> = []
+  const edges: Array<{ from: string; to: string }> = []
+  for (const ch of chunks) {
+    const words = ch.text.toLowerCase().split(/[^a-z]+/).filter(Boolean)
+    const concepts = new Set<string>()
+    for (let j = 0; j < words.length && concepts.size < 12; j++) {
+      const uni = cleanTerm(words[j]!); if (uni) concepts.add(uni)
+      if (j + 1 < words.length) { const bi = cleanTerm(`${words[j]} ${words[j + 1]}`); if (bi) concepts.add(bi) }
+    }
+    const list = [...concepts]
+    for (const c of list) if (!labelById.has(c)) { labelById.set(c, c); nodes.push({ id: c }) }
+    for (let a = 0; a < list.length; a++) for (let b = a + 1; b < list.length; b++) edges.push({ from: list[a]!, to: list[b]! })
+  }
+  if (nodes.length < 4) return []
+  return associativeRetrieve(nodes, edges, labelById, query, { topK }).results.map((r) => r.label)
+}
 
 function loadField(field: string): Chunk[] {
   if (fieldCache.has(field)) return fieldCache.get(field)!
@@ -642,7 +679,7 @@ async function main() {
     process.stdout.write(`\n## ${subject}  (fields: ${fields.join('+')} · ${poolN.toLocaleString()} chunks · ${sample.length} q)\n`)
     for (const arm of ARMS) tally[arm]![subject] = { c: 0, n: 0, a: 0 }
     // verified-compute arm scored up front (one python call per subject); used by compute + route + champion
-    const comp: CompRes[] = (ARMS.includes('compute') || ARMS.includes('route') || ARMS.includes('champion') || ARMS.includes('gate')) ? computeBatch(sample) : []
+    const comp: CompRes[] = (ARMS.includes('compute') || ARMS.includes('route') || ARMS.includes('champion') || ARMS.includes('gate') || ARMS.includes('learned')) ? computeBatch(sample) : []
     // knowledge-type per question (the 'understand first' step) — used by the champion router
     const kt: KType[] = (ARMS.includes('champion') || ARMS.includes('gate')) ? ktypeBatch(sample) : []
     const af: CompRes[] = ARMS.includes('autoform') ? await autoformBatch(sample) : []   // LLM-formalize → sympy-execute → vote
@@ -697,6 +734,40 @@ async function main() {
           if (ci?.answer) { letter = ci.answer; mode = ci.mode } else { letter = await askBrain(); mode = 'retrieve' }
         } else if (arm === 'brain') {
           letter = await askBrain()
+        } else if (arm === 'defs') {              // STRUCTURAL definition-grounding (concept-defs): CLEAN KG defs, not noisy transcripts
+          // Tests the thesis (Wolfson §4 / audit #1): retrieval is bounded by ONTOLOGICAL alignment, not the
+          // model — so ground on disambiguated Wikipedia definitions (field-qualified + embedding-WSD) instead
+          // of lecture-transcript chunks. Term-ambiguity is fixed at the KG layer, not the router.
+          const field = fields[0] ?? ''
+          const termLine = await ask(`List the 2-3 key technical terms or named concepts needed to answer this question. Comma-separated, terms only, no explanation.\n\n${q.question}`)
+          const terms = [...new Set(termLine.split(',').map((t) => cleanTerm(t) ?? t.trim().toLowerCase()).filter((t) => t.length > 2))].slice(0, 3)
+          const defs: string[] = []
+          for (const t of terms) {
+            const key = `${field}|${t}`
+            let def = defsCache.get(key)
+            if (def === undefined) { def = (await fetchConceptDef(t, field))?.definition ?? null; defsCache.set(key, def) }
+            if (def) defs.push(`- ${t}: ${def}`)
+          }
+          if (defs.length) { letter = extractLetter(await ask(`Relevant definitions:\n${defs.join('\n')}\n\n${base}${ANSWER_RULE}`)); mode = `defs:${defs.length}/${terms.length}` }
+          else { letter = extractLetter(await ask(`${base}${ANSWER_RULE}`)); mode = 'defs:miss' }   // no clean def → closed-book (never worse than baseline for lack of grounding)
+        } else if (arm === 'hop') {               // HippoRAG ITERATIVE query-graph expansion (#14): uncertain → graph-hop → re-retrieve
+          // Each hop: answer with the current context (SC vote = confidence); if uncertain, build a local
+          // concept graph from those chunks and PPR-expand on the query → the associatively-bridged concepts
+          // the lexical pass missed → re-retrieve with them. Only hard questions pay for extra hops.
+          let ctx = await retrieveMulti(q.question, q.choices, pools, PER_SHOT, SHOT_K)
+          const expansion: string[] = []
+          let h = 0
+          for (; h < HOP_MAX; h++) {
+            const ctxStr = ctx.map((x, n) => `[${n + 1}] ${x.text.slice(0, 500)}`).join('\n\n')
+            const sc = await askVote(`Relevant MIT course notes (use only what helps; ignore noise and fragments):\n\n${ctxStr}\n\nExam question:\n${base}${ANSWER_RULE}`, SC_K)
+            letter = sc.letter
+            if (sc.agree >= HOP_CONF || h === HOP_MAX - 1) break                 // confident, or out of hops
+            const hops = hippoExpand(ctx, q.question)                            // uncertain → PPR graph-hop
+            if (!hops.length) break
+            for (const e of hops) if (!expansion.includes(e)) expansion.push(e)
+            ctx = await retrieveMulti(q.question, q.choices, pools, PER_SHOT, SHOT_K, expansion)  // re-retrieve, expanded
+          }
+          mode = `hop:${h + 1}x`; row['hop_expansion'] = expansion.slice(0, 8)
         } else if (arm === 'qgen') {              // brain + HyDE/step-back query generation
           letter = await askQgen(); mode = 'qgen'
         } else if (arm === 'autoform') {          // autoformalization: LLM→sympy→execute→vote (abstains on non-numeric)
@@ -762,6 +833,18 @@ async function main() {
             letter = cv.letter
             mode = `council:${k.types?.[0] ?? '?'}`
           }
+        } else if (arm === 'learned') {           // LEARNED council — logistic meta-combiner (signed weights, scripts/meta_combiner.py)
+          // Reuse the per-arm votes already in `row` (run learned LAST in MMLU_ARMS), route through the
+          // learned log-odds law instead of the hand-tuned councilVote. Head-to-head vs champion: the board
+          // proves whether learned > hand-tuned before we promote it (keep all arms, promote only winners).
+          const pick = (k: string): string | undefined => (typeof row[k] === 'string' && row[k] !== '?' ? row[k] as string : undefined)
+          const cv = learnedCouncilVote({
+            baseline: pick('baseline_pred'), brain: pick('brain_pred'), qgen: pick('qgen_pred'),
+            gate: pick('gate_pred'), medprompt: pick('medprompt_pred'),
+            elim: pick('elim_pred'), fiftyfifty: pick('fiftyfifty_pred'),
+            compute: comp[i]?.answer || undefined, scLetter: pick('brain_pred') || pick('baseline_pred'),
+          })
+          letter = cv.letter; mode = 'learned'
         } else if (arm === 'medprompt') {         // Medprompt choice-shuffle ensemble — position (A) bias cancels by construction (Microsoft, 90.10% MMLU)
           const n = q.choices.length, M = Math.min(SHUFFLE_M, n) || n
           const votes = new Map<number, number>()
