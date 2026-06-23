@@ -5378,10 +5378,14 @@ Question: ${question}`
         const raw = fs.existsSync(shardPath) ? readSftShard(fs.readFileSync(shardPath, 'utf8')) : []
         const deduped = dedupeVerified(raw)
         const endpoint = (process.env['ATLAS_HTTP'] || process.env['NOETICA_TUNE_ENDPOINT'] || '').replace(/\/+$/, '')
+        // VOLUME GATE: LoRA SFT on a trickle of examples overfits to surface form and degrades
+        // generality. Require a real floor before a run is eligible (configurable; default 50 — raise
+        // toward several hundred as the harvest grows).
+        const minToSubmit = Math.max(1, Number(process.env['NOETICA_TUNE_MIN'] || 50))
 
         if (req.method === 'GET' && url.pathname === '/api/tune/status') {
           res.writeHead(200, { 'content-type': 'application/json' })
-          res.end(JSON.stringify({ ok: true, shardPath, captured: raw.length, unique: deduped.length, minToSubmit: 8, submitTarget: endpoint || null, ready: deduped.length >= 8 }))
+          res.end(JSON.stringify({ ok: true, shardPath, captured: raw.length, unique: deduped.length, minToSubmit, submitTarget: endpoint || null, ready: deduped.length >= minToSubmit }))
           return
         }
 
@@ -5393,9 +5397,9 @@ Question: ${question}`
             res.end(JSON.stringify({ ok: false, error: 'learning is opt-in', hint: 'set NOETICA_LEARN_OPT_IN=1 to harvest + submit verified traces for training' }))
             return
           }
-          if (deduped.length < 8) {
+          if (deduped.length < minToSubmit) {
             res.writeHead(409, { 'content-type': 'application/json' })
-            res.end(JSON.stringify({ ok: false, error: 'not enough verified examples yet', unique: deduped.length, needed: 8 }))
+            res.end(JSON.stringify({ ok: false, error: 'not enough verified examples yet', unique: deduped.length, needed: minToSubmit }))
             return
           }
           // Defense-in-depth: re-run the PII/secret firewall over every example before it leaves the
