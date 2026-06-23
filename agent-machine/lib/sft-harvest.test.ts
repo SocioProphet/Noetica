@@ -2,20 +2,22 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { captureVerified, toSftLine, readSftShard, dedupeVerified, buildTuneRequest } from './sft-harvest.js'
 
-const base = { input: 'Write fib(n) in Python', output: 'def fib(n):\n    a,b=0,1\n    for _ in range(n): a,b=b,a+b\n    return a', verified: true, coverage: 0.9, decision: 'coding' }
+const base = { input: 'Write fib(n) in Python', output: 'def fib(n):\n    a,b=0,1\n    for _ in range(n): a,b=b,a+b\n    return a', verified: true, coverage: 0.9, decision: 'coding', independent: true }
 
-test('captureVerified keeps a confident, verified, well-covered turn', () => {
+test('captureVerified keeps a confident, verified, INDEPENDENTLY-corroborated turn', () => {
   const ex = captureVerified(base, 1000)
   assert.ok(ex)
   assert.equal(ex!.input, base.input)
   assert.equal(ex!.coverage, 0.9)
 })
 
-test('captureVerified rejects unverified / thin-coverage / abstained / trivial', () => {
+test('captureVerified rejects unverified / not-independent / thin-coverage / abstained / trivial', () => {
   assert.equal(captureVerified({ ...base, verified: false }, 1), null)
-  assert.equal(captureVerified({ ...base, coverage: 0.5 }, 1), null)        // below 0.7 bar
+  assert.equal(captureVerified({ ...base, independent: false }, 1), null)    // anti-collapse: needs an independent signal
+  assert.equal(captureVerified({ ...base, independent: undefined }, 1), null) // missing = treated as not independent
+  assert.equal(captureVerified({ ...base, coverage: 0.5 }, 1), null)         // below 0.7 bar
   assert.equal(captureVerified({ ...base, decision: 'abstain' }, 1), null)
-  assert.equal(captureVerified({ ...base, output: 'ok' }, 1), null)          // too short
+  assert.equal(captureVerified({ ...base, output: 'ok' }, 1), null)           // too short
 })
 
 test('toSftLine / readSftShard round-trip preserves quality fields', () => {

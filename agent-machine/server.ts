@@ -3785,7 +3785,14 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
         if (isFlagOn('NOETICA_LEARN_OPT_IN')) {
           const { captureVerified, toSftLine } = await import('./lib/sft-harvest.js')
           const { redact } = await import('./lib/redact.js')
-          const v = captureVerified({ input: redact(latestUserContent).redacted, output: redact(fullContent).redacted, verified: turnGrounded, coverage: valueJudgment.grounding, decision: routerDecision.task }, Date.now())
+          // ANTI-COLLAPSE: an INDEPENDENT corroboration the generator can't self-grant — a verifying
+          // tool/execution that ran, grounding in the structured graph, or belief/law alignment — and
+          // no contradictions. Without this we'd train only on the model's own grounding (collapse).
+          const usedVerifier = trajectoryActions.some((a) => /run_command|code_execute|exec/i.test(a.type))
+          const independent = valueJudgment.contradictions.length === 0 && (
+            usedVerifier || (valueJudgment.graph_grounding ?? 0) >= 0.5 || valueJudgment.belief_alignment >= 0.6
+          )
+          const v = captureVerified({ input: redact(latestUserContent).redacted, output: redact(fullContent).redacted, verified: turnGrounded, coverage: valueJudgment.grounding, decision: routerDecision.task, independent }, Date.now())
           if (v) { const sp = path.join(os.homedir(), '.noetica', 'distill', 'verified.sft.jsonl'); fs.mkdirSync(path.dirname(sp), { recursive: true }); fs.appendFileSync(sp, `${toSftLine(v)}\n`) }
         }
       } catch { /* sft-harvest best-effort */ }

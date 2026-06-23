@@ -24,6 +24,11 @@ export function captureVerified(
   const minCoverage = opts.minCoverage ?? 0.7
   const minOutputLen = opts.minOutputLen ?? 24
   if (!trace.verified) return null
+  // ANTI-COLLAPSE: require an INDEPENDENT corroboration, not just the model's own grounding score.
+  // Training only on traces judged by the generator's own verifier amplifies its blind spots (model
+  // collapse). The caller sets `independent` from a signal the generator can't self-grant — an
+  // execution/tool that passed, grounding in the structured graph, or belief/law alignment.
+  if (trace.independent !== true) return null
   if (trace.coverage < minCoverage) return null
   if (trace.decision === 'abstain') return null
   const input = (trace.input ?? '').trim()
