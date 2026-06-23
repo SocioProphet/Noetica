@@ -84,8 +84,12 @@ function get(url: string): string {
 }
 function headOk(url: string): boolean {
   try {
-    const code = execFileSync('curl', ['-sIL', '-m', '25', '-A', UA, '-o', '/dev/null', '-w', '%{http_code}', url], { encoding: 'utf8' })
-    return code.trim() === '200'
+    const out = execFileSync('curl', ['-sIL', '-m', '25', '-A', UA, '-o', '/dev/null', '-w', '%{http_code} %{content_type}', url], { encoding: 'utf8' })
+    // OCW's SPA returns 200 + text/html for ANY /courses/*.zip path (the app shell), so a bare 200 is a
+    // FALSE positive. Only a real archive (application/zip / octet-stream) counts — most post-migration
+    // courses no longer serve one, and this correctly classifies them as 'no zip' instead of downloading
+    // the 42KB shell and failing.
+    return /^200\b/.test(out.trim()) && /(zip|octet-stream)/i.test(out) && !/text\/html/i.test(out)
   } catch { return false }
 }
 // OCW migrated to a dynamic site: the /download/ page no longer embeds the absolute .zip URL the old regex
