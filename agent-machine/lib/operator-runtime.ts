@@ -63,6 +63,12 @@ export function operatorBinaryPath(): string | null {
 
 export function isLocalOperatorAvailable(): boolean { return operatorBinaryPath() !== null }
 
+/** Stop the sidecar we spawned (best-effort). For clean shutdown of a CLI/test; the server normally leaves it
+ *  running for reuse. Safe to call when nothing was spawned. */
+export function shutdownOperator(): void {
+  if (child) { try { child.kill('SIGKILL') } catch { /* already gone */ } child = null }
+}
+
 async function healthy(): Promise<boolean> {
   try { const r = await fetch(`${base()}/health`, { signal: AbortSignal.timeout(1200) }); return r.ok } catch { return false }
 }
@@ -78,6 +84,9 @@ async function ensure(): Promise<boolean> {
     if (!child || child.exitCode !== null) {
       child = spawn(bin, [], { env: { ...process.env, NOETICA_OPERATOR_PORT: String(port()) }, stdio: 'ignore', detached: false })
       child.on('exit', () => { child = null })
+      // The sidecar is a daemon — it must NOT keep our event loop alive (else a CLI/test that finishes its work
+      // hangs forever waiting on the still-running child). unref lets the parent exit; the child is reaped by the OS.
+      child.unref()
     }
     const deadline = Date.now() + 8000
     while (Date.now() < deadline) { if (await healthy()) return true; await new Promise((r) => setTimeout(r, 250)) }

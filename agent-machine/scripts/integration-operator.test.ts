@@ -37,7 +37,7 @@ process.env['NOETICA_OPERATOR_DIR'] = modelsDir
 let rt: typeof import('../lib/operator-runtime.js')
 
 before(async () => { if (!SKIP) rt = await import('../lib/operator-runtime.js') })
-after(() => { /* the sidecar child is detached:false and dies with this process */ })
+after(() => { rt?.shutdownOperator?.() }) // kill the spawned sidecar so the test process exits cleanly
 
 test('lists the reference operators', { skip: SKIP && reason }, async () => {
   const models = await rt.listOperators()
