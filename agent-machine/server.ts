@@ -36,6 +36,7 @@ import * as dns from 'node:dns'
 import * as net from 'node:net'
 import { originAllowed } from './lib/origin-guard.js'
 import { isConfinedToHomeOrTmp } from './lib/path-confine.js'
+import { safeShellEnv } from './lib/safe-shell-env.js'
 import { buildRouterDecision, LOCAL_MODEL_SUITE, isHuggingFaceLocalRef, resolveProvider } from './lib/router.js'
 import { checkEgress, authorizeAction as scopedAuthorizeAction, emitScopedTelemetry, type MeshTier } from './lib/scope-d.js'
 import { installEgressGuard, setOfflineMode } from './lib/egress-guard.js'
@@ -97,7 +98,7 @@ import {
 import { getUserIdentity, setUserIdentity, promptUserName, type UserIdentity } from './lib/identity.js'
 
 const PORT = parseInt(process.env['NOETICA_AM_PORT'] ?? '8080', 10)
-const VERSION = '0.4.11'
+const VERSION = '0.4.17'
 
 // Sovereign offline mode: arm the egress guard so non-local egress is STRUCTURALLY impossible
 // when NOETICA_OFFLINE is set (airplane mode). No-op passthrough when online. Installed early,
@@ -1221,7 +1222,7 @@ function runInWorkspace(command: string, cwd: string, timeoutMs: number): Promis
     let safeTimeout = Number.isFinite(timeoutMs) ? timeoutMs : 60_000
     if (safeTimeout > 300_000) safeTimeout = 300_000
     if (safeTimeout < 1_000) safeTimeout = 1_000
-    const child = cp.spawn(LOGIN_SHELL, ['-lc', command], { cwd, env: { ...process.env } })
+    const child = cp.spawn(LOGIN_SHELL, ['-lc', command], { cwd, env: safeShellEnv() })
     const timer = setTimeout(() => { if (!done) { done = true; try { child.kill('SIGKILL') } catch { /* */ } resolve({ out, err, code: `timeout after ${safeTimeout}ms` }) } }, safeTimeout)
     child.stdout.on('data', (d: Buffer) => { if (out.length < 200_000) out += d.toString() })
     child.stderr.on('data', (d: Buffer) => { if (err.length < 100_000) err += d.toString() })
@@ -1235,7 +1236,7 @@ function runInWorkspace(command: string, cwd: string, timeoutMs: number): Promis
 const _devServers = new Set<number>()
 function startDevServer(command: string, cwd: string, timeoutMs: number): Promise<{ url?: string; pid?: number }> {
   return new Promise((resolve) => {
-    const child = cp.spawn(LOGIN_SHELL, ['-lc', command], { cwd, env: { ...process.env } })
+    const child = cp.spawn(LOGIN_SHELL, ['-lc', command], { cwd, env: safeShellEnv() })
     if (child.pid) _devServers.add(child.pid)
     let resolved = false
     const finish = (u?: string) => { if (!resolved) { resolved = true; clearTimeout(timer); resolve({ url: u, pid: child.pid }) } }
@@ -2497,6 +2498,9 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
       taskOverride: intentTaskOverride,
     })
   } catch (err) {
+    // Don't silently swallow — log the real cause (sanitized for log-injection) so a transient failure
+    // (e.g. the coder model still pulling on first build request) is diagnosable instead of an opaque error.
+    console.error('[chat] turn failed:', String(err instanceof Error ? err.stack || err.message : err).replace(/[\r\n]+/g, ' ⏎ '))
     sse(res, 'error', { error: 'internal_error' })
     return
   }
@@ -3796,6 +3800,27 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
         const c = captureFailure({ input: latestUserContent, output: fullContent, verified: turnGrounded, coverage: valueJudgment.grounding, decision: routerDecision.task }, Date.now(), { minCoverage: 0.5 })
         if (c) appendEncrypted(path.join(os.homedir(), '.noetica', 'eval-cases.jsonl'), c)   // encrypted at rest
       } catch { /* eval-capture best-effort */ }
+      // #5b — capture VERIFIED turns as SFT positives (rejection sampling: the success/training half).
+      // The shard feeds the Atlas causal_lm_lora trainer (tritfabric) via /api/tune submit → POST /v1/tune.
+      // SOVEREIGNTY: harvesting is OFF by default (NOETICA_LEARN_OPT_IN) — this data could leave the
+      // device for training. Only with explicit operator opt-in, and only AFTER the PII/secret
+      // firewall (redact) scrubs BOTH the prompt and the response, does a verified turn enter the
+      // shard — so secrets/PII are never written to disk or shipped, even under cloud training.
+      try {
+        if (isFlagOn('NOETICA_LEARN_OPT_IN')) {
+          const { captureVerified, toSftLine } = await import('./lib/sft-harvest.js')
+          const { redact } = await import('./lib/redact.js')
+          // ANTI-COLLAPSE: an INDEPENDENT corroboration the generator can't self-grant — a verifying
+          // tool/execution that ran, grounding in the structured graph, or belief/law alignment — and
+          // no contradictions. Without this we'd train only on the model's own grounding (collapse).
+          const usedVerifier = trajectoryActions.some((a) => /run_command|code_execute|exec/i.test(a.type))
+          const independent = valueJudgment.contradictions.length === 0 && (
+            usedVerifier || (valueJudgment.graph_grounding ?? 0) >= 0.5 || valueJudgment.belief_alignment >= 0.6
+          )
+          const v = captureVerified({ input: redact(latestUserContent).redacted, output: redact(fullContent).redacted, verified: turnGrounded, coverage: valueJudgment.grounding, decision: routerDecision.task, independent }, Date.now())
+          if (v) { const sp = path.join(os.homedir(), '.noetica', 'distill', 'verified.sft.jsonl'); fs.mkdirSync(path.dirname(sp), { recursive: true }); fs.appendFileSync(sp, `${toSftLine(v)}\n`) }
+        }
+      } catch { /* sft-harvest best-effort */ }
       // #6 — distill SUCCESSFUL turns (high worth + a real tool sequence) into reusable procedural skills (the
       // success half; retrieved into the system prompt on future similar tasks above).
       try {
@@ -4123,16 +4148,109 @@ const server = http.createServer((req, res) => {
     }
   }
 
+  // /api/calendar/feeds — sovereign Calendar (Prophet Workspace). Subscribe to any .ics feed (no Google account):
+  // GET returns the subscribed feeds + their merged, parsed events; POST {url,name} adds a feed; DELETE?url=…
+  // removes one. Feeds list is encrypted at rest. The open iCalendar standard over HTTP, parsed dependency-free.
+  if (url.pathname === '/api/calendar/feeds') {
+    const FEEDS = path.join(os.homedir(), '.noetica', 'calendar-feeds.json')
+    type Feed = { url: string; name?: string; addedAt?: number }
+    const loadFeeds = (): Feed[] => { const f = readEncryptedJson<Feed[]>(FEEDS); return Array.isArray(f) ? f : [] }
+    if (req.method === 'GET') {
+      void (async () => {
+        const feeds = loadFeeds()
+        const { parseICal } = await import('./lib/ical.js')
+        const all = await Promise.all(feeds.map(async (f) => {
+          try { const r = await fetch(f.url, { signal: AbortSignal.timeout(10_000) }); if (!r.ok) return []; return parseICal(await r.text()).map((e) => ({ ...e, feed: f.name || f.url })) }
+          catch { return [] }
+        }))
+        const events = all.flat().sort((a, b) => a.start.localeCompare(b.start)).slice(0, 500)
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
+        res.end(JSON.stringify({ feeds, events }))
+      })().catch(() => { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'calendar_failed' })) })
+      return
+    }
+    if (req.method === 'POST') {
+      let body = ''
+      req.on('data', (c: Buffer) => { body += c.toString(); if (body.length > 8 * 1024) { try { req.destroy() } catch { /* */ } } })
+      req.on('end', () => {
+        try {
+          const { url: feedUrl, name } = JSON.parse(body || '{}') as { url?: string; name?: string }
+          if (!feedUrl || !/^https?:\/\//i.test(feedUrl)) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_url' })); return }
+          const feeds = loadFeeds().filter((f) => f.url !== feedUrl)
+          feeds.push({ url: feedUrl, name: String(name || feedUrl).slice(0, 80), addedAt: Date.now() })
+          writeEncryptedJson(FEEDS, feeds.slice(-50))
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }); res.end(JSON.stringify({ ok: true, count: feeds.length }))
+        } catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_body' })) }
+      })
+      return
+    }
+    if (req.method === 'DELETE') {
+      const target = url.searchParams.get('url') ?? ''
+      const feeds = loadFeeds(); const next = feeds.filter((f) => f.url !== target)
+      writeEncryptedJson(FEEDS, next)
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }); res.end(JSON.stringify({ ok: next.length < feeds.length }))
+      return
+    }
+  }
+
   // GET /api/learning/stats — make the production-learning loop visible: how many skills the agent has
   // distilled from successes (procedural-memory) and how many failures it has captured for replay (eval-capture).
   if (req.method === 'GET' && url.pathname === '/api/learning/stats') {
     const skills = loadSkills()
     const evalCases = readEncrypted<Record<string, unknown>>(path.join(os.homedir(), '.noetica', 'eval-cases.jsonl'))
+    // The felt-win: the latest replay of captured failures against the current system ("fixed X of N").
+    let replay: Record<string, unknown> | null = null
+    try { replay = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.noetica', 'learning-replay.json'), 'utf8')) as Record<string, unknown> } catch { /* none run yet */ }
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
     res.end(JSON.stringify({
       skills: { count: skills.length, recent: skills.slice(-5).map((s) => ({ task: s.task, abstraction: s.abstraction, steps: s.steps })) },
       evalCases: { count: evalCases.length, recent: evalCases.slice(-5).map((c) => ({ input: String(c['input'] ?? '').slice(0, 80), failureMode: c['failureMode'], coverage: c['coverage'] })) },
+      replay,
     }))
+    return
+  }
+
+  // POST /api/learning/replay — re-run captured production FAILURES against the CURRENT system
+  // (today's retrieval + model) and report how many now pass: "fixed X of N of your real failures".
+  // The felt-win surface for the verifier→learning loop. Bounded (NOETICA_REPLAY_MAX, default 25) and
+  // cached to ~/.noetica/learning-replay.json so /api/learning/stats can show it without re-running.
+  if (req.method === 'POST' && url.pathname === '/api/learning/replay') {
+    void (async () => {
+      try {
+        const { selectForReplay, replayCase, summarizeReplay } = await import('./lib/eval-replay.js')
+        const { searchDocsReranked } = await import('./lib/doc-store.js')
+        const { verifyGrounding } = await import('./lib/research-verify.js')
+        const { generateOllamaText } = await import('./lib/ollama.js')
+        const casesPath = path.join(os.homedir(), '.noetica', 'eval-cases.jsonl')
+        // eval-cases is encrypted at rest (readEncrypted lazy-migrates legacy plaintext) → read records.
+        const all = readEncrypted<{ input?: string; output?: string; failureMode?: string; coverage?: number; capturedAt?: number }>(casesPath)
+          .filter((c) => typeof c.input === 'string' && c.input.trim())
+          .map((c) => ({ input: c.input as string, output: c.output ?? '', failureMode: c.failureMode ?? 'unknown', coverage: Number(c.coverage ?? 0), capturedAt: Number(c.capturedAt ?? 0) }))
+        const sel = selectForReplay(all, Math.max(1, Number(process.env['NOETICA_REPLAY_MAX'] || 25)))
+        const model = process.env['NOETICA_REPLAY_MODEL'] || 'qwen2.5:7b'
+        const regenerate = async (input: string) => {
+          const chunks = await searchDocsReranked(input, 8).catch(() => [])
+          const sources = chunks.map((ch) => ({ text: ch.text }))
+          const ctx = sources.map((s) => s.text).join('\n---\n').slice(0, 6000)
+          const { content } = await generateOllamaText({ model, temperature: 0.2, messages: [
+            { role: 'system', content: 'Answer using ONLY the provided context. Be concise. If the context does not support an answer, say so.' },
+            { role: 'user', content: `Context:\n${ctx}\n\nQuestion: ${input}` },
+          ] })
+          return { answer: content, sources }
+        }
+        const judge = (answer: string, sources: { text: string }[]) => { const r = verifyGrounding(answer, sources); return { grounded: r.grounded, score: r.score } }
+        const outcomes = []
+        for (const c of sel) outcomes.push(await replayCase(c, regenerate, judge))
+        const summary = summarizeReplay(outcomes, Date.now())
+        const cache = { total: summary.total, fixed: summary.fixed, stillFailing: summary.stillFailing, fixedRate: summary.fixedRate, ts: summary.ts }
+        try { fs.writeFileSync(path.join(os.homedir(), '.noetica', 'learning-replay.json'), JSON.stringify(cache)) } catch { /* best-effort cache */ }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
+        res.end(JSON.stringify({ ok: true, ...cache, outcomes: summary.outcomes.slice(0, 12) }))
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: 'replay_error' }))
+      }
+    })()
     return
   }
 
@@ -4201,6 +4319,74 @@ const server = http.createServer((req, res) => {
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
       const { provisionBrain } = await import('./lib/brain-provision.js')
       const result = await provisionBrain(name, (p) => { res.write(`data: ${JSON.stringify({ progress: p })}\n\n`) })
+      res.write(`data: ${JSON.stringify({ done: result })}\n\n`)
+      res.end()
+    })() })
+    return
+  }
+
+  // ── On-device neural-operator inference (operator-runtime → noetica-operator sidecar) ──────────────
+  // The sovereign compute substrate for the GAIA map (flood/dispersion/hydrology surrogates) and any caller
+  // that needs a trained Fourier Neural Operator run locally. Reusable + model-agnostic.
+  //   GET  /api/operator/models           -> { available, models }
+  //   GET  /api/operator/meta?model=NAME  -> { model, inputs, outputs }
+  //   POST /api/operator/infer {model,inputs} -> { outputs, ms }   (token-gated: runs arbitrary ONNX)
+  if (req.method === 'GET' && url.pathname === '/api/operator/models') {
+    void (async () => {
+      const { listOperators, isLocalOperatorAvailable } = await import('./lib/operator-runtime.js')
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ available: isLocalOperatorAvailable(), models: await listOperators() }))
+    })()
+    return
+  }
+  if (req.method === 'GET' && url.pathname === '/api/operator/meta') {
+    void (async () => {
+      const { operatorMeta, OperatorUnavailableError, OperatorError } = await import('./lib/operator-runtime.js')
+      try {
+        const meta = await operatorMeta(url.searchParams.get('model') ?? '')
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(meta))
+      } catch (e) {
+        const code = e instanceof OperatorUnavailableError ? 503 : e instanceof OperatorError ? e.status : 500
+        res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: (e as Error).message }))
+      }
+    })()
+    return
+  }
+  if (req.method === 'POST' && url.pathname === '/api/operator/infer') {
+    if (!requireApiToken(req, res)) return
+    let raw = ''
+    req.on('data', (c: Buffer) => { raw += c.toString(); if (raw.length > 96 * 1024 * 1024) req.destroy() })
+    req.on('end', () => { void (async () => {
+      const { operatorInfer, OperatorUnavailableError, OperatorError } = await import('./lib/operator-runtime.js')
+      let body: { model?: string; inputs?: Record<string, { shape: number[]; data: number[] }> }
+      try { body = JSON.parse(raw || '{}') } catch {
+        res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid json' })); return
+      }
+      try {
+        const result = await operatorInfer(String(body.model ?? ''), body.inputs ?? {})
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(result))
+      } catch (e) {
+        const code = e instanceof OperatorUnavailableError ? 503 : e instanceof OperatorError ? e.status : 500
+        res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: (e as Error).message }))
+      }
+    })() })
+    return
+  }
+  // POST /api/operator/provision { name } — download + install a model .onnx into ~/.noetica/operators,
+  // streaming progress as SSE (mirrors /api/brain/provision). Token-gated: fetches + writes to disk.
+  if (req.method === 'POST' && url.pathname === '/api/operator/provision') {
+    if (!requireApiToken(req, res)) return
+    let raw = ''
+    req.on('data', (c: Buffer) => { raw += c.toString(); if (raw.length > 4096) req.destroy() })
+    req.on('end', () => { void (async () => {
+      let name = ''
+      try { name = String((JSON.parse(raw || '{}') as { name?: string }).name ?? '') } catch { name = '' }
+      const { provisionOperatorModel, safeOperatorName } = await import('./lib/operator-provision.js')
+      if (!safeOperatorName(name)) {
+        res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid model name' })); return
+      }
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
+      const result = await provisionOperatorModel(name, (p) => { res.write(`data: ${JSON.stringify({ progress: p })}\n\n`) })
       res.write(`data: ${JSON.stringify({ done: result })}\n\n`)
       res.end()
     })() })
@@ -5401,16 +5587,88 @@ Question: ${question}`
     return
   }
 
-  // /api/tune/* — KD training stubs (real distillation requires separate distill server)
+  // /api/tune/* — the rejection-sampling→LoRA submit. Harvests VERIFIED production traces
+  // (lib/sft-harvest) and submits them to the Atlas training substrate (tritfabric, POST /v1/tune)
+  // as a causal_lm_lora job. GET /status reports the shard; POST /submit packages + ships it.
   if (url.pathname.startsWith('/api/tune/')) {
     setCORSHeaders(res)
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
-    res.writeHead(503, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({
-      ok: false,
-      error: 'Distillation server not running. Start the Noetica distillation server (separate process) to enable KD training.',
-      hint: 'See docs/tune-server.md for setup instructions.',
-    }))
+    void (async () => {
+      try {
+        const { readSftShard, dedupeVerified, toSftLine, buildTuneRequest, exampleHash, excludeTrained } = await import('./lib/sft-harvest.js')
+        const shardPath = path.join(os.homedir(), '.noetica', 'distill', 'verified.sft.jsonl')
+        const raw = fs.existsSync(shardPath) ? readSftShard(fs.readFileSync(shardPath, 'utf8')) : []
+        const deduped = dedupeVerified(raw)
+        const endpoint = (process.env['ATLAS_HTTP'] || process.env['NOETICA_TUNE_ENDPOINT'] || '').replace(/\/+$/, '')
+        // VOLUME GATE: LoRA SFT on a trickle of examples overfits to surface form and degrades
+        // generality. Require a real floor before a run is eligible (configurable; default 50 — raise
+        // toward several hundred as the harvest grows).
+        const minToSubmit = Math.max(1, Number(process.env['NOETICA_TUNE_MIN'] || 50))
+        // CROSS-ROUND DEDUP ledger: content hashes of examples already trained on in prior rounds.
+        const ledgerPath = path.join(os.homedir(), '.noetica', 'distill', 'trained-hashes.json')
+        let trainedArr: string[] = []
+        try { trainedArr = JSON.parse(fs.readFileSync(ledgerPath, 'utf8')) as string[] } catch { trainedArr = [] }
+        const trained = new Set(trainedArr)
+
+        if (req.method === 'GET' && url.pathname === '/api/tune/status') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, shardPath, captured: raw.length, unique: deduped.length, alreadyTrained: trainedArr.length, minToSubmit, submitTarget: endpoint || null, ready: deduped.length >= minToSubmit }))
+          return
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/tune/submit') {
+          // SOVEREIGNTY: submitting ships the shard off-device (potentially to a cloud GPU). Gate it
+          // behind the same explicit opt-in as capture — never egress training data implicitly.
+          if (!isFlagOn('NOETICA_LEARN_OPT_IN')) {
+            res.writeHead(403, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'learning is opt-in', hint: 'set NOETICA_LEARN_OPT_IN=1 to harvest + submit verified traces for training' }))
+            return
+          }
+          if (deduped.length < minToSubmit) {
+            res.writeHead(409, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'not enough verified examples yet', unique: deduped.length, needed: minToSubmit }))
+            return
+          }
+          // Defense-in-depth: re-run the PII/secret firewall over every example before it leaves the
+          // device, in case a pre-redaction trace exists in the shard.
+          const { redact } = await import('./lib/redact.js')
+          const clean = deduped.map((e) => ({ ...e, input: redact(e.input).redacted, output: redact(e.output).redacted }))
+          // CROSS-ROUND DEDUP: drop examples already trained on in a prior round. Re-training on the
+          // same easy wins every round narrows the distribution and accelerates collapse.
+          const fresh = excludeTrained(clean, trained)
+          if (fresh.length < minToSubmit) {
+            res.writeHead(409, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'not enough NEW verified examples since last training', unique: clean.length, fresh: fresh.length, alreadyTrained: trainedArr.length, needed: minToSubmit }))
+            return
+          }
+          // Canonicalize the shard to the FRESH set (drops already-trained — stops re-accumulation).
+          fs.writeFileSync(shardPath, `${fresh.map(toSftLine).join('\n')}\n`)
+          const datasetUri = process.env['NOETICA_SFT_URI'] || shardPath
+          const baseModel = process.env['NOETICA_TUNE_BASE'] || 'Qwen/Qwen2.5-Coder-7B-Instruct'
+          const tuneReq = buildTuneRequest({ datasetUri, baseModel, examples: fresh.length })
+          // Mark these examples trained ONLY once they're actually submitted (not when merely staged).
+          const recordTrained = () => { try { fs.writeFileSync(ledgerPath, JSON.stringify([...trained, ...fresh.map(exampleHash)].slice(-100000))) } catch { /* best-effort ledger */ } }
+          if (!endpoint) {
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ ok: true, staged: true, submitted: false, unique: deduped.length, fresh: fresh.length, shardPath, request: tuneReq, hint: 'set ATLAS_HTTP to submit to the Atlas training substrate' }))
+            return
+          }
+          // Atlas (atlasd) serves /v1/tune as the submit route; entrypoint=causal_lm_lora routes it to the trainer.
+          const r = await fetch(`${endpoint}/v1/tune`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(tuneReq) })
+          const atlas = await r.json().catch(() => ({})) as { id?: string; job_id?: string }
+          if (r.ok) recordTrained()
+          res.writeHead(r.ok ? 200 : 502, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: r.ok, submitted: r.ok, jobId: atlas?.id ?? atlas?.job_id ?? null, unique: deduped.length, fresh: fresh.length, atlas }))
+          return
+        }
+
+        res.writeHead(404, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: 'unknown tune route (use GET /api/tune/status or POST /api/tune/submit)' }))
+      } catch {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: 'tune_error' }))
+      }
+    })()
     return
   }
 
@@ -7765,6 +8023,10 @@ server.listen(PORT, '127.0.0.1', () => {
   // Runs silently after startup — never blocks the server.
   void (async () => {
     try {
+      // Tests boot the AM against MOCK Ollamas and assert specific request/latency behavior. The real
+      // suite-pull + prewarm hammers the (deliberately broken) primary with GB-scale pulls and contends
+      // for the turn under test — making latency non-deterministic. Skip it: tests never need real models.
+      if (process.env['NODE_ENV'] === 'test') return
       const up = await isOllamaRunning()
       if (!up) return
       const installed = await listLocalModels()
@@ -7866,17 +8128,17 @@ server.listen(PORT, '127.0.0.1', () => {
         }
         console.log('[prewarm] graph topic clusters built')
       } catch { /* best-effort */ }
-      // Upgrade the coder to the RAM-appropriate model (14b on ≥18GB, 30b on ≥30GB) by pulling
-      // it once in the background — non-blocking, only sizes that fit, so no OOM. Until it lands
-      // the router stays on 7b; once present, coding routes to the stronger model automatically.
+      // Upgrade the workhorse to the RAM-appropriate model (qwen3:14b on ≥18GB, qwen3-coder:30b on ≥30GB) by
+      // pulling it once in the background — non-blocking, only sizes that fit, so no OOM. Until it lands the
+      // router stays on the qwen2.5 floor; once present, coding AND general/reasoning route to it automatically.
       try {
         const { preferredCoderForRam } = await import('./lib/router.js')
         const want = preferredCoderForRam()
         if (want && process.env['NOETICA_NO_AUTO_CODER'] !== '1') {
           const have = await listLocalModels()
           if (!have.includes(want)) {
-            console.log(`[prewarm] pulling upgraded coder ${want} in background (one-time)…`)
-            void pullModel(want, () => {}).then(() => console.log(`[prewarm] coder ${want} ready — coding now routes to it`)).catch(() => {})
+            console.log(`[prewarm] pulling upgraded workhorse ${want} in background (one-time)…`)
+            void pullModel(want, () => {}).then(() => console.log(`[prewarm] workhorse ${want} ready — routing now prefers it`)).catch(() => {})
           }
         }
       } catch { /* best-effort */ }

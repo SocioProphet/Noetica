@@ -21,6 +21,7 @@ import { LabSurface } from '@/components/surfaces/LabSurface'
 import { CloudBrokerSurface } from '@/components/surfaces/CloudBrokerSurface'
 import { AlignmentSurface } from '@/components/surfaces/AlignmentSurface'
 import { AgentBuilderSurface } from '@/components/surfaces/AgentBuilderSurface'
+import { CalendarSurface } from '@/components/surfaces/CalendarSurface'
 import { JitsiSurface } from '@/components/surfaces/JitsiSurface'
 import { OfficeViewer } from '@/components/surfaces/OfficeViewer'
 import { GovernSurface } from '@/components/surfaces/GovernSurface'
@@ -97,6 +98,7 @@ const surfaceToWorkspaceMode: Record<ActiveSurface, WorkspaceMode> = {
   broker:       'Chat',
   alignment:    'Chat',
   agents:       'Chat',
+  calendar:     'Chat',
 }
 
 export function AppShell() {
@@ -1362,11 +1364,14 @@ export function AppShell() {
       current.map((m) => {
         if (m.id !== id) return m
         const prev = m.retrieval_trace
-        const combined = isProvenance
+        const merged = isProvenance
           ? { ...(prev ?? trace), memory_sources: trace.memory_sources, episode_sources: trace.episode_sources }
           : isDocs
             ? { ...(prev ?? trace), document_sources: trace.sources }
             : { ...trace, document_sources: prev?.document_sources, memory_sources: prev?.memory_sources, episode_sources: prev?.episode_sources }
+        // Normalize: a provenance-only event has no patterns/timings/sources, so guarantee those arrays exist
+        // (the type declares them required, and downstream rendering reads .length/.map on them).
+        const combined = { ...merged, patterns: merged.patterns ?? [], timings: merged.timings ?? [], sources: merged.sources ?? [] }
         return { ...m, retrieval_trace: combined }
       })
     )
@@ -1710,6 +1715,7 @@ function CenterWorkspace({ activeSurface, sessionId, messages, isStreaming, work
   if (activeSurface === 'broker')       return <CloudBrokerSurface />
   if (activeSurface === 'alignment')    return <AlignmentSurface />
   if (activeSurface === 'agents')       return <AgentBuilderSurface />
+  if (activeSurface === 'calendar')     return <CalendarSurface />
   if (activeSurface === 'jitsi')        return <JitsiSurface />
   if (activeSurface === 'docs')         return <OfficeViewer />
   if (activeSurface === 'operate')      return <OperateSurface onAtomSelect={onAtomSelect} />
