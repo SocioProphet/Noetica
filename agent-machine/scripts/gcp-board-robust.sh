@@ -23,6 +23,7 @@ ARMS="${BOARD_ARMS:-baseline,brain,gate,champion,learned}"
 PER="${PER:-100}"
 SUBJECTS="${SUBJECTS:-high_school_biology,conceptual_physics,electrical_engineering,college_chemistry,high_school_statistics,college_mathematics,abstract_algebra}"
 STALL_MIN="${STALL_MIN:-10}"
+CONC="${CONC:-6}"   # questions scored per batch; LOWER for SC-heavy arm sets (reason/prod/opcompute) so 'done' advances before the stall-guard trips on a big first batch
 ZONES="${ZONES:-us-east1-d us-east4-a us-east4-c us-west1-a us-west1-b us-west4-a us-central1-a us-central1-b us-central1-c}"
 CKPT="$GCS/bench/ckpt-$RUN_TAG.jsonl"
 STATUS="$GCS/bench/status-$RUN_TAG.json"
@@ -84,6 +85,7 @@ step "BOARD $RUN_TAG — arms=$ARMS · resumable · streaming · stall-guarded"
 MMLU_MODEL=$MODEL MMLU_ARMS="$ARMS" MMLU_PER_SUBJECT=$PER MMLU_SEED=1729 MMLU_SUBJECTS=$SUBJECTS \
   MMLU_CHECKPOINT=\$LCKPT MMLU_STATUS=\$LSTATUS \
   NOETICA_EMBED_TIMEOUT_MS=\${NOETICA_EMBED_TIMEOUT_MS:-60000} NOETICA_EMBED_RETRIES=\${NOETICA_EMBED_RETRIES:-3} \
+  MMLU_CONC=$CONC \
   stdbuf -oL -eL bash scripts/run-exam.sh > /var/log/sb.txt 2>&1
 EXIT=\$?
 gsutil -q cp "\$LCKPT" "$CKPT" 2>/dev/null
