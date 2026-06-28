@@ -4086,14 +4086,15 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
             // won't help) AND a stronger local model is installed.
             const haveGrounding = graphContext.trim().length > 200
             if (verdict.action === 'escalate' && haveGrounding) {
-              const stronger = ['qwen2.5:32b', 'qwen2.5:14b'].find((m) => availableModels.includes(m) && m !== model)
-              if (stronger) {
+              // Try ALL stronger local models, not just the first — more candidates = better selection.
+              const strongerModels = ['qwen2.5:32b', 'qwen2.5:14b'].filter((m) => availableModels.includes(m) && m !== model)
+              for (const stronger of strongerModels) {
                 try {
                   const r = await generateOllamaText({ model: stronger, messages: ollamaMessages, temperature: 0.4, numCtx: ollamaNumCtx })
                   if (r.content.trim()) candidates.push({ content: r.content, reasoning: r.reasoning, temperature: 0.4, label: `esc:${stronger}` })
-                  verdict = critique(candidates, cctx)
                 } catch { /* escalation best-effort */ }
               }
+              if (candidates.length > bestOfN) verdict = critique(candidates, cctx)
             }
             const best = verdict.best
             sse(res, 'deliberation', {

@@ -14,6 +14,7 @@
 
 import { judgeAnswer, type ValueJudgment } from './value-judgment.js'
 import { classifyComplexity, type Posture } from './complexity-discipline.js'
+import { candidateCouncilVote } from './council.js'
 
 export type CriticAction = 'accept' | 'escalate' | 'clarify'
 
@@ -112,7 +113,19 @@ export function critique(candidates: Candidate[], ctx: CriticContext): CriticVer
   const topScore = ranked[0]!.score
   const contenders = ranked.map((r, i) => ({ i, r, agree: meanAgreement(i) })).filter((x) => topScore - x.r.score <= 0.03)
   contenders.sort((a, b) => b.agree - a.agree)
-  const winner = contenders[0]!
+
+  // When the top two contenders are within 0.01 (true tie, Jaccard couldn't separate them),
+  // ask the council for a grounding-weighted pick among the tied candidates.
+  let winner = contenders[0]!
+  if (contenders.length >= 2 && contenders[0]!.r.score - (contenders[1]?.r.score ?? 0) < 0.01) {
+    const arms = contenders.map(({ r }) => ({
+      content: r.candidate.content,
+      groundingConf: r.vj.grounding,
+      isEscalated: r.candidate.label?.startsWith('esc:') ?? false,
+    }))
+    const councilIdx = candidateCouncilVote(arms)
+    winner = contenders[councilIdx] ?? contenders[0]!
+  }
   const best = winner.r
   const agreement = Number(winner.agree.toFixed(3))
 
