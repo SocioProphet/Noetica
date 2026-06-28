@@ -41,6 +41,12 @@ function loadClientRegistry(): Record<string, ClientConfig> {
 // signs the server challenge, and POSTs the assertion back.
 function loginPage(opts: { challenge: string; authNonce: string; clientId: string; appName: string }): string {
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  // JSON.stringify alone does not escape </script>, so a crafted value can break out of the script block.
+  // Unicode-escape < > & so those bytes never appear in the emitted HTML — valid JS literals, safe in HTML.
+  const safeJs = (s: string) => JSON.stringify(s)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026");
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -79,9 +85,9 @@ function loginPage(opts: { challenge: string; authNonce: string; clientId: strin
   <div class="hint">Your key never leaves this device.</div>
 </div>
 <script>
-const CHALLENGE = ${JSON.stringify(opts.challenge)};
-const AUTH_NONCE = ${JSON.stringify(opts.authNonce)};
-const CLIENT_ID  = ${JSON.stringify(opts.clientId)};
+const CHALLENGE = ${safeJs(opts.challenge)};
+const AUTH_NONCE = ${safeJs(opts.authNonce)};
+const CLIENT_ID  = ${safeJs(opts.clientId)};
 
 function b64url(buf) {
   return btoa(String.fromCharCode(...new Uint8Array(buf)))
