@@ -58,8 +58,10 @@ export interface AutonomyDecision {
 }
 
 function levelRank(level: string): number {
+  // Floor unparseable OR negative input to L0 — a negative rank (e.g. 'L-5')
+  // would otherwise produce a self-contradictory decision/receipt.
   const n = Number.parseInt(String(level).replace(/^[Ll]/, ''), 10)
-  return Number.isNaN(n) ? 0 : n
+  return Number.isNaN(n) || n < 0 ? 0 : n
 }
 
 /** Highest rank at which `role` is declared in the ladder (else L0). */

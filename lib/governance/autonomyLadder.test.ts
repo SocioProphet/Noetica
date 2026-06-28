@@ -38,6 +38,16 @@ test('unknown role floors at L0 -> deny', () => {
   assert.equal(d.decision, 'deny')
 })
 
+test('malformed/negative level floors to L0 without a contradictory decision', () => {
+  for (const bad of ['L-5', '-3', 'banana', '']) {
+    const d = evaluateAutonomy('coding', bad, [])
+    assert.equal(d.requestedLevel, 'L0', `${bad} should normalize to L0`)
+    assert.equal(d.grantedLevel, 'L0')
+    assert.equal(d.decision, 'admit') // requested==granted==L0, no contradiction
+    assert.equal(d.demoted, false)
+  }
+})
+
 test('toAdmissionReceipt produces a contract-shaped record', () => {
   const d = evaluateAutonomy('coding', 'L3', ['test_result_or_review_receipt'])
   const r = toAdmissionReceipt(d, {
