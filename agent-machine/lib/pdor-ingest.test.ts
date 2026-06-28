@@ -4,6 +4,7 @@ import { buildCatalogGraph } from './pdor-ingest.js'
 import { evaluatePdor, type Pdor } from './data-onboarding.js'
 import { characterize, parseDelimited } from './characterization.js'
 import { synapseEnrich } from './synapseiq-enrich.js'
+import { persistProposals } from './graph-writeback.js'
 
 const pdor = (over: Partial<Pdor> = {}): Pdor => ({
   id: 'oct-18.01', requester: 'r', intent: 'capture',
@@ -52,8 +53,10 @@ test('characterization → classification Terms + profile props on the asset', (
   const terms = g.proposals.filter((x) => x.op === 'add-edge' && (x.payload as any).rel === 'classified_as').map((x) => (x.payload as any).to)
   assert.ok(terms.includes('term:geospatial'))
   assert.ok(terms.includes('term:temporal'))
-  const prof = g.proposals.find((x) => x.op === 'update-prop')!
-  assert.equal((prof.payload as any).hasGeo, true)
+  // profile is folded into the asset node (not a separate update-prop, which the persistor can't write)
+  const asset = g.proposals.find((x) => (x.payload as any).kind === 'CommonsAsset')!
+  assert.equal((asset.payload as any).hasGeo, true)
+  assert.equal((asset.payload as any).rows, 2)
 })
 
 test('SynapseIQ enrichment → asset contains symbol edges (entity linkage)', async () => {
@@ -70,7 +73,42 @@ test('fileUri → stored_as edge to the physical file', () => {
   assert.ok(g.proposals.some((x) => x.op === 'add-edge' && (x.payload as any).rel === 'stored_as' && (x.payload as any).to === 'file:gs://commons/18.01/notes.pdf'))
 })
 
-test('all catalog proposals are tagged source pdor-ingest (provenance)', () => {
+test('all catalog proposals are tagged source pdor-ingest — INCLUDING enrichment edges', async () => {
+  const p = pdor()
+  const e = await synapseEnrich('def f():\n pass\nclass G: pass', { filename: 'a.py' })
+  const g = buildCatalogGraph(p, evaluatePdor(p), { enrichment: e })
+  // enrichment edges come through triplesToProposals (which self-tags auto-kg) — must be re-tagged pdor-ingest
+  assert.ok(g.proposals.some((x) => x.op === 'add-edge' && (x.payload as any).rel === 'contains'))
+  assert.ok(g.proposals.every((x) => x.source === 'pdor-ingest'))
+})
+
+test('catalog proposals are ACCEPTED (the ingest key is the gate) so they actually persist', () => {
   const g = buildCatalogGraph(pdor(), evaluatePdor(pdor()))
-  assert.ok(g.proposals.every((p) => p.source === 'pdor-ingest'))
+  assert.ok(g.proposals.every((p) => p.status === 'accepted'))
+})
+
+test('persist: the asset node (with moat-safe flags + label) and edges actually land in the graph', () => {
+  // minimal in-memory WritableGraph satisfying persistProposals' needs
+  const nodes = new Map<string, { id: string; props: Record<string, unknown> }>()
+  const edges: Array<{ label: string; from: string; to: string }> = []
+  const store = {
+    getNode: (id: string) => nodes.get(id),
+    addNode: (id: string, _k: string[], props: Record<string, unknown>) => { nodes.set(id, { id, props }) },
+    addEdge: (label: string, from: string, to: string) => { edges.push({ label, from, to }) },
+    allEdges: () => edges,
+  }
+  const p = pdor({ license: { type: 'cc-by' } })
+  const c = characterize(parseDelimited('a,b\n1,x\n2,y'))
+  const g = buildCatalogGraph(p, evaluatePdor(p), { characterization: c })
+  const res = persistProposals(g.proposals, { store: store as never })
+  assert.ok(res.written > 0)                                  // NOT a no-op
+  assert.equal(res.skipped, 0)
+  const asset = nodes.get('asset:oct-18.01')!
+  assert.ok(asset, 'asset node written')
+  assert.equal(asset.props['brainEligible'], true)            // moat-safe flag reached the node
+  assert.equal(asset.props['segmented'], false)
+  assert.equal(asset.props['label'], 'MIT OCW 18.01')         // label (not the raw assetId)
+  assert.equal(asset.props['rows'], 2)                        // characterization profile reached the node
+  assert.ok(edges.some((e) => e.label === 'requested_via'))
+  assert.ok(edges.some((e) => e.label === 'licensed_under'))
 })

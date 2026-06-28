@@ -38,44 +38,49 @@ export function buildCatalogGraph(pdor: Pdor, decision: PdorDecision, inputs: In
   if (!decision.ingestKey) return { assetId, proposals: [], ingested: false }
 
   const src = 'pdor-ingest'
+  // The ingest KEY is the governance gate: an open asset self-certified, a licensed/restricted one passed full
+  // review (evaluatePdor only issues a key once every verdict approved). So catalog proposals are ACCEPTED —
+  // they persist directly; there is no second review round. accept() also tags `source` for a clean audit trail.
+  const accept = (op: Parameters<typeof proposal>[0], payload: Record<string, unknown>, rationale: string): GraphProposal =>
+    ({ ...proposal(op, payload, rationale, src), status: 'accepted' })
   const P: GraphProposal[] = []
+  const c = inputs.characterization
 
-  // 1. the asset node — carries the moat-safe brain flags + tier + license + quality.
-  P.push(proposal('add-node', {
-    id: assetId, kind: 'CommonsAsset', name: pdor.source.name,
+  // 1. the asset node — carries the moat-safe brain flags + tier + license + quality + (folded) profile, so the
+  //    brain-build can filter (segmented asset = queryable in the graph, never trained). `label` is the display name.
+  P.push(accept('add-node', {
+    id: assetId, kind: 'CommonsAsset', label: pdor.source.name, name: pdor.source.name,
     tier: decision.tier, openness: decision.openness,
     brainEligible: decision.brainEligible, segmented: decision.segmented,
-    license: pdor.license.type, quality: inputs.characterization?.quality ?? null,
-  }, `cataloged ${decision.tier} asset (${decision.brainEligible ? 'brain-eligible' : 'SEGMENTED'})`, src))
+    license: pdor.license.type, quality: c?.quality ?? null,
+    ...(c ? { rows: c.rows, cols: c.cols, hasPII: c.sensitive.hasPII, hasGeo: c.geospatial.hasGeo, hasTemporal: c.temporal.hasTemporal } : {}),
+  }, `cataloged ${decision.tier} asset (${decision.brainEligible ? 'brain-eligible' : 'SEGMENTED'})`))
 
   // 2. the PDOR record node + provenance edge.
   const pdorNode = `pdor:${pdor.id}`
-  P.push(proposal('add-node', { id: pdorNode, kind: 'PDOR', requester: pdor.requester, intent: pdor.intent, status: decision.status }, 'onboarding request record', src))
-  P.push(proposal('add-edge', { from: assetId, to: pdorNode, rel: 'requested_via' }, 'asset provenance head', src))
+  P.push(accept('add-node', { id: pdorNode, kind: 'PDOR', label: `PDOR ${pdor.id}`, requester: pdor.requester, intent: pdor.intent, status: decision.status }, 'onboarding request record'))
+  P.push(accept('add-edge', { from: assetId, to: pdorNode, rel: 'requested_via' }, 'asset provenance head'))
 
   // 3. license node + edge (the asset is traceable to its license).
-  const licNode = `license:${pdor.license.type}`
-  P.push(proposal('add-edge', { from: assetId, to: licNode, rel: 'licensed_under' }, `license ${pdor.license.type}`, src))
+  P.push(accept('add-edge', { from: assetId, to: `license:${pdor.license.type}`, rel: 'licensed_under' }, `license ${pdor.license.type}`))
 
   // 4. physical file edge (where it landed).
-  if (inputs.fileUri) P.push(proposal('add-edge', { from: assetId, to: `file:${inputs.fileUri}`, rel: 'stored_as' }, 'physical file in the lake', src))
+  if (inputs.fileUri) P.push(accept('add-edge', { from: assetId, to: `file:${inputs.fileUri}`, rel: 'stored_as' }, 'physical file in the lake'))
 
   // 5. governance rules as governed_by edges (segment-from-brain, attribute-on-use, ...).
-  for (const rule of decision.rules) P.push(proposal('add-edge', { from: assetId, to: `rule:${rule}`, rel: 'governed_by' }, `governance rule`, src))
+  for (const rule of decision.rules) P.push(accept('add-edge', { from: assetId, to: `rule:${rule}`, rel: 'governed_by' }, 'governance rule'))
 
   // 6. classification Terms from characterization (geo / temporal / sensitive) → classified_as edges.
-  const c = inputs.characterization
   if (c) {
-    if (c.geospatial.hasGeo) P.push(proposal('add-edge', { from: assetId, to: 'term:geospatial', rel: 'classified_as' }, 'has geospatial structure', src))
-    if (c.temporal.hasTemporal) P.push(proposal('add-edge', { from: assetId, to: 'term:temporal', rel: 'classified_as' }, 'has temporal structure', src))
-    if (c.sensitive.hasPII) P.push(proposal('add-edge', { from: assetId, to: 'term:sensitive', rel: 'classified_as' }, 'contains sensitive data', src))
-    // attach the profile summary as asset props.
-    P.push(proposal('update-prop', { id: assetId, rows: c.rows, cols: c.cols, hasPII: c.sensitive.hasPII, hasGeo: c.geospatial.hasGeo, hasTemporal: c.temporal.hasTemporal }, 'characterization profile', src))
+    if (c.geospatial.hasGeo) P.push(accept('add-edge', { from: assetId, to: 'term:geospatial', rel: 'classified_as' }, 'has geospatial structure'))
+    if (c.temporal.hasTemporal) P.push(accept('add-edge', { from: assetId, to: 'term:temporal', rel: 'classified_as' }, 'has temporal structure'))
+    if (c.sensitive.hasPII) P.push(accept('add-edge', { from: assetId, to: 'term:sensitive', rel: 'classified_as' }, 'contains sensitive data'))
   }
 
-  // 7. entity linkage from SynapseIQ enrichment (asset contains symbol; symbol is_a kind) — pending, governed.
+  // 7. entity linkage from SynapseIQ enrichment (asset contains symbol; symbol is_a kind). triplesToProposals
+  //    tags its own auto-kg source — re-tag to 'pdor-ingest' + ACCEPT so the catalog write is one audit trail.
   if (inputs.enrichment && inputs.enrichment.symbols.length) {
-    P.push(...triplesToProposals(enrichmentToTriples(assetId, inputs.enrichment), assetId))
+    P.push(...triplesToProposals(enrichmentToTriples(assetId, inputs.enrichment), assetId).map((p) => ({ ...p, source: src, status: 'accepted' as const })))
   }
 
   return { assetId, proposals: P, ingested: true }

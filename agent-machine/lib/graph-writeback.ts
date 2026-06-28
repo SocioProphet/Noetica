@@ -41,7 +41,13 @@ export function persistProposals(proposals: GraphProposal[], opts: { store?: Wri
         if (!okId(id)) { skipped++; details.push({ ref: id || '?', op: p.op, status: 'invalid-id' }); continue }
         if (g.getNode(id)) { skipped++; details.push({ ref: id, op: p.op, status: 'exists' }); continue }
         const kind = String(p.payload['kind'] ?? 'Concept').slice(0, 64).replace(/[^\w-]/g, '') || 'Concept'
-        g.addNode(id, [kind], { label: String(p.payload['label'] ?? id).slice(0, 512), epistemic: 'proposed', source: p.source ?? 'agent', rationale: p.rationale, created_at: now })
+        // Forward any extra payload props (e.g. brainEligible/segmented/tier/quality on a catalog asset node)
+        // onto the node, minus the structural keys handled here. Additive — callers that set no extras are
+        // unchanged. label falls back to name (some builders set `name`) then the id.
+        const RESERVED = new Set(['id', 'node', 'kind', 'label', 'name'])
+        const extra: Record<string, unknown> = {}
+        for (const [k, v] of Object.entries(p.payload)) if (!RESERVED.has(k)) extra[k] = v
+        g.addNode(id, [kind], { label: String(p.payload['label'] ?? p.payload['name'] ?? id).slice(0, 512), epistemic: 'proposed', source: p.source ?? 'agent', rationale: p.rationale, created_at: now, ...extra })
         written++; details.push({ ref: id, op: p.op, status: 'written' })
       } else if (p.op === 'add-edge') {
         const from = String(p.payload['from'] ?? ''), to = String(p.payload['to'] ?? ''), rel = String(p.payload['rel'] ?? 'RELATED_TO')
