@@ -8564,6 +8564,84 @@ Question: ${question}`
     return
   }
 
+  // ── /api/session/* — developer-facing session API (TypeScript AgentSession) ──────────────────
+  if (url.pathname.startsWith('/api/session')) {
+    ;(async () => {
+      try {
+        const { AgentSession, Reasoning } = await import('./lib/agent-session.js')
+        const { MODELS, composite, pctOfFrontier } = await import('./lib/model-registry.js')
+
+        // GET /api/session/models — model manifest with capability benchmarks (Gap 04)
+        if (req.method === 'GET' && url.pathname === '/api/session/models') {
+          const local = await listLocalModels()
+          const manifest = MODELS.map((m) => ({
+            id: m.id,
+            label: m.label,
+            origin: m.origin,
+            openWeights: m.openWeights,
+            locallyAvailable: local.includes(m.id),
+            bench: m.bench,
+            composite: composite(m),
+            pctOfFrontier: pctOfFrontier(m.id),
+          }))
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ models: manifest, count: manifest.length }))
+          return
+        }
+
+        const readBody = async (): Promise<Record<string, unknown>> => {
+          const { readBody: rb } = await import('./lib/read-body.js')
+          const raw = await rb(req)
+          return JSON.parse(raw) as Record<string, unknown>
+        }
+        const toReasoning = (s: string) =>
+          ((Object.values(Reasoning) as string[]).includes(s) ? s : Reasoning.MODERATE) as typeof Reasoning[keyof typeof Reasoning]
+
+        // POST /api/session/respond — synchronous respond (structured or plain text)
+        if (req.method === 'POST' && url.pathname === '/api/session/respond') {
+          const body = await readBody()
+          const session = new AgentSession({
+            reasoning: toReasoning((body['reasoning'] as string | undefined) ?? 'moderate'),
+            system: body['system'] as string | undefined,
+          })
+          const schema = body['schema'] as Record<string, unknown> | undefined
+          const prompt = body['prompt'] as string | undefined
+          if (!prompt) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'prompt required' })); return }
+          const result = await session.respond(prompt, schema ? { schema: schema as import('./lib/agent-session.js').OutputSchema } : {})
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(typeof result === 'string' ? { text: result } : { result }))
+          return
+        }
+
+        // POST /api/session/stream — SSE streaming respond
+        if (req.method === 'POST' && url.pathname === '/api/session/stream') {
+          const body = await readBody()
+          const reasoningEnum = toReasoning((body['reasoning'] as string | undefined) ?? 'moderate')
+          const session = new AgentSession({
+            reasoning: reasoningEnum,
+            system: body['system'] as string | undefined,
+          })
+          const prompt = body['prompt'] as string | undefined
+          if (!prompt) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'prompt required' })); return }
+          res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'connection': 'keep-alive' })
+          for await (const chunk of session.stream(prompt)) {
+            res.write(`data: ${JSON.stringify({ text: chunk })}\n\n`)
+          }
+          res.write('data: [DONE]\n\n')
+          res.end()
+          return
+        }
+
+        res.writeHead(404, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: 'not_found' }))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: 'internal_error', detail: String(e) }))
+      }
+    })()
+    return
+  }
+
   // 404
   res.writeHead(404, { 'content-type': 'application/json' })
   res.end(JSON.stringify({ error: 'not_found', path: url.pathname }))
