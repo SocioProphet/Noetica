@@ -81,7 +81,7 @@ import { validateGraph } from '@socioprophet/hellgraph'
 import { CANONICAL_SHAPES, QUARANTINE_PROP } from './lib/canonical-shapes.js'
 import { judgeAnswer, type ValueJudgment } from './lib/value-judgment.js'
 import { runAgentLoop, type ProviderAdapter } from './lib/agent-loop.js'
-import { makeAutonomyGate, hydrateAutonomy, onAutonomyDecision, type AutonomySession } from './lib/autonomy-gate.js'
+import { makeAutonomyGate, hydrateAutonomy, bindAutonomy, autonomySession, onAutonomyDecision, AUTONOMY_LADDER, type AutonomySession } from './lib/autonomy-gate.js'
 import { validateToolCall, type ToolSchema, type ArgSpec } from './lib/constrained-decode.js'
 import { appendJsonl as appendEncrypted, readJsonl as readEncrypted, writeJson as writeEncryptedJson, readJson as readEncryptedJson } from './lib/at-rest.js'
 import { critique, bestOfTemps, type Candidate as CriticCandidate } from './lib/critic.js'
@@ -453,6 +453,15 @@ function loadAutonomy(): void {
       console.log(`[autonomy] session bound from disk — role=${raw.role} level=${raw.authorizedLevel} (gate active)`)
     }
   } catch { /* no prior session — autonomy not enforced (backward compatible) */ }
+}
+// Persist (or clear) the bound autonomy session so it survives restart.
+function saveAutonomy(): void {
+  try {
+    const s = autonomySession()
+    fs.mkdirSync(path.dirname(AUTONOMY_FILE), { recursive: true })
+    if (s) fs.writeFileSync(AUTONOMY_FILE, JSON.stringify(s), { mode: 0o600 })
+    else fs.rmSync(AUTONOMY_FILE, { force: true })
+  } catch { /* best-effort */ }
 }
 
 let lastSecurityArmed: boolean | null = null
@@ -5195,6 +5204,41 @@ const server = http.createServer((req, res) => {
         const s = containmentState()
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ killed: s.killed, reason: s.reason, purpose: s.purpose.name }))
+      })
+      return
+    }
+  }
+
+  if (url.pathname === '/api/autonomy') {
+    setCORSHeaders(res)
+    if (req.method === 'GET') {
+      const s = autonomySession()
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ session: s, enforced: s !== null, ladder: AUTONOMY_LADDER }))
+      return
+    }
+    if (req.method === 'POST') {
+      // Same CSRF / DNS-rebinding guard as /api/containment: a hostile browser tab must not be able
+      // to bind or clear the agent's autonomy by fetch()-ing localhost.
+      const origin = req.headers['origin']
+      if (typeof origin === 'string' && /^https?:\/\//i.test(origin) && !/^https?:\/\/(127\.0\.0\.1|localhost)(:|$|\/)/i.test(origin)) { res.writeHead(403, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'cross_origin_blocked' })); return }
+      if (!String(req.headers['content-type'] ?? '').includes('application/json')) { res.writeHead(415, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'json_content_type_required' })); return }
+      let body = ''
+      req.on('data', (c: Buffer) => { body += c.toString() })
+      req.on('end', () => {
+        let p: { action?: string; role?: string; level?: string; evidence?: unknown } = {}
+        try { p = JSON.parse(body || '{}') } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        if (p.action === 'bind') {
+          if (typeof p.role !== 'string' || typeof p.level !== 'string') { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'role_and_level_required' })); return }
+          const evidence = Array.isArray(p.evidence) ? p.evidence.filter((e): e is string => typeof e === 'string') : []
+          bindAutonomy({ role: p.role, authorizedLevel: p.level, evidence })
+        } else if (p.action === 'clear') {
+          bindAutonomy(null)
+        } else { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'unknown_action' })); return }
+        saveAutonomy()
+        const s = autonomySession()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ session: s, enforced: s !== null }))
       })
       return
     }

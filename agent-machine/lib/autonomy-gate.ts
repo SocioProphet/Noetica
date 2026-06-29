@@ -15,8 +15,12 @@
 
 import {
   evaluateAutonomy,
+  AUTONOMY_LADDER,
   type AutonomyDecision,
 } from '../../lib/governance/autonomyLadder.js'
+
+/** Re-export the canonical ladder so the host has a single autonomy import surface. */
+export { AUTONOMY_LADDER }
 
 export interface AutonomySession {
   /** choir role requesting autonomy (e.g. 'conductor', 'coding', 'research') */

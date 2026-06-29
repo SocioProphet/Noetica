@@ -18,6 +18,13 @@ test('unbound session does not enforce (backward compatible)', () => {
   assert.doesNotThrow(() => assertAutonomy('L4'))
 })
 
+test('bind/clear round-trips the session (operator endpoint state)', () => {
+  bindAutonomy(conductorL4)
+  assert.deepEqual(autonomySession(), conductorL4)
+  bindAutonomy(null)
+  assert.equal(autonomySession(), null)
+})
+
 test('bound session admits an action at its authorized level with evidence', () => {
   bindAutonomy(conductorL4)
   assert.equal(permitsAutonomy('L4'), true)
