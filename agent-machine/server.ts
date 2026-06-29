@@ -1966,6 +1966,18 @@ async function executeTool(
         const { ingestDocument } = await import('./lib/doc-store.js')
         const stamp = new Date().toISOString().replace(/[:.]/g, '-')
         await ingestDocument(`memory/${kind}-${stamp}.md`, content)
+        // Memory-decay pruning (MEMORY_DECAY=true): after each write, prune stale memories to a budget
+        // so the store doesn't grow unboundedly (FadeMem arXiv 2601.18642). No-op when unset.
+        if (process.env['MEMORY_DECAY'] === 'true') {
+          try {
+            const { pruneToBudget } = await import('./lib/memory-decay.js')
+            const { forgetMemory } = await import('./lib/memory-curation.js')
+            const all = listMemories(mStore).map((m) => ({ id: m.id, createdAt: new Date(m.createdAt).getTime() || Date.now(), pinned: m.pinned, importance: m.lti / 100 }))
+            const { evict } = pruneToBudget(all, 200)
+            for (const e of evict) { try { forgetMemory(mStore, e.id) } catch { /* skip */ } }
+            if (evict.length) console.warn('[memory-decay] pruned', evict.length, 'stale memories')
+          } catch { /* decay is best-effort */ }
+        }
         const note = conflict ? ` ⚠️ This may update an earlier memory: "${conflict.preview.slice(0, 110)}" — tell me to forget that one if it's now wrong.` : ''
         return `Saved to memory (${kind}): "${content.slice(0, 140)}". I'll recall this on future relevant turns.${note}`
       } catch (e) {
@@ -3115,13 +3127,13 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
   let liveContent = '' // accumulates streamed deltas in real time (for checkpoint-on-abort)
   let lastToolCalls: ToolUseBlock[] | undefined
 
-  // Trajectory safety: accumulate the agent's tool calls across turns and watch for goal-hijack patterns
-  // (privilege escalation, sensitive-action bursts, repetition loops, scope creep — LlamaFirewall-style).
-  // monitorTrajectory was built + tested but never wired into the live loop until now.
+  // Trajectory safety (TRAJECTORY_MONITOR=true): accumulate the agent's tool calls across turns and watch
+  // for goal-hijack patterns (privilege escalation, sensitive-action bursts, repetition loops, scope creep —
+  // LlamaFirewall-style). No-op when env var is unset — zero cost to existing behavior.
   const trajectoryActions: import('./lib/trajectory-monitor.js').AgentAction[] = []
   const SENSITIVE_TOOLS = new Set(['run_command', 'write_file', 'edit_file', 'code_execute', 'dispatch_agent'])
   const recordTrajectory = async (calls: ToolUseBlock[] | undefined) => {
-    if (!calls?.length) return
+    if (!calls?.length || process.env['TRAJECTORY_MONITOR'] !== 'true') return
     for (const c of calls) trajectoryActions.push({ type: c.name, target: typeof c.input === 'object' && c.input ? String((c.input as Record<string, unknown>)['path'] ?? (c.input as Record<string, unknown>)['command'] ?? '') : '', sensitive: SENSITIVE_TOOLS.has(c.name) })
     try {
       const { monitorTrajectory } = await import('./lib/trajectory-monitor.js')
