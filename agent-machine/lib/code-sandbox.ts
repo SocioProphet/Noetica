@@ -202,7 +202,7 @@ export function executeJavaScript(code: string, sessionDir: string, nodeExecPath
         runtime, ["-e", JS_VM_RUNNER],
         {
           cwd: sessionDir,
-          env: { NJS_FILE: njsFile, PATH: process.env["PATH"] ?? "" } as NodeJS.ProcessEnv,
+          env: { NJS_FILE: njsFile, PATH: process.env["PATH"] ?? "" } as unknown as NodeJS.ProcessEnv,
         },
         EXEC_TIMEOUT_MS,
         (output) => { cleanup(); resolve(output); },
