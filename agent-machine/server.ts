@@ -81,6 +81,7 @@ import { validateGraph } from '@socioprophet/hellgraph'
 import { CANONICAL_SHAPES, QUARANTINE_PROP } from './lib/canonical-shapes.js'
 import { judgeAnswer, type ValueJudgment } from './lib/value-judgment.js'
 import { runAgentLoop, type ProviderAdapter } from './lib/agent-loop.js'
+import { makeAutonomyGate, hydrateAutonomy, onAutonomyDecision, type AutonomySession } from './lib/autonomy-gate.js'
 import { validateToolCall, type ToolSchema, type ArgSpec } from './lib/constrained-decode.js'
 import { appendJsonl as appendEncrypted, readJsonl as readEncrypted, writeJson as writeEncryptedJson, readJson as readEncryptedJson } from './lib/at-rest.js'
 import { critique, bestOfTemps, type Candidate as CriticCandidate } from './lib/critic.js'
@@ -421,6 +422,39 @@ function loadContainment(): void {
     if (raw.killed) console.log('[containment] kill-switch ARMED (restored from disk) — agent halted until disarmed')
   } catch { /* no prior state — defaults (full, not killed) */ }
 }
+// ── Autonomy gate ────────────────────────────────────────────────────────────
+// The autonomy level each tool's action implies (AI-driven-development ladder).
+// Assistive/read tools are ungated (L1); the gate is inert until an autonomy
+// session is bound (see AUTONOMY_FILE), so this changes nothing by default.
+const TOOL_AUTONOMY_LEVEL: Record<string, string> = {
+  // L2 — bounded units of work (files/code/memory), reviewable after the fact
+  write_file: 'L2', edit_file: 'L2', code_execute: 'L2', scaffold_app: 'L2', remember: 'L2',
+  // L4 — solution-level: shell, action execution, delegation to the choir, identity change
+  run_command: 'L4', execute_action: 'L4', dispatch_agent: 'L4', set_identity: 'L4',
+  // L5 — standing autonomous self-modification
+  update_self: 'L5',
+}
+const autonomyGate = makeAutonomyGate((tool) => TOOL_AUTONOMY_LEVEL[tool])
+// Route every gated decision onto the trajectory/console (best-effort evidence).
+onAutonomyDecision((d) => {
+  if (d.demoted || d.grantedLevel !== d.requestedLevel) {
+    console.log(`[autonomy] ${d.tool}: role=${d.role} requested=${d.requestedLevel} granted=${d.grantedLevel} — ${d.reason}`)
+  }
+})
+
+const AUTONOMY_FILE = path.join(os.homedir(), '.noetica', 'autonomy.json')
+// Hydrate the bound autonomy session at boot (parity with containment). The session is set by
+// writing AUTONOMY_FILE ({role, authorizedLevel, evidence}); absent file = autonomy not enforced.
+function loadAutonomy(): void {
+  try {
+    const raw = JSON.parse(fs.readFileSync(AUTONOMY_FILE, 'utf8')) as Partial<AutonomySession>
+    if (raw && typeof raw.role === 'string' && typeof raw.authorizedLevel === 'string') {
+      hydrateAutonomy({ role: raw.role, authorizedLevel: raw.authorizedLevel, evidence: Array.isArray(raw.evidence) ? raw.evidence : [] })
+      console.log(`[autonomy] session bound from disk — role=${raw.role} level=${raw.authorizedLevel} (gate active)`)
+    }
+  } catch { /* no prior session — autonomy not enforced (backward compatible) */ }
+}
+
 let lastSecurityArmed: boolean | null = null
 function writeSecurityState(armed: boolean): void {
   if (armed === lastSecurityArmed) return  // only write on transition
@@ -4176,6 +4210,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
           recordTrajectory: (calls) => recordTrajectory(calls),
           coerceToolInput,
           onDelta: (t) => { liveContent += t },
+          autonomyGate,
         })
         fullContent += ollamaResult.content
         fullThinking += ollamaResult.thinking
@@ -4238,6 +4273,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
         recordTrajectory: (calls) => recordTrajectory(calls),
         coerceToolInput,
         onDelta: (t) => { liveContent += t },
+        autonomyGate,
       })
       fullContent += anthropicResult.content
       fullThinking += anthropicResult.thinking
@@ -4303,6 +4339,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
         recordTrajectory: (calls) => recordTrajectory(calls),
         coerceToolInput,
         onDelta: (t) => { liveContent += t },
+        autonomyGate,
       })
       fullContent += oaiResult.content
       fullThinking += oaiResult.thinking
@@ -8724,6 +8761,7 @@ server.listen(PORT, '127.0.0.1', () => {
   const finishBoot = () => {
     loadLearningState()
     loadContainment()
+    loadAutonomy()
     booted = true // teardown() may now persist learning state on exit
     recordTrendSnapshot() // capture/refresh today's point on boot
     // Embed-model preflight: document RAG depends on the embedding model. Warn loudly
