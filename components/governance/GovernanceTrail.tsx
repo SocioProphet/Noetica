@@ -49,6 +49,31 @@ export function GovernanceTrail({ trace }: GovernanceTrailProps) {
         <dd className="break-all font-mono">{trace.run_id}</dd>
         <dt className="text-[var(--color-text-tertiary)]">model</dt>
         <dd>{trace.model_routed}</dd>
+        {trace.model_route_reason && (
+          <>
+            <dt className="text-[var(--color-text-tertiary)]">route reason</dt>
+            <dd className="text-[10px] leading-4" title={trace.model_route_reason}>
+              {trace.model_route_reason.length > 80 ? trace.model_route_reason.slice(0, 77) + '…' : trace.model_route_reason}
+            </dd>
+          </>
+        )}
+        {(trace.input_tokens || trace.output_tokens) && (
+          <>
+            <dt className="text-[var(--color-text-tertiary)]">cost est.</dt>
+            <dd className="font-mono">
+              {(() => {
+                const prov = (trace.provider ?? '').toLowerCase()
+                const local = prov === '' || prov === 'ollama' || prov === 'noetica' || prov === 'local'
+                if (local) return 'free (local)'
+                const inp = (trace.input_tokens ?? 0) / 1_000_000
+                const out = (trace.output_tokens ?? 0) / 1_000_000
+                // Conservative mid-tier pricing (GPT-4o / Claude Sonnet range)
+                const usd = inp * 2.50 + out * 10.00
+                return `~$${usd < 0.001 ? '<0.001' : usd.toFixed(3)}`
+              })()}
+            </dd>
+          </>
+        )}
         <dt className="text-[var(--color-text-tertiary)]">override</dt>
         <dd>{trace.model_overridden === undefined ? 'n/a' : trace.model_overridden ? 'yes' : 'no'}</dd>
         <dt className="text-[var(--color-text-tertiary)]">provider</dt>

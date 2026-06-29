@@ -85,6 +85,19 @@ function scoreTerms(text: string, terms: string[]) {
   return round2(Math.min(1, hits / 3))
 }
 
+/** Score a single user+assistant text pair [0,1]. Suitable for per-message risk badges. */
+export function scoreMessagePair(userContent: string, assistantContent: string): number {
+  const combined = `${userContent}\n${assistantContent}`.toLowerCase()
+  const dims = [
+    scoreTerms(combined, riskTerms.liability),
+    scoreTerms(combined, riskTerms.attribution),
+    scoreTerms(combined, riskTerms.evidenceQuality),
+    scoreTerms(combined, riskTerms.securityMisuse),
+    scoreTerms(combined, riskTerms.modelUncertainty),
+  ]
+  return round2(dims.reduce((s, d) => s + d, 0) / dims.length)
+}
+
 function summarizeTurn(content: string) {
   const trimmed = content.trim().replace(/\s+/g, ' ')
   if (!trimmed) return 'Current turn'

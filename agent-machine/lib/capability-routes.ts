@@ -194,6 +194,34 @@ export async function handleCapabilityRoute(req: http.IncomingMessage, res: http
         const { reviewCode } = await import('./security-review.js')
         return send(200, await reviewCode(String(b.code ?? ''), { subject: b.subject as string | undefined, model: b.model as string | undefined })), true
       }
+      // ── Risk aversion: per-turn risk score + eval-capture replay ──
+      case 'risk-score': {
+        const userContent = String(b.userContent ?? '')
+        const assistantContent = String(b.assistantContent ?? '')
+        const combined = `${userContent}\n${assistantContent}`.toLowerCase()
+        const riskTerms = {
+          liability: ['liable', 'liability', 'culpable', 'sue', 'lawsuit', 'legal exposure'],
+          attribution: ['who did it', 'responsible party', 'attribution', 'targeted', 'intentional', 'malicious'],
+          evidenceQuality: ['prove', 'proof', 'smoking gun', 'chain of custody', 'hash', 'logs', 'crash'],
+          securityMisuse: ['exploit', 'malware', 'persistence', 'privilege', 'exfiltration', 'implant'],
+          modelUncertainty: ['latent activation', 'circuit', 'neuron', 'gate', 'steering', 'hidden state'],
+        }
+        const scoreTerms = (text: string, terms: string[]) => Math.min(1, terms.filter((t) => text.includes(t)).length / 3)
+        const dims = Object.entries(riskTerms).map(([label, terms]) => ({ label, value: Math.round(scoreTerms(combined, terms) * 100) / 100 }))
+        const aggregate = Math.round((dims.reduce((s, d) => s + d.value, 0) / dims.length) * 100) / 100
+        const level = aggregate >= 0.3 ? 'critical' : aggregate >= 0.2 ? 'hot' : aggregate >= 0.1 ? 'elevated' : aggregate >= 0.04 ? 'nominal' : 'cool'
+        return send(200, { aggregate, level, dimensions: dims }), true
+      }
+      case 'risk-replay': {
+        const fs = await import('node:fs'); const os = await import('node:os'); const path = await import('node:path')
+        const captureFile = path.join(os.homedir(), '.noetica', 'eval-captures', 'user-feedback.jsonl')
+        try {
+          const lines = fs.existsSync(captureFile) ? fs.readFileSync(captureFile, 'utf8').trim().split('\n').filter(Boolean) : []
+          const entries = lines.map((l: string) => { try { return JSON.parse(l) } catch { return null } }).filter(Boolean)
+          const stats = { total: entries.length, up: entries.filter((e: { rating?: string }) => e.rating === 'up').length, down: entries.filter((e: { rating?: string }) => e.rating === 'down').length }
+          return send(200, { stats, recent: entries.slice(-10).reverse() }), true
+        } catch { return send(200, { stats: { total: 0, up: 0, down: 0 }, recent: [] }), true }
+      }
       // ── Office toolkit (LibreOffice) + Porter PaaS ──
       case 'office-detect': {
         const { detectLibreOffice } = await import('./office-toolkit.js')

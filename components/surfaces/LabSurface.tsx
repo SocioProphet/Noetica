@@ -36,6 +36,8 @@ const CAPS: Capability[] = [
   { id: 'swarm-top', label: 'Artifact swarm — most-reused', group: 'Swarm', sample: { k: 10 } },
   { id: 'swarm-rare', label: 'Artifact swarm — rare (under-seeded)', group: 'Swarm', sample: { k: 10 } },
   { id: 'security-review', label: 'Self-harden — local-model security review', group: 'Hardening', sample: { subject: 'snippet.ts', code: 'app.get("/f", (req,res)=>res.sendFile(req.query.path))' } },
+  { id: 'risk-score', label: 'Risk aversion — score a turn', group: 'Hardening', sample: { userContent: 'What proof do you have that the operator is liable for the exploit?', assistantContent: 'I cannot attribute liability without chain of custody evidence.' } },
+  { id: 'risk-replay', label: 'Risk aversion — replay eval captures', group: 'Hardening', sample: {} },
 ]
 
 export function LabSurface() {

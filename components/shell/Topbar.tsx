@@ -1,7 +1,7 @@
 import { NoeticaMark } from '@/components/brand/NoeticaMark'
 import { WarmingLevel } from '@/components/risk/WarmingLevel'
 import { ThemePicker } from '@/components/shell/ThemePicker'
-import { RuntimeStatus } from '@/components/status/RuntimeStatus'
+import { RuntimeStatus, RuntimeStatusDot } from '@/components/status/RuntimeStatus'
 import { EgressMeter } from '@/components/status/EgressMeter'
 import type { RiskAversionLiveReadout } from '@/lib/risk/riskAversionLive'
 import type { VoiceState } from '@/lib/voice/useVoice'
@@ -53,6 +53,7 @@ export function Topbar({ modelId, mode, riskReadout, voiceState, isLive, onLiveS
           above) gives way instead, so nothing overlaps when the rail panels narrow the bar. */}
       <div className="flex shrink-0 items-center gap-2">
         <EgressMeter />
+        <RuntimeStatusDot />
         <RuntimeStatus />
         {/* Mic — push-to-talk dictation (single turn). Stays a mic. */}
         <button

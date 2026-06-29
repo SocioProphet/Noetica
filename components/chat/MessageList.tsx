@@ -2,6 +2,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { MessageBubble } from '@/components/chat/MessageBubble'
+import { OnboardingCard } from '@/components/chat/OnboardingCard'
 import { TypingIndicator } from '@/components/chat/TypingIndicator'
 import { NoeticaMark } from '@/components/brand/NoeticaMark'
 import type { ChatMessage } from '@/lib/types/message'
@@ -104,6 +105,7 @@ export function MessageList({ messages, isStreaming = false, onExtractArtifact, 
   return (
     <div className="relative min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-8">
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
+        <OnboardingCard />
         {messages.map((message, i) => (
           <div key={message.id} className="relative">
             {hasFanout && message.fanout_model && (

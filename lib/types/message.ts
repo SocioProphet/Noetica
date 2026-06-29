@@ -45,6 +45,8 @@ export interface ChatMessage {
   plan?: ExecutionPlan
   /** Complexity discipline trace — posture/strategy/barriers for this turn */
   discipline?: DisciplineTrace
+  /** Per-message risk pressure score [0,1] from riskAversionLive */
+  risk_score?: number
   /** Glossary-grounded NLU: domain + topics + terms recognized in the turn */
   grounding?: GroundingTrace
   /** The announcer's plain-language narration of what the agent is doing, per stage */

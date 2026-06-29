@@ -14,6 +14,37 @@ const badgeClassByStatus: Record<NoeticaServiceCapabilityStatus | 'loading' | 'e
   loading:        'border-[var(--color-border-secondary)] bg-[var(--color-background-secondary)] text-[var(--color-text-secondary)]',
 }
 
+/** Compact always-visible status dot for narrow viewports. */
+export function RuntimeStatusDot() {
+  const [state, setState] = useState<NoeticaStatusState>({ state: 'loading' })
+
+  useEffect(() => {
+    let cancelled = false
+    const poll = () => {
+      loadNoeticaStatus()
+        .then((s) => { if (!cancelled) setState({ state: 'ready', status: s }) })
+        .catch(() => { if (!cancelled) setState((prev) => prev.state === 'ready' ? prev : { state: 'error', error: 'offline' }) })
+    }
+    poll()
+    const id = setInterval(poll, 10_000)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [])
+
+  const dot = state.state === 'error' ? 'bg-[#dc2626]'
+    : state.state === 'loading' ? 'bg-[var(--color-text-tertiary)] animate-pulse'
+    : state.status?.provider === 'not_configured' ? 'bg-[#d97706]'
+    : 'bg-[#16a34a]'
+  const label = state.state === 'error' ? 'Offline'
+    : state.state === 'loading' ? 'Connecting…'
+    : state.status ? `${state.status.provider} · ${state.status.endpoint_kind}` : 'Ready'
+
+  return (
+    <span className="xl:hidden flex h-6 w-6 items-center justify-center" title={label}>
+      <span className={`h-2 w-2 rounded-full ${dot}`} aria-label={label} />
+    </span>
+  )
+}
+
 export function RuntimeStatus() {
   const [state, setState] = useState<NoeticaStatusState>({ state: 'loading' })
 

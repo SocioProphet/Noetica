@@ -45,7 +45,7 @@ import { models, visibleModels, defaultModelId } from '@/config/models'
 import { initialMessages } from '@/lib/chat/mockConversation'
 import { matchDialogue, type DialogueForm, type DialogueCommand } from '@/lib/chat/dialogue'
 import { sendNoeticaChat } from '@/lib/client/noeticaTransport'
-import { buildRiskAversionLiveReadout } from '@/lib/risk/riskAversionLive'
+import { buildRiskAversionLiveReadout, scoreMessagePair } from '@/lib/risk/riskAversionLive'
 import { listenTauri, isTauri, invokeTauri } from '@/lib/tauri/bridge'
 import { executeBuiltinToolDirect } from '@/lib/client/anthropicDirect'
 import { useSession } from '@/lib/session/useSession'
@@ -1120,8 +1120,12 @@ export function AppShell() {
                 policy_admitted: result.policy_admitted,
                 policy_profile: settings.defaultPolicyProfile,
               })
+              // Compute per-message risk score from the last user↔assistant pair.
+              const lastUser = messages.filter((m) => m.role === 'user').at(-1)
+              const riskScore = lastUser ? scoreMessagePair(lastUser.content, result.content) : undefined
               updateAssistant(assistantId, {
                 content: result.content,
+                ...(riskScore !== undefined && riskScore > 0 ? { risk_score: riskScore } : {}),
                 governance: {
                   run_id: result.run_id,
                   model_routed: result.model_routed,

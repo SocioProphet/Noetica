@@ -636,6 +636,21 @@ export function MessageBubble({ message, isLast, onExtractArtifact, onRegenerate
             )}
           </div>
         )}
+        {/* Risk pressure badge — shown when score > 0.1 so low-pressure turns stay clean */}
+        {message.content && message.risk_score !== undefined && message.risk_score > 0.1 && (() => {
+          const level = message.risk_score >= 0.3 ? { label: 'risk:critical', dot: '#ef4444', bg: '#fef2f2', border: '#fca5a5', text: '#b91c1c' }
+            : message.risk_score >= 0.2 ? { label: 'risk:hot', dot: '#f97316', bg: '#fff7ed', border: '#fdba74', text: '#c2410c' }
+            : { label: 'risk:elevated', dot: '#facc15', bg: '#fefce8', border: '#fde047', text: '#a16207' }
+          return (
+            <div className="mt-1 flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] w-fit"
+              style={{ borderColor: level.border, background: level.bg, color: level.text }}
+              title={`Risk pressure ${(message.risk_score * 100).toFixed(0)}% — sensitivity/liability terms detected in this turn`}>
+              <span className={`h-1.5 w-1.5 rounded-full ${message.risk_score >= 0.2 ? 'animate-pulse' : ''}`} style={{ background: level.dot }} />
+              {level.label} · {(message.risk_score * 100).toFixed(0)}%
+            </div>
+          )
+        })()}
+
         {message.stopped && (
           <div className="mt-1.5 inline-flex items-center gap-2">
             <span className="inline-flex items-center gap-1 rounded-full border border-[var(--color-border-secondary)] bg-[var(--color-background-secondary)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-text-tertiary)]">
