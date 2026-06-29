@@ -56,7 +56,7 @@ test('stream: yields chunks from provider', async () => {
   const session = new AgentSession({ _provider: prov })
   const chunks: string[] = []
   for await (const chunk of session.stream('go')) {
-    chunks.push(chunk)
+    if (chunk.text) chunks.push(chunk.text)
   }
   assert.ok(chunks.length > 0)
   assert.ok(chunks.join('').includes('a'))
