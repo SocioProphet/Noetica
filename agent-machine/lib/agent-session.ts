@@ -18,6 +18,7 @@
  *   PROPHET_HOSTED_MODEL    Anthropic model for DEEP fallback (default claude-sonnet-4-6)
  */
 import { generateOllamaText, streamOllama } from './ollama.js'
+import { createAttestation, verifyAttestation } from './device-attestation.js'
 
 // ── Reasoning — quality-speed tradeoff levels ─────────────────────────────────
 
@@ -29,8 +30,9 @@ export enum Reasoning {
   SOVEREIGN = 'sovereign', // local-only, zero egress (no fallback even with a key)
 }
 
-/** @deprecated Use Reasoning */
-export { Reasoning as ReasoningLevel }
+/** @deprecated Use Reasoning. Const+type merge so it works as both value and type. */
+export const ReasoningLevel = Reasoning
+export type ReasoningLevel = Reasoning
 
 // ── OllamaProvider ────────────────────────────────────────────────────────────
 
@@ -218,6 +220,7 @@ export interface SessionConfig {
 
 export class AgentSession {
   protected readonly _provider: SessionProvider | undefined
+  protected readonly _reasoning: Reasoning | undefined
   protected readonly _systemPrompt: string | undefined
   protected readonly _model: string | undefined
   protected readonly _maxTokens: number | undefined
@@ -228,6 +231,7 @@ export class AgentSession {
     this._model = config.model
     this._maxTokens = config.maxTokens
     this._temperature = config.temperature
+    this._reasoning = config.reasoning
     if (config._provider) {
       this._provider = config._provider
     } else if (config.reasoning !== undefined) {
@@ -238,6 +242,13 @@ export class AgentSession {
   async respond(prompt: string, opts?: { schema?: OutputSchema }): Promise<string | Record<string, unknown>> {
     if (!this._provider) {
       throw new Error('AgentSession: no provider configured — pass reasoning or _provider in SessionConfig')
+    }
+    if (this._reasoning === Reasoning.SOVEREIGN) {
+      const att = createAttestation()
+      const result = verifyAttestation(att)
+      if (!result.valid) {
+        throw new Error(`SOVEREIGN: device attestation failed: ${result.reason}`)
+      }
     }
     const messages: SessionMessage[] = []
     if (this._systemPrompt) messages.push({ role: 'system', content: this._systemPrompt })
@@ -256,15 +267,13 @@ export class AgentSession {
     return result.content
   }
 
-  async *stream(prompt: string): AsyncGenerator<string> {
+  async *stream(prompt: string): AsyncGenerator<StreamChunk> {
     if (!this._provider) {
       throw new Error('AgentSession: no provider configured — pass reasoning or _provider in SessionConfig')
     }
     const messages: SessionMessage[] = []
     if (this._systemPrompt) messages.push({ role: 'system', content: this._systemPrompt })
     messages.push({ role: 'user', content: prompt })
-    for await (const chunk of this._provider.stream({ messages, maxTokens: this._maxTokens, temperature: this._temperature })) {
-      if (chunk.text) yield chunk.text
-    }
+    yield* this._provider.stream({ messages, maxTokens: this._maxTokens, temperature: this._temperature })
   }
 }
