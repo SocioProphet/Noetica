@@ -8860,7 +8860,8 @@ Question: ${question}`
           const body = JSON.parse(raw) as { token?: unknown; maxAgeMs?: number; expectedNonce?: string }
           if (!body.token) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'token required' })); return }
           const { verifyAttestation } = await import('./lib/device-attest.js')
-          const result = verifyAttestation(body.token as Parameters<typeof verifyAttestation>[0], { maxAgeMs: body.maxAgeMs, expectedNonce: body.expectedNonce })
+          const maxAgeMs = typeof body.maxAgeMs === 'number' ? Math.min(body.maxAgeMs, 60 * 60 * 1000) : undefined
+          const result = verifyAttestation(body.token as Parameters<typeof verifyAttestation>[0], { maxAgeMs, expectedNonce: body.expectedNonce })
           res.writeHead(result.valid ? 200 : 401, { 'content-type': 'application/json' })
           res.end(JSON.stringify(result))
           return
