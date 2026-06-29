@@ -102,8 +102,6 @@ import {
   type GaiaObservationPayload, type BeliefSynthesis,
 } from './lib/gaia.js'
 import { getUserIdentity, setUserIdentity, promptUserName, type UserIdentity } from './lib/identity.js'
-import { detectMemoryPoisonAttempt } from './lib/memory-poison-guard.js'
-import { markExternalContent, buildIpiSystemPromptPrefix, stripPotentialInjection } from './lib/ipi-datamark.js'
 
 // ─── JS-sandbox subprocess mode (code_execute isolation on the compiled standalone) ────────────────────────
 // When the compiled binary re-execs ITSELF with NOETICA_JS_SANDBOX=1, do ONLY the sandboxed JS run — in this
@@ -1719,10 +1717,7 @@ async function executeTool(
       const { sanitizeRetrieved } = await import('./lib/rag-trust.js')
       const { clean, stripped } = sanitizeRetrieved(raw)
       if (stripped > 0) console.warn(`[rag-trust] neutralized ${stripped} injected directive(s) in web_search results`.replace(/[\r\n]/g, ''))
-      // IPI defence: strip injection phrases then sandbox with datamark boundaries.
-      const { content: ipiClean, stripped: ipiStripped } = stripPotentialInjection(clean)
-      if (ipiStripped.length > 0) console.warn('[security] ipi-datamark stripped injection phrase(s) from web_search', { count: ipiStripped.length })
-      return markExternalContent(ipiClean, `web_search:${query.slice(0, 80)}`)
+      return clean
     }
     case 'generate_image': {
       const prompt = String(input['prompt'] ?? '').trim().slice(0, 1000)
@@ -1877,11 +1872,6 @@ async function executeTool(
       const content = String(input['content'] ?? '').trim()
       if (!content) return 'Error: nothing to remember — content is required.'
       const kind = ['preference', 'fact', 'identity'].includes(String(input['kind'])) ? String(input['kind']) : 'fact'
-      // Security: audit for memory-poisoning attempts before writing (OWASP ASI06).
-      const poisonCheck = detectMemoryPoisonAttempt(content)
-      if (poisonCheck.flagged) {
-        console.warn('[security] memory-poison attempt detected', { confidence: poisonCheck.confidence, patterns: poisonCheck.patterns })
-      }
       try {
         // Dedup-on-write: don't store a near-duplicate of something already remembered.
         const { findSimilarMemory, findConflictingMemory, listMemories } = await import('./lib/memory-curation.js')
@@ -3777,11 +3767,8 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
   const DOC_INTENTS = new Set(['qa_over_doc', 'summarize_doc', 'file_ops', 'file_ingest'])
   const knowledgeDirective = DOC_INTENTS.has(intentPlan.name) ? '' :
     `\n\n=== ANSWER POLICY (highest priority) ===\nAny context above is OPTIONAL background — it is NOT the set of allowed facts. Answer the user's question directly. For general knowledge (history, geography, science, public events), answer from YOUR OWN knowledge. NEVER say "not in the provided documents/sources" or "consult an external source" for a fact you know. Only say you don't know if you genuinely don't.`
-  // IPI prefix: when this turn may fetch external web content, prepend the sandboxing instruction so
-  // the model knows to treat [EXTERNAL CONTENT] markers as data boundaries, not commands.
-  const ipiPrefix = intentToolSet.has('web_search') ? buildIpiSystemPromptPrefix() + '\n\n' : ''
   // merged: ours prepends learner/canon context after dateLine; main appends the knowledge + think directives.
-  const enrichedSystemPrompt = ipiPrefix + basePrompt + dateLine + learnerContext + canonGroundContext + fabricContext + groundingContext + qaContext + graphContext + selfContext + moatContext + memoryContext + episodeContext + goalContext + skillsContext + reasoningDirective + verbosityNote + modeNote + lifeDomain.safetyNote + profile.authorizationSuffix + knowledgeDirective + thinkDirective
+  const enrichedSystemPrompt = basePrompt + dateLine + learnerContext + canonGroundContext + fabricContext + groundingContext + qaContext + graphContext + selfContext + moatContext + memoryContext + episodeContext + goalContext + skillsContext + reasoningDirective + verbosityNote + modeNote + lifeDomain.safetyNote + profile.authorizationSuffix + knowledgeDirective + thinkDirective
 
   // Token budget: rough estimate (4 chars ≈ 1 token). If message history + system prompt
   // exceeds 70% of the model's context window, trim oldest non-system messages.
@@ -4956,38 +4943,6 @@ const server = http.createServer((req, res) => {
       const limit = Math.max(1, Math.min(1000, Number(url.searchParams.get('limit')) || 200))
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ decisions: readRoutingLog(limit) }))
-    })()
-    return
-  }
-
-  // GET /api/brain/financial — financial-services plugin skill catalog and HellGraph projection status.
-  // Returns the 7 financial domains and 30+ skills projected from SocioProphet/financial-services.
-  if (req.method === 'GET' && url.pathname === '/api/brain/financial') {
-    void (async () => {
-      const { financialSkillCatalog } = await import('./lib/financial-brain.js')
-      const { getHellGraph } = await import('@socioprophet/hellgraph')
-      const g = getHellGraph()
-      const domains = g.nodesByLabel('FinancialDomain').length
-      const skills = g.nodesByLabel('FinancialSkill').length
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ projected: skills > 0, domains, skills, catalog: financialSkillCatalog() }))
-    })()
-    return
-  }
-
-  // GET /api/brain/sloan — MIT Sloan Management brain status: fields and courses projected into HellGraph.
-  if (req.method === 'GET' && url.pathname === '/api/brain/sloan') {
-    void (async () => {
-      const { getHellGraph } = await import('@socioprophet/hellgraph')
-      const g = getHellGraph()
-      const fields = g.nodesByLabel('SloanField').length
-      const courses = g.nodesByLabel('SloanCourse').length
-      const courseNodes = g.nodesByLabel('SloanCourse').map((n) => {
-        const p = (n as unknown as { properties?: Record<string, unknown> }).properties ?? {}
-        return { code: String(p['code'] ?? ''), title: String(p['name'] ?? ''), field: String(p['field'] ?? '') }
-      })
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ projected: courses > 0, fields, courses: courses, catalog: courseNodes }))
     })()
     return
   }
@@ -7160,14 +7115,6 @@ Question: ${question}`
   // Out-LOOP, not out-model: generate → run the verifier → on fail, feed the error back and
   // repair, up to a budget. A small local model in this loop beats a big model one-shot because
   // code is verifiable and errors are recoverable. Returns the full step trace (the narration).
-  // ── Verify-repair coding loop ───────────────────────────────────────────────
-  // Out-LOOP, not out-model. Phases:
-  //   0. Sprint contract — generate binary criteria + shell test commands BEFORE coding
-  //   1. Progress file — read prior-session state ("shift handoff") so multi-turn jobs continue
-  //   2. Coding loop — generate → write → verify → repair (up to maxAttempts)
-  //   3. Sovereign escalation — frontier fallback when local model exhausts its budget
-  //   4. Convergent eval-repair — adversarial evaluator grades contract, repairs failures in a loop
-  //   5. Progress file write — persist state for the NEXT session
   if (req.method === 'POST' && url.pathname === '/api/code/solve') {
     let body = ''
     req.on('data', (c: Buffer) => { body += c.toString() })
@@ -7179,45 +7126,23 @@ Question: ${question}`
       const wsName = (String(p.workspace ?? 'solve').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 40)) || 'solve'
       const ws = path.join(os.homedir(), '.noetica', 'workspaces', wsName)
       try { fs.mkdirSync(ws, { recursive: true }) } catch { /* */ }
-
-      // Phase 1: Progress file — read prior-session state for cross-turn continuity.
-      const progressFile = path.join(ws, 'claude-progress.json')
-      let priorProgress: { task?: string; files?: string[]; findings?: string[]; lastOutput?: string; contract?: { criteria: string[]; testCommands: string[] } } | null = null
-      try { if (fs.existsSync(progressFile)) priorProgress = JSON.parse(fs.readFileSync(progressFile, 'utf8')) } catch { /* */ }
-      const priorBlock = priorProgress
-        ? `\n\nPRIOR SESSION STATE:\nTask: ${priorProgress.task ?? '(unknown)'}\nFiles on disk: ${(priorProgress.files ?? []).join(', ')}\nLast verify output: ${(priorProgress.lastOutput ?? '').slice(0, 400)}${priorProgress.findings?.length ? `\nOpen QA findings to fix:\n${priorProgress.findings.map((f, i) => `${i + 1}. ${f}`).join('\n')}` : ''}`
-        : ''
-
       const maxAttempts = Math.min(6, Math.max(1, Number(p.max_attempts ?? 4)))
       const model = String(p.model ?? 'qwen2.5-coder:7b')
-      const gen = (prompt: string, temperature: number) =>
-        generateOllamaText({ model, messages: [{ role: 'user', content: prompt }], temperature }).then((r) => r.content)
-
-      // Compounding loop (select): pull proven solutions as few-shot so the agent reuses
-      // what already worked instead of re-deriving from scratch.
+      // Compounding loop (select): pull the most-similar PROVEN solutions and inject them as
+      // few-shot, so the agent reuses what already worked instead of re-deriving from scratch.
       const { retrieveSimilar, fewShot, recordSolve, recordVerified } = await import('./lib/solution-memory.js')
       const memory = await retrieveSimilar(task, 2).catch(() => [])
       const memBlock = fewShot(memory)
       const usedMemory = memory.length > 0
-
-      // Phase 0: Sprint contract — generate binary criteria + shell test commands.
-      // Reuse from prior session if present (contract is stable across turns for the same task).
-      const { generateContract, contractBlock } = await import('./lib/sprint-contract.js')
-      const contract = priorProgress?.contract
-        ?? await generateContract(task, gen).catch(() => ({ criteria: [] as string[], testCommands: [] as string[] }))
-
-      const SYS = 'You are a coding agent. Solve the task by writing files and ONE verification command that exits 0 only if the solution is correct (e.g. runs a test). Respond with ONLY a JSON object, no prose and no markdown fences:\n{"files":[{"path":"rel/path.ext","content":"..."}],"verify":"shell command"}\nUse tools available on the machine (python3, node). Paths are relative to the project root.'
-        + (memBlock ? `\n\n${memBlock}` : '')
-        + contractBlock(contract)
-
+      const SYS = 'You are a coding agent. Solve the task by writing files and ONE verification command that exits 0 only if the solution is correct (e.g. runs a test). Respond with ONLY a JSON object, no prose and no markdown fences:\n{"files":[{"path":"rel/path.ext","content":"..."}],"verify":"shell command"}\nUse tools available on the machine (python3, node). Paths are relative to the project root.' + (memBlock ? `\n\n${memBlock}` : '')
       const steps: Array<{ attempt: number; verify: string; exit: string; ok: boolean; files: string[]; output: string }> = []
       let solvedFiles: { path: string; content: string }[] = []; let solvedVerify = ''
+      // Capture each touched file's ORIGINAL content the first time we write it, so the UI can
+      // show a real diff and the user can reject (revert) a file back to its pre-solve state.
       const touched = new Map<string, string | null>()
       let prior = '', solved = false
-
-      // Phase 2: Coding loop — generate → write → verify → repair.
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        const user = attempt === 1 ? `Task: ${task}${priorBlock}` : `Task: ${task}\n\nYour previous attempt FAILED:\n${prior}\nFix the code. Respond with the same JSON format.`
+        const user = attempt === 1 ? `Task: ${task}` : `Task: ${task}\n\nYour previous attempt FAILED:\n${prior}\nFix the code. Respond with the same JSON format.`
         let content = ''
         try { ({ content } = await generateOllamaText({ model, messages: [{ role: 'system', content: SYS }, { role: 'user', content: user }], temperature: attempt === 1 ? 0.2 : 0.55 })) }
         catch { steps.push({ attempt, verify: '', exit: 'gen_error', ok: false, files: [], output: 'generation error' }); break }
@@ -7237,8 +7162,9 @@ Question: ${question}`
         if (ok) { solved = true; solvedFiles = sol.files; solvedVerify = sol.verify; break }
         prior = `Files: ${sol.files.map((f) => f.path).join(', ')}\nVerify: ${sol.verify}\nExit: ${code}\nOutput:\n${output.slice(-1500)}`
       }
-
-      // Phase 3: Sovereign escalation — frontier fallback when local model exhausts its budget.
+      // prophet-cloud-mesh escape hatch: the local loop exhausted its budget unsolved. If a
+      // sovereign tier is configured (NOETICA_SOVEREIGN_URL), escalate ONE attempt to it —
+      // frontier-parity on your own infra. No-op (and zero cost) when the tier isn't armed.
       let escalated = false
       if (!solved) {
         const esc = await generateSovereign({
@@ -7268,77 +7194,19 @@ Question: ${question}`
         }
       }
 
-      // Per-file diffs so the workspace can render an apply/reject review.
+      // Per-file diffs (original vs final-on-disk) so the workspace can render an apply/reject review.
       const diffs = [...touched.entries()].map(([rel, before]) => {
         const fp = path.resolve(ws, rel)
         let after: string | null = null
         try { if (fs.existsSync(fp)) after = fs.readFileSync(fp, 'utf8') } catch { /* */ }
         return { path: rel, before, after, isNew: before === null }
       })
-
-      // Phase 4: Convergent eval-repair loop.
-      // The adversarial evaluator runs contract test commands for binary pass/fail, then
-      // repairs on failures — looping until the contract is fully satisfied or budget exhausted.
-      // This is the separator between "passes its own test" and "actually done".
-      let evalResult: import('./lib/evaluator.js').EvaluationResult | null = null
-      if (solved && solvedFiles.length) {
-        const { evaluateCode } = await import('./lib/evaluator.js')
-        const evalDeps = {
-          generate: gen,
-          run: (command: string, cwd: string, timeoutMs: number) => runInWorkspace(command, cwd, timeoutMs),
-        }
-        const MAX_EVAL_ROUNDS = 3
-        for (let evalRound = 0; evalRound < MAX_EVAL_ROUNDS; evalRound++) {
-          evalResult = await Promise.race([
-            evaluateCode(task, ws, solvedFiles, steps.at(-1)?.output ?? '', evalDeps, contract),
-            new Promise<null>((resolve) => setTimeout(() => resolve(null), 45_000)),
-          ]).catch(() => null)
-          if (!evalResult || evalResult.pass) break
-          if (evalRound >= MAX_EVAL_ROUNDS - 1) break
-
-          // Targeted repair: feed only the failing criteria back; don't ask for a full rewrite.
-          const repairContext = `The solution passes its own tests but the QA evaluator found these failures:\n${evalResult.findings.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\nFix ONLY these issues. Do not rewrite working parts. Same JSON format.`
-          let repairContent = ''
-          try { ({ content: repairContent } = await generateOllamaText({ model, messages: [{ role: 'system', content: SYS }, { role: 'user', content: `Task: ${task}\n\n${repairContext}` }], temperature: 0.3 })) } catch { break }
-          const repairSol = parseSolveOutput(repairContent)
-          if (!repairSol) break
-          for (const f of repairSol.files) {
-            const rel = f.path.replace(/^\/+/, '')
-            const fp = path.resolve(ws, rel)
-            if (!fp.startsWith(ws + path.sep) && fp !== ws) continue
-            if (!touched.has(rel)) { try { touched.set(rel, fs.existsSync(fp) ? fs.readFileSync(fp, 'utf8') : null) } catch { touched.set(rel, null) } }
-            try { fs.mkdirSync(path.dirname(fp), { recursive: true }); fs.writeFileSync(fp, f.content) } catch { /* */ }
-          }
-          const { out: ro, err: re, code: rc } = await runInWorkspace(repairSol.verify, ws, 60_000)
-          const repairOk = rc === '0'
-          steps.push({ attempt: steps.length + 1, verify: repairSol.verify, exit: rc, ok: repairOk, files: repairSol.files.map((f) => f.path), output: `[eval-repair:${evalRound + 1}] ${`${ro}${re ? `\n${re}` : ''}`.trim()}`.slice(-1200) })
-          if (repairOk) { solvedFiles = repairSol.files; solvedVerify = repairSol.verify } else break
-        }
-      }
-
-      // Compounding loop (memory + measure): log outcome for the quality curve; persist verified
-      // solution into the retrieval corpus so future similar tasks reuse it.
+      // Compounding loop (memory + measure): log this outcome for the quality curve, and persist
+      // the VERIFIED solution into the retrieval corpus so future similar tasks reuse it.
       recordSolve({ task, solved, attempts: steps.length, escalated, model, usedMemory })
       if (solved && solvedFiles.length) { void recordVerified(task, solvedFiles, solvedVerify).catch(() => {}) }
-
-      // Phase 5: Write progress file — "shift handoff" for the next session.
-      // Persists the contract so it isn't regenerated, and open findings so the next
-      // generator knows exactly what still needs to be fixed.
-      try {
-        fs.writeFileSync(progressFile, JSON.stringify({
-          lastUpdated: new Date().toISOString(),
-          task, solved, attempts: steps.length,
-          files: [...touched.keys()],
-          verifyCmd: solvedVerify,
-          lastOutput: steps.at(-1)?.output?.slice(-800) ?? '',
-          contract,
-          findings: evalResult?.findings ?? [],
-          score: evalResult?.score ?? null,
-        }, null, 2))
-      } catch { /* progress file is best-effort */ }
-
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ solved, workspace: wsName, attempts: steps.length, steps, diffs, escalated, usedMemory, contract, evaluation: evalResult }))
+      res.end(JSON.stringify({ solved, workspace: wsName, attempts: steps.length, steps, diffs, escalated, usedMemory }))
     })() })
     return
   }
