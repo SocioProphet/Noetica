@@ -59,3 +59,13 @@ test('unrecognized license fails closed → segmented', () => {
   assert.equal(p.license.type, 'unknown')
   assert.equal(evaluatePdor(p, [], { commons: true }).brainEligible, false)
 })
+
+test('parseCcLicense fails CLOSED on non-CC strings that merely contain "zero" or "by"', () => {
+  // the review-flagged leaks: must NOT promote to a brain-eligible CC license
+  assert.equal(parseCcLicense('Created by John Doe'), 'unknown')
+  assert.equal(parseCcLicense('Distributed by O’Reilly'), 'unknown')
+  assert.equal(parseCcLicense('Zero-Clause BSD'), 'unknown')
+  assert.equal(parseCcLicense('ZeroSSL License'), 'unknown')
+  // and they never reach the brain
+  assert.equal(evaluatePdor(ocwResourceToPdor({ course: 'x', title: 't', license: 'Created by John Doe' }), [], { commons: true }).brainEligible, false)
+})

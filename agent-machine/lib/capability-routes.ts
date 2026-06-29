@@ -465,7 +465,7 @@ export async function handleCapabilityRoute(req: http.IncomingMessage, res: http
         let characterization = undefined, enrichment = undefined
         const content = (b.resource && typeof (b.resource as Record<string, unknown>).content === 'string') ? (b.resource as Record<string, string>).content : undefined
         if (decision.ingestKey) {
-          const table = typeof b.csv === 'string' ? parseDelimited(b.csv) : null
+          const table = typeof b.csv === 'string' ? parseDelimited(b.csv, typeof b.delim === 'string' ? b.delim : ',') : (b.table ?? null)
           if (table && Array.isArray(table.header)) characterization = characterize(table)
           if (content) enrichment = await synapseEnrich(content, { filename: (b.resource as Record<string, string>).course }, defaultSynapseTransport())
         }

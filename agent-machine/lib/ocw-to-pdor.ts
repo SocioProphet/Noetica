@@ -27,13 +27,16 @@ export interface OcwResource {
 /** Parse an OCW/CC license string (label or URL) → LicenseType. Order matters: check the most-specific first. */
 export function parseCcLicense(raw: string): LicenseType {
   const s = (raw || '').toLowerCase().replace(/[\s_]+/g, '-')
-  if (/cc0|public-?domain|publicdomain|zero/.test(s)) return 'cc0'
-  if (/by-nc-sa/.test(s)) return 'cc-by-nc-sa'
-  if (/by-nc-nd/.test(s)) return 'cc-by-nc-nd'
-  if (/by-nc/.test(s)) return 'cc-by-nc'
-  if (/by-sa/.test(s)) return 'cc-by-sa'
-  if (/by-nd/.test(s)) return 'cc-by-nd'
-  if (/\bby\b|licenses\/by\/|cc-by/.test(s)) return 'cc-by'
+  // Require a CC context throughout (cc0 / publicdomain, or a `cc`/`licenses/` prefixed `by-*`) — a bare word
+  // like "zero" (Zero-Clause BSD) or "by" (Created by John Doe) must NOT promote to a brain-eligible CC license.
+  if (/cc0|public-?domain|publicdomain/.test(s)) return 'cc0'
+  const cc = /(^|[-/])cc-?|licenses\//   // a CC marker must be present before a by-* clause
+  if (cc.test(s) && /by-nc-sa/.test(s)) return 'cc-by-nc-sa'
+  if (cc.test(s) && /by-nc-nd/.test(s)) return 'cc-by-nc-nd'
+  if (cc.test(s) && /by-nc/.test(s)) return 'cc-by-nc'
+  if (cc.test(s) && /by-sa/.test(s)) return 'cc-by-sa'
+  if (cc.test(s) && /by-nd/.test(s)) return 'cc-by-nd'
+  if (/(^|[-/])cc-?by([-/]|$)|licenses\/by\//.test(s)) return 'cc-by'
   return 'unknown'   // unrecognized → fail-closed (the gate will segment it)
 }
 
