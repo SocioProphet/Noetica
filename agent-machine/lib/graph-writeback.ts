@@ -26,6 +26,10 @@ const MAX_PROPOSALS = 5000
 const okId = (s: string) => typeof s === 'string' && s.length > 0 && s.length <= 256 && !/[\r\n\t\0]/.test(s)
 const okRel = (s: string) => typeof s === 'string' && s.length > 0 && s.length <= 64 && /^[\w .:/<>-]+$/.test(s)
 
+// The ONLY node-attribute payload keys an add-node proposal may carry onto the node (a constant allow-list, so
+// the persistor never writes a user-controlled property name). Covers the Commons catalog asset + PDOR record.
+const FORWARD_PROPS = ['tier', 'openness', 'brainEligible', 'segmented', 'license', 'quality', 'rows', 'cols', 'hasPII', 'hasGeo', 'hasTemporal', 'requester', 'intent', 'status'] as const
+
 /** Persist ACCEPTED proposals into HellGraph. Idempotent + provenance-tagged + input-validated + bounded. */
 export function persistProposals(proposals: GraphProposal[], opts: { store?: WritableGraph; now?: string } = {}): WriteResult {
   const g = opts.store ?? (getGraph() as unknown as WritableGraph)
@@ -41,14 +45,12 @@ export function persistProposals(proposals: GraphProposal[], opts: { store?: Wri
         if (!okId(id)) { skipped++; details.push({ ref: id || '?', op: p.op, status: 'invalid-id' }); continue }
         if (g.getNode(id)) { skipped++; details.push({ ref: id, op: p.op, status: 'exists' }); continue }
         const kind = String(p.payload['kind'] ?? 'Concept').slice(0, 64).replace(/[^\w-]/g, '') || 'Concept'
-        // Forward any extra payload props (e.g. brainEligible/segmented/tier/quality on a catalog asset node)
-        // onto the node, minus the structural keys handled here. Additive — callers that set no extras are
-        // unchanged. label falls back to name (some builders set `name`) then the id.
-        // SECURITY: proposal payloads can originate from a request body (proposals-apply), so the prototype-
-        // pollution keys are excluded and `extra` is null-prototype — blocks js/remote-property-injection.
-        const RESERVED = new Set(['id', 'node', 'kind', 'label', 'name', '__proto__', 'constructor', 'prototype'])
-        const extra: Record<string, unknown> = Object.create(null)
-        for (const [k, v] of Object.entries(p.payload)) if (!RESERVED.has(k)) extra[k] = v
+        // Forward a FIXED ALLOW-LIST of node attributes (e.g. the catalog asset's brainEligible/segmented/tier/
+        // quality). The write key comes from the constant FORWARD_PROPS set — NEVER from the payload's own keys —
+        // so there is no user-controlled property-name write (closes js/remote-property-injection + prototype
+        // pollution). Additive: callers that set none of these are unchanged. label falls back to name then id.
+        const extra: Record<string, unknown> = {}
+        for (const k of FORWARD_PROPS) if (Object.prototype.hasOwnProperty.call(p.payload, k)) extra[k] = p.payload[k]
         g.addNode(id, [kind], { label: String(p.payload['label'] ?? p.payload['name'] ?? id).slice(0, 512), epistemic: 'proposed', source: p.source ?? 'agent', rationale: p.rationale, created_at: now, ...extra })
         written++; details.push({ ref: id, op: p.op, status: 'written' })
       } else if (p.op === 'add-edge') {
