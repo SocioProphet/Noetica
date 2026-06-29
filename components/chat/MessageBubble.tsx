@@ -334,13 +334,15 @@ type MessageBubbleProps = {
   onEdit?: (messageId: string, newContent: string) => void
   onSpeak?: (content: string) => void
   onQuickPrompt?: (text: string) => void
+  onFeedback?: (messageId: string, rating: 'up' | 'down') => void
 }
 
-export function MessageBubble({ message, isLast, onExtractArtifact, onRegenerate, onResume, onFork, onEdit, onSpeak, onQuickPrompt }: MessageBubbleProps) {
+export function MessageBubble({ message, isLast, onExtractArtifact, onRegenerate, onResume, onFork, onEdit, onSpeak, onQuickPrompt, onFeedback }: MessageBubbleProps) {
   const isUser = message.role === 'user'
   const [extracted, setExtracted] = useState(false)
   const [copied, setCopied] = useState(false)
   const [editing, setEditing] = useState(false)
+  const [feedbackGiven, setFeedbackGiven] = useState<'up' | 'down' | null>(null)
   const [editContent, setEditContent] = useState(message.content)
   const editRef = useRef<HTMLTextAreaElement>(null)
 
@@ -564,6 +566,28 @@ export function MessageBubble({ message, isLast, onExtractArtifact, onRegenerate
                 Speak
               </button>
             )}
+            {onFeedback && (
+              <span className="ml-1 flex items-center gap-0.5 border-l border-[var(--color-border-tertiary)] pl-2">
+                <button
+                  onClick={() => { setFeedbackGiven('up'); onFeedback(message.id, 'up') }}
+                  title="Good answer"
+                  className={`rounded p-1 text-[11px] transition ${feedbackGiven === 'up' ? 'text-[#16a34a]' : 'text-[var(--color-text-tertiary)] hover:text-[#16a34a]'}`}
+                >
+                  <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden>
+                    <path d="M5.5 1.5l1.3 3H10l-2.6 1.9 1 3L5.5 7.6 3.1 9.4l1-3L1.5 4.5h3.2L5.5 1.5z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" fill={feedbackGiven === 'up' ? 'currentColor' : 'none'}/>
+                  </svg>
+                </button>
+                <button
+                  onClick={() => { setFeedbackGiven('down'); onFeedback(message.id, 'down') }}
+                  title="Poor answer"
+                  className={`rounded p-1 text-[11px] transition ${feedbackGiven === 'down' ? 'text-[#dc2626]' : 'text-[var(--color-text-tertiary)] hover:text-[#dc2626]'}`}
+                >
+                  <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden>
+                    <path d="M2 2h1.5v5H2V2zM5.5 2h.5l2 3.5L6.5 9H4l1-3H3.5L5.5 2z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" fill={feedbackGiven === 'down' ? 'currentColor' : 'none'}/>
+                  </svg>
+                </button>
+              </span>
+            )}
           </div>
         )}
 
@@ -581,9 +605,12 @@ export function MessageBubble({ message, isLast, onExtractArtifact, onRegenerate
               )
             })()}
             {message.governance.model_routed && (
-              <span className="flex items-center gap-1">
+              <span className="flex items-center gap-1" title={message.governance.model_route_reason || undefined}>
                 <span className="inline-block h-1.5 w-1.5 rounded-full bg-[#22c55e]" />
                 {message.governance.model_routed}
+                {message.governance.model_route_reason && (
+                  <span className="text-[var(--color-text-tertiary)]" aria-hidden>ⓘ</span>
+                )}
               </span>
             )}
             {message.governance.method && (() => {

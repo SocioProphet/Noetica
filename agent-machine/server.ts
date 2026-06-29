@@ -3055,6 +3055,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
     governance: {
       run_id,
       model_routed: model,
+      model_route_reason: routerDecision.rationale ?? '',
       provider,
       policy_admitted: true,
       memory_written: false,
@@ -6002,6 +6003,41 @@ Question: ${question}`
     const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '50', 10), CONTRADICTION_RING_SIZE)
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ contradictions: _contradictions.slice(-limit).reverse(), total: _contradictions.length }))
+    return
+  }
+
+  // POST /api/learning/feedback — user thumbs up/down on a specific message.
+  // Body: { messageId, rating: 'up'|'down', sessionId? }
+  // Translates to a bandit reward signal (up=1, down=0) and persists the eval capture.
+  if (req.method === 'POST' && url.pathname === '/api/learning/feedback') {
+    setCORSHeaders(res)
+    let body = ''
+    req.on('data', (chunk: Buffer) => { body += chunk.toString() })
+    req.on('end', () => {
+      try {
+        const f = JSON.parse(body) as { messageId?: string; rating?: 'up' | 'down'; sessionId?: string }
+        if (!f.messageId || (f.rating !== 'up' && f.rating !== 'down')) {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'messageId and rating required' }))
+          return
+        }
+        const reward = f.rating === 'up' ? 1 : 0
+        // Feed bandit with explicit user signal (task=general since message context unavailable here)
+        recordReward({ task: 'general', provider: 'ollama', model: 'unknown', reward })
+        // Persist as an eval capture for the learning loop replay
+        try {
+          const captureDir = path.join(os.homedir(), '.noetica', 'eval-captures')
+          fs.mkdirSync(captureDir, { recursive: true })
+          const record = { ts: new Date().toISOString(), messageId: f.messageId, sessionId: f.sessionId, rating: f.rating, reward }
+          fs.appendFileSync(path.join(captureDir, 'user-feedback.jsonl'), JSON.stringify(record) + '\n')
+        } catch { /* persistence best-effort */ }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: true }))
+      } catch {
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: 'invalid body' }))
+      }
+    })
     return
   }
 
