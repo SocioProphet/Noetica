@@ -183,10 +183,11 @@ export function createBroker(config: BrokerConfig, stores?: Partial<BrokerStores
       }
       if (!params.pseudonym || !params.public_key || !params.signature)
         return err(400, "pseudonym, public_key, and signature required");
-      // Enforce did:key:z + base64url(pubkey) format — matches sovereign-id.ts and verifyCredential.
-      // Blocks TOFU enrollment of malformed pseudonyms that would create orphan credentials.
-      if (!params.pseudonym.startsWith("did:key:z"))
-        return err(400, "invalid_request: pseudonym must be did:key:z<base64url-pubkey>");
+      // Enforce pseudonym === "did:key:z" + public_key — matches verifyCredential's exact check.
+      // A prefix-only check (startsWith) would let a client supply a valid key under a fabricated
+      // pseudonym, creating an orphan credential that breaks did:key resolution and audit trails.
+      if (params.pseudonym !== "did:key:z" + params.public_key)
+        return err(400, "invalid_request: pseudonym must be did:key:z<base64url(public_key)>");
 
       // Payload signed by the browser: challenge:authNonce
       if (!verifyEd25519(params.public_key, `${pending.challenge}:${params.auth_nonce}`, params.signature))
