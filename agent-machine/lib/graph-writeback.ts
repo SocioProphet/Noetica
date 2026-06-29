@@ -44,8 +44,10 @@ export function persistProposals(proposals: GraphProposal[], opts: { store?: Wri
         // Forward any extra payload props (e.g. brainEligible/segmented/tier/quality on a catalog asset node)
         // onto the node, minus the structural keys handled here. Additive — callers that set no extras are
         // unchanged. label falls back to name (some builders set `name`) then the id.
-        const RESERVED = new Set(['id', 'node', 'kind', 'label', 'name'])
-        const extra: Record<string, unknown> = {}
+        // SECURITY: proposal payloads can originate from a request body (proposals-apply), so the prototype-
+        // pollution keys are excluded and `extra` is null-prototype — blocks js/remote-property-injection.
+        const RESERVED = new Set(['id', 'node', 'kind', 'label', 'name', '__proto__', 'constructor', 'prototype'])
+        const extra: Record<string, unknown> = Object.create(null)
         for (const [k, v] of Object.entries(p.payload)) if (!RESERVED.has(k)) extra[k] = v
         g.addNode(id, [kind], { label: String(p.payload['label'] ?? p.payload['name'] ?? id).slice(0, 512), epistemic: 'proposed', source: p.source ?? 'agent', rationale: p.rationale, created_at: now, ...extra })
         written++; details.push({ ref: id, op: p.op, status: 'written' })
