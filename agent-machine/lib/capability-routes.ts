@@ -487,6 +487,28 @@ export async function handleCapabilityRoute(req: http.IncomingMessage, res: http
         const triples = g.allEdges().slice(0, 5000).map((e) => ({ s: e.from, p: e.label, o: e.to }))
         return send(200, { count: triples.length, triples: triples.slice(0, 500) }), true
       }
+      case 'memory-decay': {
+        const { salience, decayRank, pruneToBudget } = await import('./memory-decay.js')
+        const mems = (b.memories ?? []) as Array<{ id: string; createdAt: number; lastAccess?: number; accessCount?: number; importance?: number; pinned?: boolean }>
+        const now = Date.now()
+        const scored = decayRank(mems, { now })
+        const budget = typeof b.budget === 'number' ? b.budget : undefined
+        const pruned = budget != null ? pruneToBudget(mems, budget, { now }) : undefined
+        return send(200, { scored, keep: pruned?.keep, evicted: pruned?.evict, threshold: pruned?.threshold }), true
+      }
+      case 'gen-ui-validate': {
+        const { validateUISpec } = await import('./gen-ui.js')
+        const spec = { component: b.component as string, props: (b.props as Record<string, unknown>) ?? {} }
+        return send(200, validateUISpec(spec)), true
+      }
+      case 'plan-mode': {
+        const { makePlan, editPlan } = await import('./plan-mode.js')
+        const steps = (b.steps as string[] | undefined) ?? []
+        const plan = makePlan(steps)
+        const edits = b.edits as { remove?: number[]; approve?: boolean } | undefined
+        const final = edits ? editPlan(plan, edits) : plan
+        return send(200, { plan: final, pendingCount: final.steps.filter((s) => s.status === 'pending').length, approved: final.approved }), true
+      }
       default: return send(404, { error: 'unknown_capability', path }), true
     }
   } catch (e) {
