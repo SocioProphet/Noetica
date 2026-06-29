@@ -35,6 +35,9 @@ export interface CriticContext {
   novelClaims?: string[]
   /** Override posture; otherwise classified from the question. */
   posture?: Posture
+  /** Complexity-calibrated confidence from complexity-discipline.ts [0,1].
+   *  High (code-verified/grounded) → relaxes accept threshold; low (barriers) → tightens it. */
+  calibratedConfidence?: number
 }
 
 export interface ScoredCandidate {
@@ -130,17 +133,24 @@ export function critique(candidates: Candidate[], ctx: CriticContext): CriticVer
   const agreement = Number(winner.agree.toFixed(3))
 
   const th = acceptThreshold(posture)
+  // Calibrated confidence modulates the threshold by ±0.06:
+  //   conf ≥ 0.7 (code-verified / grounded) → threshold −0.05 (accept more readily)
+  //   conf < 0.25 (barriers / speculative)   → threshold +0.05 (escalate more readily)
+  const confAdj = ctx.calibratedConfidence !== undefined
+    ? (ctx.calibratedConfidence >= 0.7 ? -0.05 : ctx.calibratedConfidence < 0.25 ? 0.05 : 0)
+    : 0
+  const effectiveTh = Math.max(0.05, th + confAdj)
   let action: CriticAction
   let reason: string
   if (best.vj.verdict === 'contradiction') {
     action = 'clarify'
     reason = 'winning candidate contradicts the belief/law state — clarify rather than assert'
-  } else if (best.score < th) {
+  } else if (best.score < effectiveTh) {
     action = 'escalate'
-    reason = `best worth ${best.score} < accept ${th} for posture '${posture}' — escalate for a stronger answer`
+    reason = `best worth ${best.score} < accept ${effectiveTh} for posture '${posture}'${confAdj !== 0 ? ` (confidence-adjusted from ${th})` : ''} — escalate`
   } else {
     action = 'accept'
-    reason = `accepted: worth ${best.score} ≥ ${th} (posture '${posture}', agreement ${agreement})`
+    reason = `accepted: worth ${best.score} ≥ ${effectiveTh} (posture '${posture}', agreement ${agreement})`
   }
   return { action, best, ranked, posture, agreement, reason }
 }

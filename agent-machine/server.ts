@@ -3356,6 +3356,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
   // trail. Makes the neurosymbolic moat the agent's everyday behavior.
   let moatContext = ''
   let moatEpisodeId = ''
+  let calibConfidence: number | undefined
   try {
     const { classifyComplexity, calibratedConfidence } = await import('./lib/complexity-discipline.js')
     // Cheap, always-on: posture classification (regex, no model/embedding call).
@@ -3375,6 +3376,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
       primeFactors = qctx.primeFactors.map((f) => `${f.code}^${f.exp}`)
     }
     const confidence = calibratedConfidence(verdict, { grounded: moatContext.length > 0 })
+    calibConfidence = confidence
     sse(res, 'discipline', { discipline: {
       posture: verdict.posture, strategy: verdict.strategy, barriers: verdict.barriers,
       morphology: verdict.morphology, calibrated_confidence: confidence,
@@ -4090,6 +4092,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
               question: latestUserContent, contextText: graphContext, beliefs: wm.beliefs, laws: wm.laws,
               ...(plnGG !== undefined ? { graphGrounding: plnGG } : {}),
               ...(plnNovel?.length ? { novelClaims: plnNovel } : {}),
+              ...(calibConfidence !== undefined ? { calibratedConfidence: calibConfidence } : {}),
             }
             let verdict = critique(candidates, cctx)
             // Sovereign escalation: only when there's real grounding material to judge
