@@ -4079,7 +4079,18 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
             } catch { /* skip a failed candidate */ }
           }
           if (candidates.length > 0) {
-            const cctx = { question: latestUserContent, contextText: graphContext, beliefs: wm.beliefs, laws: wm.laws }
+            // PLN graph grounding: assess the question's named entities against the knowledge graph
+            // so judgeAnswer() has graph-backed grounding evidence beyond token overlap.
+            let plnGG: number | undefined; let plnNovel: string[] | undefined
+            try {
+              const gg = assessAgainstGraph(latestUserContent)
+              if (gg.graphGrounding > 0 || gg.novel.length > 0) { plnGG = gg.graphGrounding; plnNovel = gg.novel }
+            } catch { /* PLN best-effort */ }
+            const cctx = {
+              question: latestUserContent, contextText: graphContext, beliefs: wm.beliefs, laws: wm.laws,
+              ...(plnGG !== undefined ? { graphGrounding: plnGG } : {}),
+              ...(plnNovel?.length ? { novelClaims: plnNovel } : {}),
+            }
             let verdict = critique(candidates, cctx)
             // Sovereign escalation: only when there's real grounding material to judge
             // against (otherwise the worth metric is uninformative and a bigger model

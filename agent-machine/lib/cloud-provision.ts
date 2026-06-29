@@ -56,8 +56,11 @@ export function createCommand(provider: ComputeSku['provider'], sku: string, reg
   switch (provider) {
     case 'gcp':
       return `gcloud compute instances create ${name} --machine-type=${sku} --zone=${region}-a --metadata-from-file=startup-script=cloud-init.sh`
-    case 'azure':
-      return `az vm create -g noetica-rg -n ${name} --size Standard_${sku} --location ${region} --image Ubuntu2204 --custom-data cloud-init.sh`
+    case 'azure': {
+      // Normalize: catalog entries use bare names (NC24ads_A100_v4) but az vm create needs Standard_ prefix.
+      const azSize = sku.startsWith('Standard_') ? sku : `Standard_${sku}`
+      return `az vm create -g noetica-rg -n ${name} --size ${azSize} --location ${region} --image Ubuntu2204 --custom-data cloud-init.sh`
+    }
     case 'aws':
       return `aws ec2 run-instances --instance-type ${sku} --image-id ami-ubuntu --user-data file://cloud-init.sh --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=${name}}]' --region ${region}`
     case 'ibm':
