@@ -108,6 +108,12 @@ const SUBJECT_FIELDS: Record<string, string[]> = {
   college_chemistry: ['chemistry'], high_school_chemistry: ['chemistry'],
   college_biology: ['biology', 'biological_eng'], high_school_biology: ['biology', 'biological_eng'],
   college_computer_science: ['eecs'], electrical_engineering: ['eecs'],
+  // medicine board — the MMLU medical subjects graded against the 'medicine' brain (MedRAG textbooks).
+  // Populate the bank with scripts/fetch_mmlu_subjects.py first. anatomy/genetics also draw on biology.
+  anatomy: ['medicine', 'biology'], clinical_knowledge: ['medicine'], college_medicine: ['medicine', 'biology'],
+  professional_medicine: ['medicine'], medical_genetics: ['medicine', 'biology'],
+  // legal board — MMLU professional/jurisprudence subjects graded against the 'legal' brain.
+  professional_law: ['legal'], jurisprudence: ['legal'], international_law: ['legal'],
   // commonsense-KG ablation (Stage 1) — 4-choice retrieval benches graded against the 'commonsense' brain
   // (CSKG+ConceptNet+DBpedia). A0=baseline vs A1=brain measures whether commonsense retrieval lifts the 7B.
   openbookqa: ['commonsense'], arc_challenge: ['commonsense'], arc_easy: ['commonsense'],
@@ -714,6 +720,19 @@ const OPERATOR_API = `You have a verified Python library 'math_operators' (alrea
   eigenvalues(matrix)                           # eigenvalues of a square matrix (list-of-lists)
   solve_linear_system(A, b)                     # solve A x = b; A list-of-lists, b list -> x list
   n_choose_k(n, k)  /  n_permute_k(n, k)        # combinations C(n,k) / permutations P(n,k), exact integers
+  kinematic_velocity(v0,a,t)  /  kinematic_displacement(v0,a,t)  /  kinematic_velocity_from_distance(v0,a,d)
+  newtons_second_law(mass,accel,force)          # F=ma; pass two, get the third (others None)
+  kinetic_energy(mass,velocity)  /  gravitational_pe(mass,height,g)  /  momentum(mass,velocity)
+  work_done(force,distance,angle_deg)  /  power(work,time)
+  ohms_law(voltage,current,resistance)          # V=IR; pass two, get the third (others None)
+  density(mass,volume,density_val)              # rho=m/V; pass two, get the third (others None)
+  molarity(moles,liters,molarity_val)           # M=mol/L; pass two, get the third (others None)
+  moles_from_mass(mass_g, molar_mass)
+  ideal_gas(P,V,n,T,R)                           # PV=nRT (R=0.082057 default); pass three, get the fourth (others None)
+  dilution(M1,V1,M2,V2)                          # M1V1=M2V2; pass three, get the fourth (others None)
+  ph_from_concentration(h_conc)  /  concentration_from_ph(ph)  /  percent_yield(actual, theoretical)
+  expected_value(values, probs)  /  binomial_probability(n, k, p)  /  binomial_mean_sd(n, p)
+  sample_mean(values)  /  sample_sd(values, population)  /  combination_probability(fav_n, fav_k, total_n, total_k)
 Pick the operator, extract the arguments from the problem, and write a tiny program that imports from
 math_operators and prints ONLY the final answer value on the last line. If none fit, write a short correct program.`
 

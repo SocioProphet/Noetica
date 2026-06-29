@@ -43,7 +43,7 @@ const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
 const safeEntries = <T,>(o: unknown): Array<[string, T]> => (o && typeof o === 'object' ? (Object.entries(o as Record<string, T>).filter(([k]) => !DANGEROUS_KEYS.has(k))) : [])
 
 const MAX_CAP_BODY = 8 * 1024 * 1024   // 8MB cap — readBody owns enforcement (don't rely on the detached global guard)
-const MUTATING_ROUTES = new Set(['cms-create', 'cms-update', 'cms-rollback', 'cms-to-drive', 'proposals-apply', 'infer-apply', 'swarm-announce', 'swarm-reuse', 'office-convert'])
+const MUTATING_ROUTES = new Set(['cms-create', 'cms-update', 'cms-rollback', 'cms-to-drive', 'proposals-apply', 'infer-apply', 'auto-kg', 'synapse-enrich', 'pdor-ingest', 'connector-run', 'swarm-announce', 'swarm-reuse', 'office-convert'])
 function readBody(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve) => {
     let b = ''; let size = 0; let aborted = false
@@ -359,7 +359,7 @@ export async function handleCapabilityRoute(req: http.IncomingMessage, res: http
       }
       // ── multi-cloud compute broker: route a workload to the cheapest satisfying provider ──
       case 'cloud-broker': {
-        const { brokerCompute, brokerSavings, toAgentplanePlacement, COMPUTE_CATALOG } = await import('./cloud-broker.js')
+        const { brokerCompute, brokerSavings, toAgentplanePlacement, toFogPlacements, COMPUTE_CATALOG } = await import('./cloud-broker.js')
         // Opt-in live pricing: refresh real Azure prices (public API) over the static catalogue before ranking.
         let catalog = COMPUTE_CATALOG
         let priceSource = 'static-catalogue'
@@ -380,7 +380,7 @@ export async function handleCapabilityRoute(req: http.IncomingMessage, res: http
           if (b.exec === true) provision = await executeProvision(provision)   // double-gated by NOETICA_CLOUD_PROVISION_EXEC
         }
         // Emit an agentplane-conformant PlacementDecision so the cheapest-cloud pick feeds agentplane's fleet.
-        return send(200, { ...result, priceSource, savings: brokerSavings(result), placement: toAgentplanePlacement(result, { lane: b.lane === 'prod' ? 'prod' : 'staging' }), provision }), true
+        return send(200, { ...result, priceSource, savings: brokerSavings(result), placement: toAgentplanePlacement(result, { lane: b.lane === 'prod' ? 'prod' : 'staging' }), fogPlacements: toFogPlacements(result), provision }), true
       }
       // ── canonical GAIA ontology export (conformant JSON-LD) ──
       case 'gaia-export': {
@@ -394,6 +394,72 @@ export async function handleCapabilityRoute(req: http.IncomingMessage, res: http
       // ── HellGraph write-back (PERSIST derived knowledge into the store) ──
       case 'proposals-apply': return send(200, persistProposals((b.proposals ?? []) as GraphProposal[])), true
       case 'infer-apply': return send(200, persistInferred((b.inferred ?? []) as Array<{ subject: string; predicate: string; object: string; via?: string; verified?: boolean }>)), true
+      case 'pdor-onboard': {
+        // PDOR (Prophet Data On-boarding Request) → governed Commons onboarding. Evaluate the request (tier +
+        // the open-vs-segmented brain-eligibility gate); if an ingest key is issued, characterize the supplied
+        // table (types, quality, sensitive scan, geo/temporal). Returns the decision + characterization; the
+        // caller persists the catalog node + lineage. Graph linkage (auto-KG) + SynapseIQ enrichment compose on top.
+        const { evaluatePdor } = await import('./data-onboarding.js')
+        const { characterize, parseDelimited } = await import('./characterization.js')
+        const decision = evaluatePdor(b.pdor as Parameters<typeof evaluatePdor>[0], (b.verdicts ?? []) as Parameters<typeof evaluatePdor>[1])
+        let characterization = null
+        if (decision.ingestKey) {
+          const table = typeof b.csv === 'string' ? parseDelimited(b.csv, typeof b.delim === 'string' ? b.delim : ',') : (b.table ?? null)
+          if (table && Array.isArray(table.header)) characterization = characterize(table)
+        }
+        return send(200, { decision, characterization }), true
+      }
+      case 'auto-kg': {
+        // Auto-extract a KG from a user doc → PENDING proposals (governance: segmented from the authored canon,
+        // never auto-canonical). persist:true applies them through the same review/writeback path as proposals-apply.
+        const { extractKnowledgeGraph } = await import('./auto-kg.js')
+        const model = String(b.model ?? (await listLocalModels())[0] ?? 'qwen2.5:7b')
+        const gen = async (prompt: string) => (await generateOllamaText({ model, messages: [{ role: 'user', content: prompt }], temperature: 0, numCtx: 8192 })).content
+        const r = await extractKnowledgeGraph(String(b.text ?? ''), String(b.source ?? 'user-doc'), gen, { maxTriples: Number(b.maxTriples ?? 20) })
+        const persisted = b.persist === true ? persistProposals(r.proposals) : null
+        return send(200, { ...r, persisted }), true
+      }
+      case 'synapse-enrich': {
+        // SynapseIQ structural enrichment → KG linkage: parse the asset into typed symbols/entities (Tree-sitter
+        // + LSP, deterministic fallback when SynapseIQ is unavailable), bridge to auto-KG triples → PENDING
+        // proposals (governed). persist:true applies them via the same review/writeback path as proposals-apply.
+        const { synapseEnrich, enrichmentToTriples, defaultSynapseTransport } = await import('./synapseiq-enrich.js')
+        const { triplesToProposals } = await import('./auto-kg.js')
+        const assetId = String(b.assetId ?? b.source ?? 'asset')
+        const enrichment = await synapseEnrich(String(b.content ?? ''), { filename: b.filename as string | undefined }, defaultSynapseTransport())
+        const proposals = triplesToProposals(enrichmentToTriples(assetId, enrichment), assetId)
+        const persisted = b.persist === true ? persistProposals(proposals) : null
+        return send(200, { enrichment, proposals, persisted }), true
+      }
+      case 'pdor-ingest': {
+        // The onboarding CAPSTONE: run the full Commons pipeline end-to-end as one governed transaction.
+        // evaluate the PDOR (tier + open-vs-segmented gate) → if an ingest key is issued, characterize the
+        // supplied table + SynapseIQ-enrich the content → build the catalog node + provenance/linkage edges →
+        // persist into the graph (governed). Nothing enters the graph without a key.
+        const { evaluatePdor } = await import('./data-onboarding.js')
+        const { characterize, parseDelimited } = await import('./characterization.js')
+        const { synapseEnrich, defaultSynapseTransport } = await import('./synapseiq-enrich.js')
+        const { buildCatalogGraph } = await import('./pdor-ingest.js')
+        const pdorReq = b.pdor as Parameters<typeof evaluatePdor>[0]
+        const decision = evaluatePdor(pdorReq, (b.verdicts ?? []) as Parameters<typeof evaluatePdor>[1])
+        let characterization = undefined, enrichment = undefined
+        if (decision.ingestKey) {
+          const table = typeof b.csv === 'string' ? parseDelimited(b.csv, typeof b.delim === 'string' ? b.delim : ',') : (b.table ?? null)
+          if (table && Array.isArray(table.header)) characterization = characterize(table)
+          if (typeof b.content === 'string' && b.content) enrichment = await synapseEnrich(b.content, { filename: b.filename as string | undefined }, defaultSynapseTransport())
+        }
+        const catalog = buildCatalogGraph(pdorReq, decision, { characterization, enrichment, fileUri: b.fileUri as string | undefined })
+        const persisted = b.persist === true && catalog.proposals.length ? persistProposals(catalog.proposals) : null
+        return send(200, { decision, characterization: characterization ?? null, enrichment: enrichment ?? null, catalog, persisted }), true
+      }
+      case 'connector-run': {
+        // Governed connector ingest: authorize egress → fetch → emit a tamper-evident ConnectorReceipt. The
+        // route exposes the MANUAL (local, no-egress) connector — docs supplied in the body — the offline-safe
+        // reference; network connectors register server-side with a scope-d-backed authorize hook.
+        const { runConnector, manualConnector } = await import('./connector.js')
+        const run = await runConnector(manualConnector(String(b.id ?? 'manual'), (b.docs ?? []) as Array<{ uri?: string; title?: string; text: string }>))
+        return send(200, run), true
+      }
       // ── graph-derived (GET) ──
       case 'graph-triples': {
         const g = getGraph()
