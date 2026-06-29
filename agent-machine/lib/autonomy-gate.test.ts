@@ -2,8 +2,9 @@ import { test, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   bindAutonomy, autonomySession, decideAutonomy, permitsAutonomy, assertAutonomy,
-  makeAutonomyGate, onAutonomyDecision, type AutonomySession,
+  makeAutonomyGate, onAutonomyDecision, buildAdmissionReceipt, type AutonomySession,
 } from './autonomy-gate.js'
+import { evaluateAutonomy } from '../../lib/governance/autonomyLadder.js'
 
 afterEach(() => { bindAutonomy(null); onAutonomyDecision(null) })
 
@@ -16,6 +17,21 @@ test('unbound session does not enforce (backward compatible)', () => {
   assert.equal(decideAutonomy('L4'), null)
   assert.equal(permitsAutonomy('L4'), true)
   assert.doesNotThrow(() => assertAutonomy('L4'))
+})
+
+test('buildAdmissionReceipt: contract-shaped, content-hashed, deterministic', () => {
+  const d = evaluateAutonomy('conductor', 'L4', ['conductor_response_envelope'])
+  const ids = { receipt_id: 'aar-fixed', created_at: '2026-06-29T00:00:00Z', subject_ref: 'tool://dispatch_agent', evidence_refs: ['evidence://token/conductor_response_envelope'] }
+  const r1 = buildAdmissionReceipt(d, ids)
+  assert.equal(r1.version, '0.1')
+  assert.equal(r1.decision, 'admit')
+  assert.equal(r1.granted_level, 'L4')
+  assert.match(r1.hash, /^sha256:[0-9a-f]{64}$/)
+  // deterministic: same decision + ids → same hash
+  assert.equal(buildAdmissionReceipt(d, ids).hash, r1.hash)
+  // tamper-evident: changing a field changes the hash
+  const r2 = buildAdmissionReceipt(d, { ...ids, subject_ref: 'tool://other' })
+  assert.notEqual(r2.hash, r1.hash)
 })
 
 test('bind/clear round-trips the session (operator endpoint state)', () => {

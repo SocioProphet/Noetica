@@ -81,7 +81,8 @@ import { validateGraph } from '@socioprophet/hellgraph'
 import { CANONICAL_SHAPES, QUARANTINE_PROP } from './lib/canonical-shapes.js'
 import { judgeAnswer, type ValueJudgment } from './lib/value-judgment.js'
 import { runAgentLoop, type ProviderAdapter } from './lib/agent-loop.js'
-import { makeAutonomyGate, hydrateAutonomy, bindAutonomy, autonomySession, onAutonomyDecision, AUTONOMY_LADDER, type AutonomySession } from './lib/autonomy-gate.js'
+import { makeAutonomyGate, hydrateAutonomy, bindAutonomy, autonomySession, onAutonomyDecision, buildAdmissionReceipt, AUTONOMY_LADDER, type AutonomySession } from './lib/autonomy-gate.js'
+import { getCurrentReasoningRun as getAutonomyRun, emitReasoningEvent as emitAutonomyEvent } from './lib/reasoning-evidence.js'
 import { validateToolCall, type ToolSchema, type ArgSpec } from './lib/constrained-decode.js'
 import { appendJsonl as appendEncrypted, readJsonl as readEncrypted, writeJson as writeEncryptedJson, readJson as readEncryptedJson } from './lib/at-rest.js'
 import { critique, bestOfTemps, type Candidate as CriticCandidate } from './lib/critic.js'
@@ -435,8 +436,31 @@ const TOOL_AUTONOMY_LEVEL: Record<string, string> = {
   update_self: 'L5',
 }
 const autonomyGate = makeAutonomyGate((tool) => TOOL_AUTONOMY_LEVEL[tool])
-// Route every gated decision onto the trajectory/console (best-effort evidence).
+// Route every gated decision onto the evidence spine: emit a hashed
+// AutonomyAdmissionReceipt as a reasoning event on the current run (the same
+// fabric TurtleTerm/BearBrowser speak), plus a console line on demote/deny.
 onAutonomyDecision((d) => {
+  try {
+    const run = getAutonomyRun()
+    if (run) {
+      const evidenceRefs = (autonomySession()?.evidence ?? []).map((e) => `evidence://token/${e}`)
+      const receipt = buildAdmissionReceipt(d, {
+        receipt_id: `aar-${Date.now()}-${d.tool}`,
+        created_at: new Date().toISOString(),
+        subject_ref: `tool://${d.tool}`,
+        evidence_refs: evidenceRefs,
+      })
+      emitAutonomyEvent(run, {
+        eventType: 'autonomy.admission',
+        summary: `${d.tool}: ${d.decision} ${d.requestedLevel}->${d.grantedLevel} role=${d.role}`,
+        trustLevel: 'trusted-control-input',
+        traceLevel: 'operator-private',
+        extra: { autonomyReceipt: receipt },
+      })
+    }
+  } catch (err) {
+    console.warn('[autonomy] receipt emit failed:', err instanceof Error ? err.message : String(err))
+  }
   if (d.demoted || d.grantedLevel !== d.requestedLevel) {
     console.log(`[autonomy] ${d.tool}: role=${d.role} requested=${d.requestedLevel} granted=${d.grantedLevel} — ${d.reason}`)
   }

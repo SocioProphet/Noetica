@@ -13,11 +13,14 @@
  * The ladder is imported from the repo-root single source — no second copy to drift.
  */
 
+import { createHash } from 'node:crypto'
 import {
   evaluateAutonomy,
   AUTONOMY_LADDER,
+  toAdmissionReceipt,
   type AutonomyDecision,
 } from '../../lib/governance/autonomyLadder.js'
+import { canonical } from './audit-chain.js'
 
 /** Re-export the canonical ladder so the host has a single autonomy import surface. */
 export { AUTONOMY_LADDER }
@@ -107,4 +110,21 @@ export function makeAutonomyGate(
         : `requires ${required}, granted ${d.grantedLevel} — ${d.reason}`,
     }
   }
+}
+
+export type AdmissionReceipt = ReturnType<typeof toAdmissionReceipt>
+
+/**
+ * Build a content-hashed AutonomyAdmissionReceipt (prophet-platform contract
+ * AutonomyAdmissionReceipt.v0.1) from a runtime decision, ready to ride the
+ * evidence spine. The hash is sha256 over the canonical (key-sorted) receipt
+ * minus the hash field, so it is deterministic and tamper-evident.
+ */
+export function buildAdmissionReceipt(
+  d: AutonomyDecision,
+  ids: { receipt_id: string; created_at: string; subject_ref: string; evidence_refs?: string[] },
+): AdmissionReceipt {
+  const draft = toAdmissionReceipt(d, { ...ids, hash: '' })
+  const { hash: _unused, ...body } = draft
+  return { ...body, hash: 'sha256:' + createHash('sha256').update(canonical(body)).digest('hex') }
 }
