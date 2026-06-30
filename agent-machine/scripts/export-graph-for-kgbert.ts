@@ -91,21 +91,28 @@ function main() {
   }
   triF.end()
 
-  // 3) hyperedges.jsonl — regroup incident edges around reified connector nodes into n-ary facts
-  const outgoing = new Map<string, GEdge[]>()
-  for (const e of keptEdges) { (outgoing.get(e.from) ?? outgoing.set(e.from, []).get(e.from)!).push(e) }
+  // 3) hyperedges.jsonl — regroup ALL incident edges (both directions) around reified connector nodes into
+  // n-ary facts. Reification points INTO the event node (Session -has_interaction-> Interaction <-produced- …),
+  // so a connector's arguments are mostly its INCOMING edges; we take incoming AND outgoing and tag the role
+  // with direction (←/→) so the n-ary neighbourhood is faithfully serialized for KG-BERT.
+  const incident = new Map<string, Array<{ e: GEdge; dir: '→' | '←'; other: string }>>()
+  const push = (id: string, e: GEdge, dir: '→' | '←', other: string) => {
+    const a = incident.get(id) ?? incident.set(id, []).get(id)!
+    a.push({ e, dir, other })
+  }
+  for (const e of keptEdges) { push(e.from, e, '→', e.to); push(e.to, e, '←', e.from) }
   const hypF = fs.createWriteStream(path.join(outDir, 'hyperedges.jsonl'))
   let hyperCount = 0
   for (const n of nodes) {
     const label = (n.labels && n.labels[0]) || ''
     if (!CONNECTOR_LABELS.test(label)) continue
-    const inc = outgoing.get(n.id) || []
+    const inc = incident.get(n.id) || []
     if (inc.length < 2) continue                       // n-ary means ≥2 args, else it's just a triple
-    const argsList = inc.map((e) => ({ role: relText(e.label), text: nodeText(byId.get(e.to)!) }))
+    const argsList = inc.map(({ e, dir, other }) => ({ role: `${dir}${relText(e.label)}`, text: nodeText(byId.get(other)!) }))
     const connectorText = nodeText(n)
     hypF.write(JSON.stringify({
       connector: n.id, connector_text: connectorText, arity: argsList.length, args: argsList,
-      // KG-BERT n-ary serialization: connector then each role:arg, in declaration order
+      // KG-BERT n-ary serialization: connector then each (direction)role:arg
       sentence: `${connectorText} | ` + argsList.map((a) => `${a.role}: ${a.text}`).join(' ; '),
     }) + '\n')
     hyperCount++
