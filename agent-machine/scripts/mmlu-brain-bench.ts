@@ -939,7 +939,9 @@ async function main() {
       const q = sample[i]!
       const base = `${q.question}\n\n${q.choices.map((c, j) => `${LETTERS[j]}. ${c}`).join('\n')}`
       const gold = LETTERS[q.answer]
-      const row: Record<string, unknown> = { subject, i, gold }
+      // emit question + choices into the checkpoint → the ckpt IS a reliable remediation queue (frontier
+      // authors the canon delta per miss from this, no fragile external shuffle-reproduction).
+      const row: Record<string, unknown> = { subject, i, gold, question: q.question, choices: q.choices }
       const routeDecision = canonRoute(q.question)
       row['canon_grounding'] = routeDecision.grounding_status
       if (routeDecision.grounding_status === 'ungrounded' && routeDecision.ungrounded_candidates.length)
