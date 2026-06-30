@@ -34,13 +34,15 @@ step(){ echo "==== \$(date '+%H:%M:%S') \$* ===="; }
 step "wait GPU"; for i in \$(seq 1 60); do nvidia-smi >/dev/null 2>&1 && break; sleep 10; done
 nvidia-smi || { step "FATAL-no-gpu"; gsutil -q cp /var/log/kgbert.log "$OUT/run.log"; }
 
-step "deps — common-cu129 has the CUDA DRIVER but NOT torch, and bare 'pip' isn't on the startup PATH; use the
-python3 already on PATH via 'python3 -m pip'. Install torch (cu124 wheel, driver-580 compatible) + transformers."
-PIP="python3 -m pip"
-\$PIP --version || python3 -m ensurepip --default-pip
-\$PIP install -q torch --index-url https://download.pytorch.org/whl/cu124 2>&1 | tail -3 || \$PIP install -q torch 2>&1 | tail -3
-\$PIP install -q --upgrade transformers numpy 2>&1 | tail -2
-python3 -c "import torch; print('torch', torch.__version__, 'cuda?', torch.cuda.is_available())" || { step "FATAL-torch-missing"; gsutil -q cp /var/log/kgbert.log "$OUT/run.log"; }
+step "pick a python WITH pip — the startup /usr/bin/python3 has no pip/torch; the DLVM conda python at
+/opt/conda/bin/python3 does. Fall back to apt-installing pip onto the system python. Run EVERYTHING (install
+AND the encoder) with this same PY so torch resolves."
+if [ -x /opt/conda/bin/python3 ]; then PY=/opt/conda/bin/python3
+else apt-get update -q && apt-get install -y -q python3-pip; PY=python3; fi
+step "deps — install torch (cu124 wheel, driver-580 compatible) + transformers via \$PY -m pip (~2GB)"
+\$PY -m pip install -q torch --index-url https://download.pytorch.org/whl/cu124 2>&1 | tail -3 || \$PY -m pip install -q torch 2>&1 | tail -3
+\$PY -m pip install -q --upgrade transformers numpy 2>&1 | tail -2
+\$PY -c "import torch; print('torch', torch.__version__, 'cuda?', torch.cuda.is_available())" || { step "FATAL-torch-missing"; gsutil -q cp /var/log/kgbert.log "$OUT/run.log"; }
 
 step "pull artifacts + encoder"
 gsutil -q cp "$KG/entities.jsonl"   /root/.noetica/kg/entities.jsonl
@@ -50,11 +52,11 @@ gsutil -q cp "$GCS/code/agent-machine/scripts/kg-bert-encode.py" /root/kg-bert-e
 wc -l /root/.noetica/kg/*.jsonl
 
 step "SCORE — triple-plausibility held-out accuracy (does the graph cohere?)"
-python3 /root/kg-bert-encode.py --mode score --model "$MODEL" --device cuda --epochs $EPOCHS 2>&1 | tee /root/score.txt
+\$PY /root/kg-bert-encode.py --mode score --model "$MODEL" --device cuda --epochs $EPOCHS 2>&1 | tee /root/score.txt
 gsutil -q cp /root/score.txt "$OUT/score-$MODEL.txt"
 
 step "EMBED — entity + hyperedge vectors → .npz"
-python3 /root/kg-bert-encode.py --mode embed --model "$MODEL" --device cuda --out /root/kg-bert-embeddings.npz 2>&1 | tail -5
+\$PY /root/kg-bert-encode.py --mode embed --model "$MODEL" --device cuda --out /root/kg-bert-embeddings.npz 2>&1 | tail -5
 gsutil -q cp /root/kg-bert-embeddings.npz "$OUT/kg-bert-embeddings.npz"
 
 step "DONE — uploading final log + self-deleting"
