@@ -34,8 +34,11 @@ step(){ echo "==== \$(date '+%H:%M:%S') \$* ===="; }
 step "wait GPU"; for i in \$(seq 1 60); do nvidia-smi >/dev/null 2>&1 && break; sleep 10; done
 nvidia-smi || { step "FATAL-no-gpu"; gsutil -q cp /var/log/kgbert.log "$OUT/run.log"; }
 
-step "deps (torch/transformers preinstalled on cu image; ensure transformers+numpy)"
+step "deps — the common-cu129 image has the CUDA DRIVER but NOT torch; install torch (cu124 wheel, driver-580
+compatible) + transformers + numpy. ~2GB, a few min."
+pip install -q torch --index-url https://download.pytorch.org/whl/cu124 2>&1 | tail -3 || pip install -q torch 2>&1 | tail -3
 pip install -q --upgrade transformers numpy 2>&1 | tail -2 || pip install -q --break-system-packages transformers numpy
+python3 -c "import torch; print('torch', torch.__version__, 'cuda?', torch.cuda.is_available())" || step "FATAL-torch-missing"
 
 step "pull artifacts + encoder"
 gsutil -q cp "$KG/entities.jsonl"   /root/.noetica/kg/entities.jsonl
