@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import * as cp from 'node:child_process'
 import * as path from 'node:path'
 import * as fs from 'node:fs'
-import { extractCode, extractFinalAnswer, normalizeAnswer, programOfThought, operatorProgramOfThought, OPERATOR_API, candidateAgreesWithVerified, pickRunnableLanguage, testsPassed, codeVerifyRepair } from './exec-verify.js'
+import { extractCode, extractFinalAnswer, normalizeAnswer, programOfThought, operatorProgramOfThought, OPERATOR_API, candidateAgreesWithVerified, pickRunnableLanguage, testsPassed, codeVerifyRepair, ensureOperatorImport } from './exec-verify.js'
 
 // Locate agent-machine/lib (where math_operators.py lives) from the test's cwd — the suite runs
 // from agent-machine/, so 'lib' resolves; cover the repo-root launch too.
@@ -23,6 +23,17 @@ const PY_OK = (() => {
 
 test('extractCode pulls a fenced python block', () => {
   assert.equal(extractCode('Here:\n```python\nprint(2+2)\n```\ndone'), 'print(2+2)')
+})
+
+test('ensureOperatorImport injects the missing math_operators import (the NameError leak fix)', () => {
+  // model forgot the import → would NameError; repair prepends the star import
+  assert.equal(ensureOperatorImport('print(n_choose_k(10, 2))'),
+    'from math_operators import *\nprint(n_choose_k(10, 2))')
+  // already imported (any form) → untouched, never double-imports
+  assert.equal(ensureOperatorImport('from math_operators import n_choose_k\nprint(n_choose_k(10,2))'),
+    'from math_operators import n_choose_k\nprint(n_choose_k(10,2))')
+  assert.equal(ensureOperatorImport('import math_operators\nprint(math_operators.gcd(8,4))'),
+    'import math_operators\nprint(math_operators.gcd(8,4))')
 })
 
 test('extractCode accepts bare code that looks like code', () => {

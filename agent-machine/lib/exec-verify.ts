@@ -112,6 +112,13 @@ math_operators and prints ONLY the final answer value on the last line. If none 
 const operatorPrompt = (question: string) =>
   `${OPERATOR_API}\n\nProblem: ${question}\n\nReturn ONLY a \`\`\`python code block.`
 
+// Inject the math_operators import when a generated operator program omits it (the common NameError leak).
+// No-op if the model already wrote any form of the import, so it never double-imports or fights the model.
+export function ensureOperatorImport(code: string): string {
+  if (/\b(from\s+math_operators\s+import|import\s+math_operators)\b/.test(code)) return code
+  return `from math_operators import *\n${code}`
+}
+
 export interface OperatorProgramOfThought extends ProgramOfThought {
   /** true when the generated program actually imported the verified library (operator was routed). */
   usedOperator: boolean
@@ -136,10 +143,16 @@ export async function operatorProgramOfThought(
   try { text = await deps.generate(operatorPrompt(question), 0.1) } catch { return null }
   const code = extractCode(text)
   if (!code) return null
+  // Auto-repair the #1 compute-arm leak (measured on the prodphyschem0629b board): the model calls a
+  // verified operator like `n_choose_k(...)` but forgets `from math_operators import …` → NameError →
+  // the verified answer is silently lost. This path's whole contract IS to use math_operators, so if the
+  // import is missing, inject the star import (also resolves bare sympy names like `symbols`/`solve`,
+  // which math_operators re-exports). Deterministic, only adds what the model plainly intended.
+  const code2 = ensureOperatorImport(code)
   // Prepend the lib dir to sys.path so `from math_operators import ...` resolves — exactly the
   // bench's mechanism. JSON.stringify safely escapes the path into a Python string literal.
-  const usedOperator = /math_operators/.test(code)
-  const wrapped = `import sys\nsys.path.insert(0, ${JSON.stringify(libDir)})\n${code}`
+  const usedOperator = /math_operators/.test(code2)
+  const wrapped = `import sys\nsys.path.insert(0, ${JSON.stringify(libDir)})\n${code2}`
   let output: string
   try { output = await deps.execute('python', wrapped) } catch { return null }
   const answer = extractFinalAnswer(output)
