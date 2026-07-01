@@ -41,3 +41,69 @@ export function verifyGrounding(answer: string, sources: { text: string }[], cla
   const score = supported / claims.length
   return { grounded: score >= passAt, score, supported, total: claims.length, unsupported }
 }
+
+/* ── Entailment-based grounding (Phase-0.1 upgrade) ────────────────────────────
+ * verifyGrounding above is lexical token-overlap: Metric 1 scored it F1 0.24 on
+ * RAGTruth (recall 0.48 — misses >half the hallucinations, over-flags 5:1). The
+ * eval's NLI arm lifts recall on baseless additions 0.38→0.86. This is the
+ * production port: per claim, select the top-K most-similar source sentences as
+ * the premise (handles claims that AGGREGATE across sources), then ENTAIL.
+ * The entailment engine is injected (EntailFn) so it's pure + testable and the
+ * engine is swappable (deberta-nli in the eval, an LLM judge on the mesh in prod).
+ * NOTE: re-validate on RAGTruth via scripts/provenance_eval.py before claiming a
+ * specific F1 — the measured lift used cross-encoder/nli-deberta-v3-small. */
+
+export type EntailFn = (premise: string, hypothesis: string) => Promise<number>  // 0..1 entailment
+
+function splitSentences(t: string): string[] {
+  return t.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter((s) => s.length > 15)
+}
+
+// The K source sentences most lexically similar to the claim = the premise pool.
+function topKSources(claim: string, srcSentences: string[], k: number): string[] {
+  const ct = new Set(contentTokens(claim))
+  if (!ct.size) return []
+  return srcSentences
+    .map((s) => { const t = contentTokens(s); return { s, score: t.length ? t.filter((x) => ct.has(x)).length / t.length : 0 } })
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, k)
+    .map((x) => x.s)
+}
+
+/** Entailment grounding: a claim is grounded iff its top-K source premise ENTAILS it. */
+export async function verifyGroundingNLI(
+  answer: string,
+  sources: { text: string }[],
+  entail: EntailFn,
+  { topK = 4, entailAt = 0.5, passAt = 0.7 }: { topK?: number; entailAt?: number; passAt?: number } = {},
+): Promise<GroundingResult> {
+  const srcSents = sources.flatMap((s) => splitSentences(s.text))
+  const claims = splitSentences(answer)
+  if (!claims.length) return { grounded: false, score: 0, supported: 0, total: 0, unsupported: [] }
+  const unsupported: string[] = []
+  let supported = 0
+  for (const claim of claims) {
+    if (!contentTokens(claim).length) { supported++; continue }   // filler, not a factual claim
+    const premise = topKSources(claim, srcSents, topK)
+    const score = premise.length ? await entail(premise.join(' '), claim) : 0   // no similar source ⇒ unsupported
+    if (score >= entailAt) supported++
+    else unsupported.push(claim.slice(0, 140))
+  }
+  const score = supported / claims.length
+  return { grounded: score >= passAt, score, supported, total: claims.length, unsupported }
+}
+
+/** Mesh-native default engine: an LLM entailment judge (swap for a served NLI cross-encoder to match the eval). */
+export function makeLlmEntail(generate: (prompt: string) => Promise<string>): EntailFn {
+  return async (premise, hypothesis) => {
+    const out = (await generate(
+      'You are a strict entailment judge. Does the EVIDENCE support the CLAIM? ' +
+      'Reply with exactly one word: ENTAILED, NEUTRAL, or CONTRADICTED.\n\n' +
+      `EVIDENCE:\n${premise}\n\nCLAIM:\n${hypothesis}\n\nAnswer:`,
+    )).toUpperCase()
+    if (out.includes('ENTAIL')) return 1
+    if (out.includes('CONTRADICT')) return 0
+    return 0.3   // neutral < default entailAt ⇒ treated as unsupported
+  }
+}
