@@ -75,8 +75,8 @@ step "brain dir = \$BRAINDIR (\$(ls "\$BRAINDIR" 2>/dev/null | tr '\n' ' '))"
 export OCW_BRAIN=\$BRAINDIR OLLAMA_HOST=http://127.0.0.1:11434
 
 # ground_kgbert arm: the decorrelated KG-BERT retriever needs torch + the encoded entity vectors. Install/pull
-# ONLY when that arm is requested, so ordinary boards stay lean (no 2GB torch on every run).
-KGBERT_ENV=""
+# ONLY when that arm is requested, so ordinary boards stay lean (no 2GB torch on every run). EXPORT the env
+# directly (a variable-expanded 'VAR=x' command prefix is NOT treated as an assignment by bash → exit 127).
 if echo "$ARMS" | grep -q ground_kgbert; then
   step "ground_kgbert — torch + KG-BERT embeddings (.npz)"
   mkdir -p /root/.noetica/kg
@@ -84,7 +84,7 @@ if echo "$ARMS" | grep -q ground_kgbert; then
   python3 -m pip install -q transformers
   gsutil -q cp "\$GCS/kg-bert/kg-bert-embeddings.npz" /root/.noetica/kg/kg-bert-embeddings.npz
   gsutil -q cp "\$GCS/kg-export/entities.jsonl"        /root/.noetica/kg/entities.jsonl
-  KGBERT_ENV="MMLU_KGBERT_NPZ=/root/.noetica/kg/kg-bert-embeddings.npz MMLU_KGBERT_DEVICE=cuda"
+  export MMLU_KGBERT_NPZ=/root/.noetica/kg/kg-bert-embeddings.npz MMLU_KGBERT_DEVICE=cuda
 fi
 
 # stall watchdog: 'done' frozen for STALL_MIN min → abort (checkpoint preserved → relaunch resumes)
@@ -98,7 +98,7 @@ step "BOARD $RUN_TAG — arms=$ARMS · resumable · streaming · stall-guarded"
 MMLU_MODEL=$MODEL MMLU_ARMS="$ARMS" MMLU_PER_SUBJECT=$PER MMLU_SEED=1729 MMLU_SUBJECTS=$SUBJECTS \
   MMLU_CHECKPOINT=\$LCKPT MMLU_STATUS=\$LSTATUS \
   NOETICA_EMBED_TIMEOUT_MS=\${NOETICA_EMBED_TIMEOUT_MS:-60000} NOETICA_EMBED_RETRIES=\${NOETICA_EMBED_RETRIES:-3} \
-  MMLU_CONC=$CONC \$KGBERT_ENV \
+  MMLU_CONC=$CONC \
   stdbuf -oL -eL bash scripts/run-exam.sh > /var/log/sb.txt 2>&1
 EXIT=\$?
 gsutil -q cp "\$LCKPT" "$CKPT" 2>/dev/null
