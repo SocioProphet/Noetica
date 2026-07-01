@@ -51,3 +51,12 @@ test('makeLlmEntail maps the judge verdict to a score', async () => {
   assert.equal(await no('e', 'h'), 0)
   assert.ok((await meh('e', 'h')) < 0.5)
 })
+
+test('combo grounding fuses lexical + entailment (needs agreement to ground)', async () => {
+  const { verifyGroundingCombo } = await import('./research-verify.js')
+  const entail = async (p: string, h: string) => (p.toLowerCase().includes('paris') && h.toLowerCase().includes('paris') ? 1 : 0)
+  const r = await verifyGroundingCombo(ANSWER, SOURCES, { entail }, { passAt: 0.5 })
+  assert.equal(r.total, 2)
+  assert.ok(r.supported >= 1, 'Paris claim supported by lex+nli agreement')
+  assert.ok(r.unsupported.some((u) => u.toLowerCase().includes('moon')), 'moon claim unsupported')
+})
