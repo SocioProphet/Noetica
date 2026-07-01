@@ -26,27 +26,56 @@ import sys
 KG = os.path.expanduser('~/.noetica/kg')
 
 
+# Only these node types are KNOWLEDGE concepts. The graph is 93% operational/prose nodes (DecisionLedgerEntry,
+# DocumentChunk, EvidenceClaim, Session, …) that leak in as "entities" — retrieving over them returns garbage
+# (measured: raw 36k index → mostly prose-fragment neighbours; filtered → clean concept neighbours). Keep the
+# canonical concept set (same concepts the lexical 'ground' arm uses), so the head-to-head is vectors-vs-lexical.
+KEEP_LABELS = {'GlossaryTerm', 'Formula', 'Topic'}
+import re as _re
+
+
+def _is_clean_concept(t):
+    t = (t or '').strip()
+    if len(t) < 3 or len(t) > 40:
+        return False
+    if _re.search(r'[\n\t\xa0�]', t) or _re.search(r'[^\x00-\x7f]', t):   # chunk-fragment / mojibake junk
+        return False
+    if sum(c.isalpha() for c in t) / max(1, len(t)) < 0.6:                     # mostly punctuation/digits
+        return False
+    if _re.search(r'[.;:,]\s', t) or len(t.split()) > 5:                        # sentence prose / too long
+        return False
+    return True
+
+
 def load_entity_index(npz_path, entities_path):
-    """Return (ids, matrix, id2text) for the ENTITY rows only."""
+    """Return (ids, matrix, id2text) for the CLEAN CONCEPT entity rows only (GlossaryTerm/Formula/Topic +
+    text-cleanliness). Filtering the operational/prose noise is what makes KG-BERT grounding actually useful."""
     import numpy as np
-    z = np.load(npz_path, allow_pickle=True)
-    ids = [str(x) for x in z['ids']]
-    mat = z['embeddings'].astype('float32')
-    # keep entity rows (keyed 'entity:<id>'); strip the prefix back to the raw id
-    keep = [(i, s[len('entity:'):]) for i, s in enumerate(ids) if s.startswith('entity:')]
-    idx = [i for i, _ in keep]
-    ent_ids = [rid for _, rid in keep]
-    ent_mat = mat[idx]
-    # L2-normalize so a dot product IS cosine similarity
-    norms = np.linalg.norm(ent_mat, axis=1, keepdims=True)
-    ent_mat = ent_mat / np.clip(norms, 1e-8, None)
-    id2text = {}
+    # id → (label, text) from the export
+    id2text, id2label = {}, {}
     if os.path.exists(entities_path):
         for line in open(entities_path):
             if not line.strip():
                 continue
             e = json.loads(line)
             id2text[e['id']] = e.get('text', e.get('label', ''))
+            id2label[e['id']] = e.get('label', '')
+    z = np.load(npz_path, allow_pickle=True)
+    ids = [str(x) for x in z['ids']]
+    mat = z['embeddings'].astype('float32')
+    idx, ent_ids, seen = [], [], set()
+    for i, s in enumerate(ids):
+        if not s.startswith('entity:'):
+            continue
+        rid = s[len('entity:'):]
+        txt = id2text.get(rid, '')
+        key = txt.strip().lower()
+        if id2label.get(rid, '') in KEEP_LABELS and _is_clean_concept(txt) and key not in seen:
+            seen.add(key)                                  # dedup by surface → distinct concepts in top-k
+            idx.append(i); ent_ids.append(rid)
+    ent_mat = mat[idx]
+    norms = np.linalg.norm(ent_mat, axis=1, keepdims=True)     # L2-normalize → dot product is cosine
+    ent_mat = ent_mat / np.clip(norms, 1e-8, None)
     return ent_ids, ent_mat, id2text
 
 
