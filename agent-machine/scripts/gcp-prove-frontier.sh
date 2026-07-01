@@ -73,11 +73,17 @@ gcloud compute firewall-rules create "$FW" --project "$PROJECT" \
   || die "firewall create failed"
 
 # ── 2. Create the GPU node (driver-ready image + our startup script) ─────────
+# GCP publishes the optimized-nvidia images but doesn't expose their family alias to consumer
+# projects (--image-family fails), so resolve the newest concrete READY image name and use --image.
+IMG_NAME="$(gcloud compute images list --project "$IMG_PROJECT" \
+  --filter="family=$IMG_FAMILY AND status=READY" --sort-by='~creationTimestamp' \
+  --format='value(name)' --limit=1 2>/dev/null)"
+[ -n "$IMG_NAME" ] || die "no READY image for family $IMG_FAMILY in $IMG_PROJECT"
 SPOT_FLAGS=(); [ "$SPOT" = "1" ] && SPOT_FLAGS=(--provisioning-model=SPOT --instance-termination-action=DELETE)
-echo "▸ creating $SKU (${MESH_GPU}) in $ZONE"
+echo "▸ creating $SKU (${MESH_GPU}) in $ZONE — image $IMG_NAME"
 gcloud compute instances create "$NAME" --project "$PROJECT" --zone "$ZONE" \
   --machine-type "$SKU" --maintenance-policy TERMINATE \
-  --image-family "$IMG_FAMILY" --image-project "$IMG_PROJECT" \
+  --image "$IMG_NAME" --image-project "$IMG_PROJECT" \
   --boot-disk-size 100GB --tags noetica-proof \
   --metadata mesh-model="$MODEL" \
   --metadata-from-file startup-script="$HERE/cloud-init.sh" \
