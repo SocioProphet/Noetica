@@ -13278,8 +13278,27 @@ Question: ${question}`
         const { generateAudioScript } = await import('./lib/study-outputs.js')
         const gen = (prompt: string) => generateOllamaText({ model: 'qwen3:14b', messages: [{ role: 'user', content: prompt }], temperature: 0.5 }).then((r) => r.content)
         const turns = await generateAudioScript(sources, gen, format)
+        // synthesize=1: TTS each turn via OpenAI TTS (nova for Host, echo for Guest); requires OPENAI_API_KEY.
+        // Returns {turns: [{speaker, line, audio_b64?}]}; audio_b64 is undefined if key absent or call fails.
+        const synthesize = url.searchParams.get('synthesize') === '1'
+        const VOICE_MAP: Record<string, string> = { Host: url.searchParams.get('voice_host') ?? 'nova', Guest: url.searchParams.get('voice_guest') ?? 'echo' }
+        const withAudio = await Promise.all(turns.map(async (t) => {
+          if (!synthesize) return t
+          try {
+            const key = process.env['OPENAI_API_KEY']
+            if (!key) return t
+            const oaiRes = await fetch('https://api.openai.com/v1/audio/speech', {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ model: 'tts-1', input: t.line.slice(0, 4096), voice: VOICE_MAP[t.speaker] ?? 'nova', response_format: 'mp3' }),
+            })
+            if (!oaiRes.ok) return t
+            const buf = await oaiRes.arrayBuffer()
+            return { ...t, audio_b64: Buffer.from(buf).toString('base64') }
+          } catch { return t }
+        }))
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ turns }))
+        res.end(JSON.stringify({ turns: withAudio, synthesized: synthesize && !!process.env['OPENAI_API_KEY'] }))
       } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
