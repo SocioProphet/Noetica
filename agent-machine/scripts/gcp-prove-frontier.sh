@@ -23,6 +23,12 @@ SPOT="${MESH_SPOT:-1}"
 N="${1:-8}"
 FW="${NAME}-ollama"
 
+# Image: RHEL-family (Rocky Linux 9, a 1:1 RHEL rebuild) with the NVIDIA driver PREINSTALLED, so no
+# at-boot driver compile. Override for a different distro (e.g. rhel-9 / rhel-cloud — driver then
+# installs at boot via cloud-init) or the Ubuntu driver-ready image (common-cu129-ubuntu-2204 / ml-images).
+IMG_FAMILY="${MESH_IMAGE_FAMILY:-rocky-linux-9-optimized-gcp-nvidia-latest}"
+IMG_PROJECT="${MESH_IMAGE_PROJECT:-rocky-linux-cloud}"
+
 # GPU selection. L4 is bundled into the g2 machine family (no --accelerator). Everything else
 # (V100/P100/T4/A100) attaches to an n1/a2 machine via --accelerator. Pick with MESH_GPU:
 #   MESH_GPU=l4    → g2-standard-8            (needs NVIDIA_L4 quota)
@@ -71,12 +77,12 @@ SPOT_FLAGS=(); [ "$SPOT" = "1" ] && SPOT_FLAGS=(--provisioning-model=SPOT --inst
 echo "▸ creating $SKU (${MESH_GPU}) in $ZONE"
 gcloud compute instances create "$NAME" --project "$PROJECT" --zone "$ZONE" \
   --machine-type "$SKU" --maintenance-policy TERMINATE \
-  --image-family common-gpu-debian-11 --image-project ml-images \
+  --image-family "$IMG_FAMILY" --image-project "$IMG_PROJECT" \
   --boot-disk-size 100GB --tags noetica-proof \
   --metadata mesh-model="$MODEL" \
   --metadata-from-file startup-script="$HERE/cloud-init.sh" \
   "${ACCEL_FLAGS[@]}" "${SPOT_FLAGS[@]}" >/dev/null \
-  || die "instance create failed (check ${MESH_GPU^^} quota in $ZONE)"
+  || die "instance create failed (check $MESH_GPU quota in $ZONE)"
 
 IP="$(gcloud compute instances describe "$NAME" --zone "$ZONE" --project "$PROJECT" \
   --format='value(networkInterfaces[0].accessConfigs[0].natIP)')"
