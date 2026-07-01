@@ -13052,7 +13052,7 @@ Question: ${question}`
         const results = await raptorRetrieve(tree, query, topK)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ results, count: results.length }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13071,7 +13071,7 @@ Question: ${question}`
         const result = await tieredGround(question)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ result }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13108,7 +13108,7 @@ Question: ${question}`
         if (action === 'release') { releaseClaims(store, agentId, paths); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ released: true })); return }
         if (action === 'brief') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ brief: coordinationBrief(store, agentId) })); return }
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ active: activeClaims(store) }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13135,7 +13135,7 @@ Question: ${question}`
         if (!key) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'key required' })); return }
         bb.write(key, p['value'], by)
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ version: bb.version(key) }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13154,7 +13154,7 @@ Question: ${question}`
         const lesson = await remediateFailure(failure)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ lesson }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13182,7 +13182,7 @@ Question: ${question}`
         const result = await teacherStudentRefine(trajectory, deps, { maxRounds })
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ result }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13215,7 +13215,7 @@ Question: ${question}`
         const turn = p['turn'] as import('./lib/session-graph.js').TurnInput | undefined
         if (turn) recordTurnAtom(store, turn)
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13236,7 +13236,7 @@ Question: ${question}`
         const hits = await studyBrainRetrieve(query, fields, topK)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ hits, count: hits.length }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13261,7 +13261,7 @@ Question: ${question}`
         else output = await generateBriefing(sources, gen)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ output, type }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13315,7 +13315,7 @@ Question: ${question}`
         const { portfolio, transcript } = buildK12Portfolio(learnerId)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ profile, portfolio, transcript }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13330,7 +13330,7 @@ Question: ${question}`
         const prices = await fetchAzurePricing(region)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ prices, count: prices.length, providers: [...new Set(prices.map((p) => p.provider))] }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13361,7 +13361,7 @@ Question: ${question}`
         const result = await persistKnowledge(store, root, { nodes, edges } as import('./lib/knowledge-graph.js').KGraph)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ ...result, stored: { nodes: kpNodes, edges: kpEdges } }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13377,7 +13377,7 @@ Question: ${question}`
         const brief     = buildLearnerBrief(learnerId)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ profile, brief }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15479,7 +15479,7 @@ Question: ${question}`
         const key = loadOrCreateDeviceKey()
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ fingerprint: key.fingerprint, publicKeyPem: key.publicKeyPem }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15492,7 +15492,7 @@ Question: ${question}`
         const { brainHome, academicBrainDir, opsBrainFile, opsBrainDir } = await import('./lib/brain-home.js')
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ brainHome: brainHome(), academicBrainDir: academicBrainDir(), opsBrainDir: opsBrainDir(), opsBrainFile: opsBrainFile() }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15510,7 +15510,7 @@ Question: ${question}`
         const connId = typeof p['connectorId'] === 'string' ? p['connectorId'] : 'manual'
         const run = await runConnector(manualConnector(connId, docs))
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ run }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15524,7 +15524,7 @@ Question: ${question}`
         const root = loadOrCreateRoot()
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ rootLen: root.length, alias: scopeAlias(root, url.searchParams.get('scopeId') ?? 'default', url.searchParams.get('domain') ?? 'noetica') }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15542,7 +15542,7 @@ Question: ${question}`
         const facet = deriveScope(loadOrCreateRoot(), scopeId)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ scopeId, publicKeyHex: facet.publicKeyRaw.toString('hex'), pseudonym: facet.pseudonym }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15557,7 +15557,7 @@ Question: ${question}`
         if (!g['__oidcKey']) g['__oidcKey'] = generateSigningKey()
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify(jwks(g['__oidcKey'] as import('./lib/sovereign-oidc.js').SigningKey)))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15576,7 +15576,7 @@ Question: ${question}`
         if (!claims) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'claims required' })); return }
         const token = await issueIdToken(g['__oidcKey'] as import('./lib/sovereign-oidc.js').SigningKey, claims as never)
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ token }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15595,7 +15595,7 @@ Question: ${question}`
         if (!plaintext) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'plaintext required' })); return }
         const blob = sealForScope(loadOrCreateRoot(), typeof p['scopeId'] === 'string' ? p['scopeId'] : 'default', plaintext)
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ blob }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15613,7 +15613,7 @@ Question: ${question}`
         if (!blob) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'blob required' })); return }
         const plaintext = openForScope(loadOrCreateRoot(), typeof p['scopeId'] === 'string' ? p['scopeId'] : 'default', blob).toString('utf8')
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ plaintext }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15636,7 +15636,7 @@ Question: ${question}`
         if (items.length) { idx.addMany(items.map((i) => ({ id: i.id, vec: new Float32Array(i.vec) }))); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ added: items.length, size: idx.size() })); return }
         if (id && vec.length) { idx.add(id, new Float32Array(vec)); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ added: 1, size: idx.size() })); return }
         res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'items or id+vec required' }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15656,7 +15656,7 @@ Question: ${question}`
         const k = typeof p['k'] === 'number' ? p['k'] : 6
         if (!query) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'query vector required' })); return }
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ results: idx.search(query, k), size: idx.size() }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15670,7 +15670,7 @@ Question: ${question}`
         const binary = resolveManagedOllamaBinary()
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ ready: runtimeComplete(binary ?? undefined), binary, port: MANAGED_PORT }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15685,7 +15685,7 @@ Question: ${question}`
         const { provisionOllamaRuntime } = await import('./lib/managed-ollama.js')
         const binary = await provisionOllamaRuntime(typeof p['version'] === 'string' ? p['version'] : undefined)
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ binary, provisioned: binary !== null }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15704,7 +15704,7 @@ Question: ${question}`
         if (!text) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'text required' })); return }
         const gen = (prompt: string) => generateOllamaText({ model: 'qwen3:14b', messages: [{ role: 'user', content: prompt }], temperature: 0.2 }).then((r) => r.content)
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ result: await extractKnowledgeGraph(text, source, gen) }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15720,7 +15720,7 @@ Question: ${question}`
         if (!q) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'q required' })); return }
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ route: canonRoute(q), lookup: canonLookup(q, kind ?? undefined) }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15737,7 +15737,7 @@ Question: ${question}`
         const pings = Array.isArray(p['pings']) ? p['pings'] as import('./lib/colocation.js').Ping[] : []
         if (!pings.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'pings required' })); return }
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ colocations: findColocations(pings, p['opts'] as never) }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15758,7 +15758,7 @@ Question: ${question}`
         const threshold = calibrateThreshold(calib, alpha)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ threshold, coverage: coverageAt(calib, threshold), abstain: score !== undefined ? shouldAbstain(score, threshold) : undefined }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15775,7 +15775,7 @@ Question: ${question}`
         const inp = p['input'] as import('./lib/council.js').LearnedInput | undefined
         if (!inp) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'input required' })); return }
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ result: learnedCouncilVote(inp) }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15797,7 +15797,7 @@ Question: ${question}`
         const vote = await cragVote(async () => { const c = candidates[ci % candidates.length]!; ci++; return c }, (r) => r.trim() || null, k)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ vote, shouldRetrieve: gateShouldRetrieve(vote.agree), accept: acceptRetrievedAnswer(vote.agree, vote.agree) }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15815,7 +15815,7 @@ Question: ${question}`
         if (!question || !answer) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'question and answer required' })); return }
         const artifact = crystallizeAnswer({ question: String(question), answer: String(answer), session: String(session ?? ''), action: String(action ?? ''), attestation: String(attestation ?? ''), worth: Number(worth ?? 0.8) })
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ artifact, count: artifactCount() }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15828,7 +15828,7 @@ Question: ${question}`
         const q = url.searchParams.get('q') ?? ''
         if (!q) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'q required' })); return }
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ hit: recallArtifact(q), count: artifactCount() }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15872,7 +15872,7 @@ Question: ${question}`
         if (action === 'backdoor')  { const from = String(p['from'] ?? ''); const to = String(p['to'] ?? ''); const adjSet = Array.isArray(p['adjustmentSet']) ? p['adjustmentSet'] as string[] : []; res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(backdoorCriterion(dag, from, to, adjSet))); return }
         if (action === 'iv')        { const iv = String(p['iv'] ?? ''); const treat = String(p['treatment'] ?? ''); const out = String(p['outcome'] ?? ''); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(ivValidity(dag, iv, treat, out))); return }
         res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'unknown action' }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15893,7 +15893,7 @@ Question: ${question}`
         const ranked = rerankLate(queryVecs, docs, topK)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ ranked, count: ranked.length }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15912,7 +15912,7 @@ Question: ${question}`
         const result = majorityVote(answers)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify(result))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15936,7 +15936,7 @@ Question: ${question}`
         const decision   = state ? decideAnswer(state) : null
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ clusters: clusters.length, entropy, normalizedEntropy: normEnt, coverage, decision }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15959,7 +15959,7 @@ Question: ${question}`
         const paths = beamTraverse(adj, seeds, (path) => path.score, { beam, depth })
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ paths, count: paths.length }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15989,7 +15989,7 @@ Question: ${question}`
         if (action === 'edit')     { const edits = p['edits'] as Parameters<typeof editPlan>[1]; const updated = editPlan(plan, edits); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ plan: updated, next: nextStep(updated), canExecute: canExecute(updated) })); return }
         if (action === 'complete') { const id = Number(p['id'] ?? 0); const updated = completeStep(plan, id); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ plan: updated, next: nextStep(updated), canExecute: canExecute(updated) })); return }
         res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'unknown action' }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -16011,7 +16011,7 @@ Question: ${question}`
         const evalCase = captureFailure(trace, Date.now(), minCoverage !== undefined ? { minCoverage } : {})
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ case: evalCase, captured: evalCase !== null }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
