@@ -36,6 +36,7 @@ import { OperateSurface } from '@/components/surfaces/OperateSurface'
 import { TuneSurface } from '@/components/surfaces/TuneSurface'
 import { HolographMeSurface } from '@/components/surfaces/HolographMeSurface'
 import { MarketplaceSurface } from '@/components/surfaces/MarketplaceSurface'
+import { SurfaceErrorBoundary } from '@/components/shell/SurfaceErrorBoundary'
 import { CoworkPanel } from '@/components/panels/CoworkPanel'
 import { CodePanel } from '@/components/panels/CodePanel'
 import { EvaluatePanel } from '@/components/panels/EvaluatePanel'
@@ -44,7 +45,7 @@ import { SettingsModal } from '@/components/settings/SettingsModal'
 import { ProviderSetupModal } from '@/components/shell/ProviderSetupModal'
 import { ModelSetupOverlay } from '@/components/setup/ModelSetupOverlay'
 import { CommandPalette } from '@/components/palette/CommandPalette'
-import { models, visibleModels, defaultModelId } from '@/config/models'
+import { models, visibleModels, providersWithKeys, defaultModelId } from '@/config/models'
 import { initialMessages } from '@/lib/chat/mockConversation'
 import { matchDialogue, type DialogueForm, type DialogueCommand } from '@/lib/chat/dialogue'
 import { sendNoeticaChat } from '@/lib/client/noeticaTransport'
@@ -160,7 +161,7 @@ export function AppShell() {
       setMessages(activeSession.messages.length > 0 ? activeSession.messages : initialMessages)
       // Only restore model if it's in the currently-visible list (guards against
       // Neuronpedia/cloud models that were saved before showAllModels was toggled off)
-      const allowed = visibleModels(settings.showAllModels)
+      const allowed = visibleModels(settings.showAllModels, providersWithKeys(settings))
       const isUsable = allowed.some((m) => m.id === activeSession.modelId)
       setModelId(isUsable ? activeSession.modelId : defaultModelId)
     } else {
@@ -599,7 +600,7 @@ export function AppShell() {
     setActiveSurface(s.surface)
     setWorkspaceMode(s.workspaceMode)
     setMessages(s.messages.length > 0 ? s.messages : initialMessages)
-    const allowed = visibleModels(settings.showAllModels)
+    const allowed = visibleModels(settings.showAllModels, providersWithKeys(settings))
     setModelId(allowed.some((m) => m.id === s.modelId) ? s.modelId : defaultModelId)
   }
 
@@ -812,6 +813,16 @@ export function AppShell() {
     await handleSendRaw(content, attachments, messages, tools)
   }
 
+  // Plan-mode approval gate: user approves the plan → execute in auto mode; reject → discard await.
+  function handlePlanApprove(messageId: string) {
+    setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, awaitingApproval: false } : m)))
+    void handleSendRaw('Approved. Execute the plan exactly as outlined, step by step.', [], messages, undefined, 'auto')
+  }
+
+  function handlePlanReject(messageId: string) {
+    setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, awaitingApproval: false } : m)))
+  }
+
   // Resume an interrupted (stopped) response. The partial assistant content is
   // already in the visible transcript, so we send the same continue instruction
   // the server's checkpoint resume uses — the model picks up where it stopped.
@@ -922,7 +933,7 @@ export function AppShell() {
     setMessages(forkedMessages)
     setActiveSurface(activeSurface)
     setWorkspaceMode(workspaceMode)
-    const allowed = visibleModels(settings.showAllModels)
+    const allowed = visibleModels(settings.showAllModels, providersWithKeys(settings))
     setModelId(allowed.some((m) => m.id === sess.modelId) ? sess.modelId : defaultModelId)
   }
 
@@ -962,7 +973,7 @@ export function AppShell() {
     updateTitle(words || 'Chat')
   }
 
-  async function handleSendRaw(content: string, attachments: PendingAttachment[], baseMessages: ChatMessage[], tools?: ProviderTool[]) {
+  async function handleSendRaw(content: string, attachments: PendingAttachment[], baseMessages: ChatMessage[], tools?: ProviderTool[], agentModeOverride?: 'auto' | 'plan' | 'ask') {
     autoTitle(content)
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
@@ -1034,7 +1045,7 @@ export function AppShell() {
             temperature,
             max_tokens: maxTokens,
             reply_length: settings.replyLength,
-            agent_mode: settings.agentMode,
+            agent_mode: agentModeOverride ?? settings.agentMode,
             memory_scope: `noetica-session-local:${workspaceMode.toLowerCase()}`,
             provider_keys: providerKeys,
             agent_machine_endpoint: agentMachineEndpoint,
@@ -1157,6 +1168,8 @@ export function AppShell() {
                 // The moat made visible — verification badge + inline citations from the done event.
                 ...(result.verification ? { verification: result.verification } : {}),
                 ...(result.citations ? { citations: result.citations } : {}),
+                // Plan-mode gate: mark the turn as awaiting user approval before execution.
+                ...((agentModeOverride ?? settings.agentMode) === 'plan' ? { awaitingApproval: true } : {}),
               })
             },
             onError: (error) => {
@@ -1498,6 +1511,7 @@ export function AppShell() {
                   : 'grid-cols-1'
               }`}
             >
+              <SurfaceErrorBoundary key={activeSurface} surface={activeSurface}>
               <CenterWorkspace
                 activeSurface={activeSurface}
                 sessionId={activeSession?.id}
@@ -1539,7 +1553,10 @@ export function AppShell() {
                 }}
                 agentMode={settings.agentMode}
                 onSetAgentMode={(mode) => updateSettings({ agentMode: mode })}
+                onPlanApprove={handlePlanApprove}
+                onPlanReject={handlePlanReject}
               />
+              </SurfaceErrorBoundary>
               {inspectorVisible && (
                 <div className="relative h-full">
                   {/* Visible close — the inspector ("Open Observatory" target) was only dismissable via ⌘I. */}
@@ -1739,9 +1756,11 @@ type CenterProps = {
   onFeedback?: (messageId: string, rating: 'up' | 'down') => void
   agentMode?: 'auto' | 'plan' | 'ask'
   onSetAgentMode?: (mode: 'auto' | 'plan' | 'ask') => void
+  onPlanApprove?: (messageId: string) => void
+  onPlanReject?: (messageId: string) => void
 }
 
-function CenterWorkspace({ activeSurface, sessionId, messages, isStreaming, workspaceMode, fanoutModelCount, modelId, thinkingBudget, onSend, onFanout, onStop, onRegenerate, onResume, onFork, onEdit, onRecombine, onWorkspaceModeChange, onExtractArtifact, onModelChange, onOpenPalette, mcpTools, systemPrompt, onSystemPromptChange, activeArtifact, onCloseArtifact, onArtifactUpdate, onArtifactDelete, onAtomSelect, onOpenSettings, onNavigateToOperate, onSpeak, onFeedback, agentMode, onSetAgentMode }: CenterProps) {
+function CenterWorkspace({ activeSurface, sessionId, messages, isStreaming, workspaceMode, fanoutModelCount, modelId, thinkingBudget, onSend, onFanout, onStop, onRegenerate, onResume, onFork, onEdit, onRecombine, onWorkspaceModeChange, onExtractArtifact, onModelChange, onOpenPalette, mcpTools, systemPrompt, onSystemPromptChange, activeArtifact, onCloseArtifact, onArtifactUpdate, onArtifactDelete, onAtomSelect, onOpenSettings, onNavigateToOperate, onSpeak, onFeedback, agentMode, onSetAgentMode, onPlanApprove, onPlanReject }: CenterProps) {
   if (activeSurface === 'notes')        return <NotesSurface />
   if (activeSurface === 'canvas')       return <CanvasSurface />
   if (activeSurface === 'workrooms')    return <WorkroomsSurface thinkingBudget={thinkingBudget} />
@@ -1780,7 +1799,7 @@ function CenterWorkspace({ activeSurface, sessionId, messages, isStreaming, work
     <div className={`grid min-h-0 flex-1 overflow-hidden transition-[grid-template-columns] duration-300 ${activeArtifact ? 'grid-cols-[minmax(320px,1fr)_480px]' : 'grid-cols-1'}`}>
       <section className="flex min-h-0 flex-col overflow-hidden">
         <GoalBanner sessionId={sessionId} />
-        <MessageList messages={messages} isStreaming={isStreaming} onExtractArtifact={onExtractArtifact} onRegenerate={onRegenerate} onResume={onResume} onFork={onFork} onEdit={onEdit} onRecombine={onRecombine} onSpeak={onSpeak} onQuickPrompt={(t) => onSend(t, [])} onFeedback={onFeedback} />
+        <MessageList messages={messages} isStreaming={isStreaming} onExtractArtifact={onExtractArtifact} onRegenerate={onRegenerate} onResume={onResume} onFork={onFork} onEdit={onEdit} onRecombine={onRecombine} onSpeak={onSpeak} onQuickPrompt={(t) => onSend(t, [])} onFeedback={onFeedback} onPlanApprove={onPlanApprove} onPlanReject={onPlanReject} />
         {agentMode && agentMode !== 'auto' && (
           <div className="mx-4 mb-1 flex items-center gap-2 rounded-lg border border-[var(--color-border-secondary)] bg-[var(--color-background-secondary)] px-3 py-1.5 text-xs">
             {agentMode === 'plan' ? (

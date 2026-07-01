@@ -681,17 +681,20 @@ function trackIngest<T>(p: Promise<T> | T): Promise<T> {
   return Promise.resolve(p).finally(() => { _pendingIngestCount = Math.max(0, _pendingIngestCount - 1) })
 }
 
-function recordGovernanceRun(run: GovernanceRun): void {
+function recordGovernanceRun(run: GovernanceRun, qualityError?: boolean): void {
   _governanceRuns.push(run)
   if (_governanceRuns.length > GOVERNANCE_RING_SIZE) _governanceRuns.shift()
   saveGovernance()
   // Update the self-model: track per-task/model success + latency over time.
+  // qualityError: caller can pass a worth-based signal (worth < 0.35) so
+  // capabilityHint() and selectArmUCB() see real quality failures, not just
+  // hard errors (run.error is a string set only on exception paths).
   recordCapability({
     task: run.task,
     provider: run.provider,
     model: run.model_routed,
     latencyMs: run.latency_ms,
-    error: Boolean(run.error),
+    error: qualityError ?? Boolean(run.error),
     costUsd: run.cost_usd,
   })
 }
@@ -795,15 +798,19 @@ async function runSuperconsciousLoop(keys: LoopProviderKeys): Promise<void> {
 
     // Run synthesis — prefer Anthropic, fall back to OpenAI
     let synthesisText = ''
+    // Redact PII/secrets before any CLOUD egress — observations are file-backed and may carry
+    // sensitive user data. The local Ollama path below needs none (nothing leaves the device).
+    const { redact } = await import('./lib/redact.js')
+    const cloudPrompt = redact(prompt).redacted
     if (keys.anthropic || anthropicProxyMode()) {
       const _t = anthropicTarget(keys.anthropic ?? '')
       const res = await fetch(_t.url, {
         method: 'POST',
         headers: _t.headers,
         body: JSON.stringify({
-          model: 'claude-haiku-4-5-20251001',
+          model: 'claude-haiku-4-5',
           max_tokens: 1024,
-          messages: [{ role: 'user', content: prompt }],
+          messages: [{ role: 'user', content: cloudPrompt }],
         }),
         signal: AbortSignal.timeout(30000),
       })
@@ -815,7 +822,7 @@ async function runSuperconsciousLoop(keys: LoopProviderKeys): Promise<void> {
       const res = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'authorization': `Bearer ${keys.openai}` },
-        body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: prompt }], max_tokens: 1024 }),
+        body: JSON.stringify({ model: 'gpt-5.4-mini', messages: [{ role: 'user', content: cloudPrompt }], max_tokens: 1024 }),
         signal: AbortSignal.timeout(30000),
       })
       if (res.ok) {
@@ -2940,8 +2947,8 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
     const hint = capabilityHint(routerDecision.task ?? 'general')
     if (hint.recommendEscalation) {
       let escalated = false
-      if (anthropicAvailable) { provider = 'anthropic'; model = 'claude-haiku-4-5-20251001'; escalated = true }
-      else if (openaiKey) { provider = 'openai'; model = 'gpt-4o-mini'; escalated = true }
+      if (anthropicAvailable) { provider = 'anthropic'; model = 'claude-haiku-4-5'; escalated = true }
+      else if (openaiKey) { provider = 'openai'; model = 'gpt-5.4-mini'; escalated = true }
       if (escalated) {
         console.log(`[self-model] escalated task="${String(routerDecision.task)}" → ${provider}:${model} (local success ${(hint.localSuccessRate ?? 0).toFixed(2)} over ${hint.localRuns} runs)`.replace(/\r/g, '').replace(/\n/g, ''))
       }
@@ -4539,11 +4546,24 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
       }
       // #5 — auto-capture FAILED turns (low grounding coverage) as replayable eval cases. This is the data
       // half of the verifier→selection keystone: a growing regression set from real production failures.
+      // #5 — unified learning scheduler: routes each turn through all 3 loops atomically.
+      // Loop 1 (eval-capture): failures → regression cases; successes → Langfuse sink.
+      // Loop 2 (procedural-memory): distill skill + verified experience when PROCEDURAL_MEMORY=true.
+      // Loop 3 (srs): newly distilled skills enroll an SRS card at distill time.
       try {
-        const { captureFailure } = await import('./lib/eval-capture.js')
-        const c = captureFailure({ input: latestUserContent, output: fullContent, verified: turnGrounded, coverage: valueJudgment.grounding, decision: routerDecision.task }, Date.now(), { minCoverage: 0.5 })
-        if (c) appendEncrypted(path.join(os.homedir(), '.noetica', 'eval-cases.jsonl'), c)   // encrypted at rest
-      } catch { /* eval-capture best-effort */ }
+        const { scheduleAfterTurn } = await import('./lib/learning-scheduler.js')
+        const lResult = scheduleAfterTurn({
+          input: latestUserContent, output: fullContent,
+          verified: turnGrounded, coverage: valueJudgment.grounding,
+          task: routerDecision.task ?? 'general',
+          steps: trajectoryActions.map((a) => a.type),
+          worth: valueJudgment.worth,
+          now: Date.now(),
+        }, { procedural: process.env['PROCEDURAL_MEMORY'] === 'true', minCoverage: 0.5 })
+        if (lResult.evalCase) appendEncrypted(path.join(os.homedir(), '.noetica', 'eval-cases.jsonl'), lResult.evalCase)
+        if (lResult.skill) appendEncrypted(skillsPath(), lResult.skill)
+        if (lResult.experience) appendEncrypted(path.join(os.homedir(), '.noetica', 'experiences.jsonl'), lResult.experience)
+      } catch { /* learning-scheduler best-effort */ }
       // #5b — capture VERIFIED turns as SFT positives (rejection sampling: the success/training half).
       // The shard feeds the Atlas causal_lm_lora trainer (tritfabric) via /api/tune submit → POST /v1/tune.
       // SOVEREIGNTY: harvesting is OFF by default (NOETICA_LEARN_OPT_IN) — this data could leave the
@@ -4565,17 +4585,6 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
           if (v) { const sp = path.join(os.homedir(), '.noetica', 'distill', 'verified.sft.jsonl'); fs.mkdirSync(path.dirname(sp), { recursive: true }); fs.appendFileSync(sp, `${toSftLine(v)}\n`) }
         }
       } catch { /* sft-harvest best-effort */ }
-      // #6 — distill SUCCESSFUL turns (high worth + a real tool sequence) into reusable procedural skills (the
-      // success half; retrieved into the system prompt on future similar tasks above).
-      // Gated: PROCEDURAL_MEMORY=true opts in (default off — runs the learning loop but the write
-      // has no storage cost when disabled; the read side is always active to reuse existing skills).
-      try {
-        if (process.env['PROCEDURAL_MEMORY'] === 'true' && valueJudgment.worth >= 0.6 && trajectoryActions.length >= 2) {
-          const { distillSkill } = await import('./lib/procedural-memory.js')
-          const skill = distillSkill(latestUserContent.slice(0, 120), routerDecision.task ?? 'general', trajectoryActions.map((a) => a.type))
-          appendEncrypted(skillsPath(), skill)   // encrypted at rest
-        }
-      } catch { /* procedural-memory best-effort */ }
     } catch { /* VJ is best-effort — never block the response */ }
 
     recordGovernanceRun({
@@ -4592,7 +4601,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
       tokens_egressed: egressed,
       task: routerDecision.task,
       session_id: sessionId,
-    })
+    }, (valueJudgment?.worth ?? 1) < 0.35)
 
     // Moat 3: close the episodic KG entry with the answer (episodic memory of
     // what was asked + how the agent responded — feeds the compounding loop).
@@ -4718,8 +4727,11 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
       emitContent = scrubMarkdownImages(emitContent)
     } catch { /* egress-hygiene is best-effort */ }
     try {
-      const { markAIGenerated, makeCredential } = await import('./lib/content-credentials.js')
-      emitContent = markAIGenerated(emitContent, makeCredential({ model, timestamp: new Date().toISOString() }))
+      const { markAIGenerated, makeCredential, logAIActEvent } = await import('./lib/content-credentials.js')
+      const cred = makeCredential({ model, timestamp: new Date().toISOString() })
+      emitContent = markAIGenerated(emitContent, cred)
+      const { brainHome } = await import('./lib/brain-home.js')
+      logAIActEvent({ responseText: fullContent, cred, logsDir: brainHome() })
     } catch { /* C2PA marking is best-effort */ }
     try {
       const { decideAnswer } = await import('./lib/uncertainty.js')
@@ -5042,15 +5054,65 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && url.pathname === '/api/learning/stats') {
     const skills = loadSkills()
     const evalCases = readEncrypted<Record<string, unknown>>(path.join(os.homedir(), '.noetica', 'eval-cases.jsonl'))
+    const experiences = readEncrypted<Record<string, unknown>>(path.join(os.homedir(), '.noetica', 'experiences.jsonl'))
+    const now = Date.now()
+    const skillsDue = skills.filter((s) => {
+      const card = (s as unknown as Record<string, unknown>)['card'] as { due?: number } | undefined
+      return card !== undefined && typeof card.due === 'number' && card.due <= now
+    }).length
     // The felt-win: the latest replay of captured failures against the current system ("fixed X of N").
     let replay: Record<string, unknown> | null = null
     try { replay = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.noetica', 'learning-replay.json'), 'utf8')) as Record<string, unknown> } catch { /* none run yet */ }
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
     res.end(JSON.stringify({
-      skills: { count: skills.length, recent: skills.slice(-5).map((s) => ({ task: s.task, abstraction: s.abstraction, steps: s.steps })) },
+      skills: { count: skills.length, due: skillsDue, recent: skills.slice(-5).map((s) => ({ task: s.task, abstraction: s.abstraction, steps: s.steps })) },
       evalCases: { count: evalCases.length, recent: evalCases.slice(-5).map((c) => ({ input: String(c['input'] ?? '').slice(0, 80), failureMode: c['failureMode'], coverage: c['coverage'] })) },
+      experiences: { count: experiences.length },
       replay,
     }))
+    return
+  }
+
+  // POST /api/learning/schedule — unified scheduler management: tick, stats, skill-SRS review.
+  if (req.method === 'POST' && url.pathname === '/api/learning/schedule') {
+    void (async () => {
+      try {
+        setCORSHeaders(res)
+        const rawBody = await readBody(req)
+        let p: Record<string, unknown> = {}
+        try { p = JSON.parse(rawBody) as Record<string, unknown> } catch { /* default empty */ }
+        const action = String(p['action'] ?? 'stats')
+        const { unifiedStats, getSkillsDue, reviewSkillCard } = await import('./lib/learning-scheduler.js')
+        const sk = loadSkills() as Array<import('./lib/procedural-memory.js').Skill & { card?: import('./lib/srs.js').Card }>
+        const ec = readEncrypted<Record<string, unknown>>(path.join(os.homedir(), '.noetica', 'eval-cases.jsonl'))
+        const exp = readEncrypted<Record<string, unknown>>(path.join(os.homedir(), '.noetica', 'experiences.jsonl'))
+        const ts = Date.now()
+        if (action === 'stats') {
+          const stats = unifiedStats(ec, sk, exp, ts)
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, stats, executionPerformed: false }))
+          return
+        }
+        if (action === 'due-skills') {
+          const due = getSkillsDue(sk.filter((s) => s.card !== undefined) as Array<import('./lib/procedural-memory.js').Skill & { card: import('./lib/srs.js').Card }>, ts)
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, due: due.map((s) => ({ id: s.id, task: s.task, abstraction: s.abstraction, due: s.card.due })), executionPerformed: false }))
+          return
+        }
+        if (action === 'review-skill') {
+          const skillId = String(p['skillId'] ?? '')
+          const grade = Number(p['grade'] ?? 2) as 0 | 1 | 2 | 3
+          const target = sk.find((s) => s.id === skillId)
+          if (!target?.card) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: 'skill_not_found' })); return }
+          const updated = reviewSkillCard(target.card, grade, ts)
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, card: updated, executionPerformed: false }))
+          return
+        }
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: 'unknown_action', valid: ['stats', 'due-skills', 'review-skill'] }))
+      } catch { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
     return
   }
 
@@ -5502,7 +5564,7 @@ const server = http.createServer((req, res) => {
               const task = startTask(taskId)
               res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(task))
             } catch (e) {
-              res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: String(e) }))
+              res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
             }
             return
           }
@@ -5521,7 +5583,7 @@ const server = http.createServer((req, res) => {
               })
               res.writeHead(201, { 'content-type': 'application/json' }); res.end(JSON.stringify(step))
             } catch (e) {
-              res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: String(e) }))
+              res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
             }
             return
           }
@@ -5534,7 +5596,7 @@ const server = http.createServer((req, res) => {
               const task = completeTask(taskId, String(body['output'] ?? ''), causal)
               res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(task))
             } catch (e) {
-              res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: String(e) }))
+              res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
             }
             return
           }
@@ -5544,7 +5606,7 @@ const server = http.createServer((req, res) => {
               const task = blockTask(taskId, String(body['reason'] ?? 'blocked'))
               res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(task))
             } catch (e) {
-              res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: String(e) }))
+              res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
             }
             return
           }
@@ -5651,7 +5713,7 @@ const server = http.createServer((req, res) => {
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(meta))
       } catch (e) {
         const code = e instanceof OperatorUnavailableError ? 503 : e instanceof OperatorError ? e.status : 500
-        res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: (e as Error).message }))
+        res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: e instanceof OperatorUnavailableError ? 'operator_unavailable' : 'operator_error' }))
       }
     })()
     return
@@ -5671,7 +5733,7 @@ const server = http.createServer((req, res) => {
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(result))
       } catch (e) {
         const code = e instanceof OperatorUnavailableError ? 503 : e instanceof OperatorError ? e.status : 500
-        res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: (e as Error).message }))
+        res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: e instanceof OperatorUnavailableError ? 'operator_unavailable' : 'operator_error' }))
       }
     })() })
     return
@@ -5949,6 +6011,7 @@ const server = http.createServer((req, res) => {
 
   // POST /api/memory/pin — curate a memory into / out of the long-term brain. Body: {id, pinned?}.
   if (req.method === 'POST' && url.pathname === '/api/memory/pin') {
+    if (!requireApiToken(req, res)) return
     let body = ''
     req.on('data', (c: Buffer) => { body += c.toString() })
     req.on('end', () => { void (async () => {
@@ -5969,6 +6032,7 @@ const server = http.createServer((req, res) => {
 
   // POST /api/memory/forget — soft-delete a memory (excluded from recall + LTI dropped). Body: {id}.
   if (req.method === 'POST' && url.pathname === '/api/memory/forget') {
+    if (!requireApiToken(req, res)) return
     let body = ''
     req.on('data', (c: Buffer) => { body += c.toString() })
     req.on('end', () => { void (async () => {
@@ -6115,6 +6179,7 @@ const server = http.createServer((req, res) => {
 
   // POST /api/graph/gremlin — Gremlin/TinkerPop traversal over HellGraph property graph
   if (req.method === 'POST' && url.pathname === '/api/graph/gremlin') {
+    if (!requireApiToken(req, res)) return
     void (async () => {
       setCORSHeaders(res)
       try {
@@ -6143,6 +6208,7 @@ const server = http.createServer((req, res) => {
 
   // POST /api/graph/sparql — SPARQL SELECT/CONSTRUCT/ASK over HellGraph property graph
   if (req.method === 'POST' && url.pathname === '/api/graph/sparql') {
+    if (!requireApiToken(req, res)) return
     void (async () => {
       setCORSHeaders(res)
       try {
@@ -6171,6 +6237,7 @@ const server = http.createServer((req, res) => {
 
   // POST /api/graph/cypher — Cypher query proxy to the HellGraph sidecar
   if (req.method === 'POST' && url.pathname === '/api/graph/cypher') {
+    if (!requireApiToken(req, res)) return
     void (async () => {
       setCORSHeaders(res)
       try {
@@ -6263,6 +6330,7 @@ Question: ${question}`
   // masks before cloud egress + user-defined sensitive terms to always mask. The user decides what the
   // AI may see. GET returns the policy + available categories; POST { disabled, terms } saves it.
   if (url.pathname === '/api/privacy/policy' && (req.method === 'GET' || req.method === 'POST')) {
+    if (!requireApiToken(req, res)) return
     if (req.method === 'GET') {
       setCORSHeaders(res)
       void (async () => {
@@ -6292,6 +6360,7 @@ Question: ${question}`
   // POST /api/privacy/redact — preview the PII/secret firewall: what would be masked before any cloud
   // egress. Body: { text }. Returns the redacted text + counts by kind (NOT the secret→placeholder map).
   if (req.method === 'POST' && url.pathname === '/api/privacy/redact') {
+    if (!requireApiToken(req, res)) return
     let body = ''
     req.on('data', (c: Buffer) => { body += c.toString() })
     req.on('end', () => { void (async () => {
@@ -7269,8 +7338,69 @@ Question: ${question}`
           res.end(JSON.stringify(report))
         }
       } catch (e) {
-        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) }))
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
       }
+    })()
+    return
+  }
+
+  // POST /api/data/onboarding — PDOR governed-data-onboarding decision (license/openness/tier/eligibility).
+  // The governed-dataset gate a cloud data platform needs (IBM Watson Knowledge Catalog analog): decides
+  // whether an asset may be LEARNED (brain-eligible) vs merely SEGMENTED (RAG-only), issues an ingest key.
+  if (req.method === 'POST' && url.pathname === '/api/data/onboarding') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { readBody: rb } = await import('./lib/read-body.js')
+        const parsed = JSON.parse(await rb(req)) as Record<string, unknown>
+        const { evaluatePdor } = await import('./lib/data-onboarding.js')
+        const pdor = parsed['pdor'] as Parameters<typeof evaluatePdor>[0]
+        if (!pdor || typeof pdor !== 'object') { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'pdor required' })); return }
+        const verdicts = (parsed['verdicts'] ?? []) as Parameters<typeof evaluatePdor>[1]
+        const opts = (parsed['opts'] ?? {}) as Parameters<typeof evaluatePdor>[2]
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(evaluatePdor(pdor, verdicts, opts)))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // POST /api/marketplace/validate — manifest permission-risk scoring + install command.
+  // POST /api/marketplace/search  — search a supplied app catalogue by query/kind.
+  if (req.method === 'POST' && (url.pathname === '/api/marketplace/validate' || url.pathname === '/api/marketplace/search')) {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { readBody: rb } = await import('./lib/read-body.js')
+        const parsed = JSON.parse(await rb(req)) as Record<string, unknown>
+        const { validateManifest, installCommand, searchApps } = await import('./lib/marketplace.js')
+        if (url.pathname === '/api/marketplace/search') {
+          const catalog = (parsed['catalog'] ?? []) as Parameters<typeof searchApps>[0]
+          const q = String(parsed['q'] ?? '')
+          const kind = parsed['kind'] as Parameters<typeof searchApps>[2]
+          res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ results: searchApps(catalog, q, kind) }))
+          return
+        }
+        const manifest = parsed['manifest'] as Parameters<typeof validateManifest>[0]
+        if (!manifest) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'manifest required' })); return }
+        const validation = validateManifest(manifest)
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ...validation, installCommand: installCommand(manifest) }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // POST /api/egress/gate — taint-based egress/tool-call authorization (trust-tier gate + lineage primitive).
+  if (req.method === 'POST' && url.pathname === '/api/egress/gate') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { readBody: rb } = await import('./lib/read-body.js')
+        const parsed = JSON.parse(await rb(req)) as Record<string, unknown>
+        const { gateEgress } = await import('./lib/capability-egress.js')
+        const args = (parsed['args'] ?? []) as Parameters<typeof gateEgress>[0]
+        const sink = (parsed['sink'] ?? { requires: 'trusted' }) as Parameters<typeof gateEgress>[1]
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(gateEgress(args, sink)))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -8050,6 +8180,7 @@ Question: ${question}`
   //   4. Convergent eval-repair — adversarial evaluator grades contract, repairs failures in a loop
   //   5. Progress file write — persist state for the NEXT session
   if (req.method === 'POST' && url.pathname === '/api/code/solve') {
+    if (!requireApiToken(req, res)) return
     let body = ''
     req.on('data', (c: Buffer) => { body += c.toString() })
     req.on('end', () => { void (async () => {
@@ -9899,7 +10030,7 @@ Question: ${question}`
         res.end(JSON.stringify({ error: 'not_found' }))
       } catch (e) {
         res.writeHead(500, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ error: 'internal_error', detail: String(e) }))
+        res.end(JSON.stringify({ error: 'internal_error' }))
       }
     })()
     return
@@ -9980,7 +10111,7 @@ Question: ${question}`
         }
         res.writeHead(405, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'method_not_allowed' }))
       } catch (e) {
-        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) }))
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
       }
     })()
     return
@@ -10016,7 +10147,7 @@ Question: ${question}`
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ suggestions, total: suggestions.length }))
       } catch (e) {
-        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) }))
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
       }
     })()
     return
@@ -10083,7 +10214,7 @@ Question: ${question}`
           res.end(JSON.stringify({ nodeId, card: updated, nextDue: new Date(updated.due).toISOString() }))
         }
       } catch (e) {
-        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) }))
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
       }
     })()
     return
@@ -10105,7 +10236,7 @@ Question: ${question}`
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ esn: { points: esn.points, anomalyCount: anomalies.length }, ftle, anomalies }))
       } catch (e) {
-        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: String(e) }))
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
       }
     })()
     return
@@ -10142,7 +10273,7 @@ Question: ${question}`
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ topic, curation, executionPerformed: false }))
       } catch (e) {
-        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: String(e) }))
+        res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
       }
     })()
     return
@@ -10163,7 +10294,7 @@ Question: ${question}`
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ encrypted, keySource, vectorCount }))
     } catch (e) {
-      res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: String(e) }))
+      res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' }))
     }
     return
   }
@@ -10214,7 +10345,7 @@ Question: ${question}`
           return
         }
         res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'not_found' }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -10229,7 +10360,7 @@ Question: ${question}`
         const results = findColocations(body.pings ?? [], { res: body.res, windowMs: body.windowMs, minMeetings: body.minMeetings })
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ colocations: results, count: results.length }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -10252,7 +10383,7 @@ Question: ${question}`
         const suggestions = suggestLinks(noteVec, candidates, { topK: body.topK, minSim: body.minSim, alreadyLinked: new Set(body.alreadyLinked ?? []) })
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ suggestions, count: suggestions.length }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -10268,7 +10399,7 @@ Question: ${question}`
         const valid = sanitizeUISpecs(body.specs ?? [])
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ results, valid, allowedComponents: [...ALLOWED_COMPONENTS] }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -10284,7 +10415,7 @@ Question: ${question}`
         const tree = buildMindMap(body.root, body.edges)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ tree, outline: flattenOutline(tree), nodeCount: countNodes(tree) }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -10300,6 +10431,5564 @@ Question: ${question}`
         const rules = mineRules(triples, { minConfidence, minSupport })
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ rules, count: rules.length, minConfidence, minSupport }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── NLI Entailment — is claim entailed / contradicted / neutral by context? ──
+  if (req.method === 'POST' && url.pathname === '/api/rag/entailment') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { classifyEntailmentSemantic, jaccard } = await import('./lib/entailment.js')
+        const hypothesis = typeof p['hypothesis'] === 'string' ? p['hypothesis'] : ''
+        const premise    = typeof p['premise']    === 'string' ? p['premise']    : ''
+        if (!hypothesis || !premise) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'hypothesis and premise required' })); return }
+        const threshold = typeof p['threshold'] === 'number' ? p['threshold'] : undefined
+        const result = await classifyEntailmentSemantic(premise, hypothesis, threshold !== undefined ? { threshold } : {})
+        const overlap = jaccard(premise, hypothesis)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ label: result, overlap, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Hybrid Retrieve — BM25 + dense RRF fusion ────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/hybrid') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { bm25, fuseHybrid } = await import('./lib/hybrid-retrieve.js')
+        const query = typeof p['query'] === 'string' ? p['query'] : ''
+        const docs  = Array.isArray(p['docs']) ? p['docs'] as Array<{ id: string; text: string }> : []
+        const denseRankedIds = Array.isArray(p['denseRankedIds']) ? p['denseRankedIds'] as string[] : []
+        if (!query || docs.length === 0) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'query and docs required' })); return }
+        const bm25Ranked = bm25(query, docs)
+        const fused = denseRankedIds.length ? fuseHybrid(query, docs, denseRankedIds) : bm25Ranked
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ bm25: bm25Ranked, fused, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Late Interaction Rerank — ColBERT-style MaxSim ───────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/late-interaction') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { rerankLate } = await import('./lib/late-interaction.js')
+        const queryVecs = p['queryVecs'] as number[][]
+        const docs      = p['docs']      as Array<{ id: string; vecs: number[][] }>
+        const topK      = typeof p['topK'] === 'number' ? p['topK'] : 10
+        if (!Array.isArray(queryVecs) || !Array.isArray(docs)) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'queryVecs and docs required' })); return }
+        const ranked = rerankLate(queryVecs, docs, topK)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ranked, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Reciprocal Rank Fusion — merge ranked lists ───────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/rerank-rrf') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { reciprocalRankFusion } = await import('./lib/rerank-rrf.js')
+        const rankings = p['rankings'] as string[][]
+        const k = typeof p['k'] === 'number' ? p['k'] : 60
+        if (!Array.isArray(rankings)) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'rankings (string[][]) required' })); return }
+        const fused = reciprocalRankFusion(rankings, k)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ fused, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Conformal Abstention — calibrate & apply abstention threshold ─────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/conformal') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { calibrateThreshold, shouldAbstain, coverageAt } = await import('./lib/conformal.js')
+        const calib = p['calib'] as Array<{ score: number; correct: boolean }>
+        const score = typeof p['score'] === 'number' ? p['score'] : null
+        const alpha = typeof p['alpha'] === 'number' ? p['alpha'] : 0.1
+        if (!Array.isArray(calib)) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'calib required' })); return }
+        const threshold = calibrateThreshold(calib, alpha)
+        const coverage  = coverageAt(calib, threshold)
+        const abstain   = score !== null ? shouldAbstain(score, threshold) : null
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ threshold, coverage, abstain, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Calibration Metrics — Brier + ECE + risk-coverage curve ──────────────────
+  if (req.method === 'POST' && url.pathname === '/api/calibration') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { brier, ece, riskCoverage } = await import('./lib/calibration.js')
+        const preds = p['preds'] as Array<{ confidence: number; correct: boolean }>
+        if (!Array.isArray(preds) || preds.length === 0) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'preds required' })); return }
+        const brierScore = brier(preds)
+        const eceScore   = ece(preds)
+        const rcCurve    = riskCoverage(preds)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ brier: brierScore, ece: eceScore, riskCoverage: rcCurve, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Semantic Probe — answer stability + score spread ─────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/semantic-probe') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { scoreSpread, answerStability } = await import('./lib/semantic-probe.js')
+        const scores  = Array.isArray(p['scores'])  ? (p['scores']  as unknown[]).map(Number) : []
+        const samples = Array.isArray(p['samples']) ? (p['samples'] as unknown[]).map(String) : []
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          spread:    scores.length  ? scoreSpread(scores)       : null,
+          stability: samples.length ? answerStability(samples)  : null,
+          executionPerformed: false,
+        }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Memory Provenance — write-trust classification + admit gate ──────────────
+  if (req.method === 'POST' && url.pathname === '/api/memory/provenance') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { classifyWriteTrust, admitWrite } = await import('./lib/memory-provenance.js')
+        const src     = (p['src'] ?? {}) as { author?: string; fromRetrieval?: boolean; origin?: string }
+        const content = typeof p['content'] === 'string' ? p['content'] : ''
+        const trust   = classifyWriteTrust(src)
+        const decision = content ? admitWrite({ content, trust }) : null
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ trust, decision, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Memory Import — parse + ingest a bulk memory export ─────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/memory/import') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { parseMemoryExport } = await import('./lib/memory-import.js')
+        const text   = typeof p['text']   === 'string' ? p['text']   : ''
+        const source = typeof p['source'] === 'string' ? p['source'] : 'import'
+        if (!text) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'text required' })); return }
+        const memories = parseMemoryExport(text, source)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ memories, count: memories.length, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Audit Chain — hash-chained tamper-evident log ───────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/audit/chain/build') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { buildChain, verifyChain } = await import('./lib/audit-chain.js')
+        const records = Array.isArray(p['records']) ? p['records'] as Record<string, unknown>[] : []
+        if (records.length === 0) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'records required' })); return }
+        const chain  = buildChain(records)
+        const verify = verifyChain(records, chain)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ chain, verify, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Blob Store — content-addressed binary store ──────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/blobs') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { putBlob } = await import('./lib/blob-store.js')
+        const data = typeof p['data'] === 'string' ? p['data'] : ''
+        if (!data) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'data required' })); return }
+        const ref = putBlob(data)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ref, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+  if (req.method === 'GET' && url.pathname === '/api/blobs') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { getBlob, hasBlob } = await import('./lib/blob-store.js')
+        const hash = url.searchParams.get('hash') ?? ''
+        if (!hash) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'hash required' })); return }
+        if (!hasBlob(hash)) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'not_found' })); return }
+        const data = getBlob(hash)
+        res.writeHead(200, { 'content-type': 'application/octet-stream' })
+        res.end(data)
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Geo Anomaly — emerging spatial hotspots ──────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/geo/hotspots') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { emergingHotspots } = await import('./lib/geo-anomaly.js')
+        const events = Array.isArray(p['events']) ? p['events'] as Array<{ lon: number; lat: number; t: number }> : []
+        if (events.length === 0) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'events required' })); return }
+        const windowMs  = typeof p['windowMs']  === 'number' ? p['windowMs']  : 3_600_000
+        const res_      = typeof p['res']       === 'number' ? p['res']       : 0.01
+        const minZ      = typeof p['minZ']      === 'number' ? p['minZ']      : 2
+        const hotspots = emergingHotspots(events, { now: Date.now(), windowMs, res: res_, minZ })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ hotspots, count: hotspots.length, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Geo Cells — H3-like cell aggregation ─────────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/geo/cells') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { aggregateByCell, kRing, cellCenter } = await import('./lib/geo-cells.js')
+        const points = Array.isArray(p['points']) ? p['points'] as Array<{ lon: number; lat: number }> : []
+        const res_   = typeof p['res'] === 'number' ? p['res'] : 0.01
+        if (points.length === 0) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'points required' })); return }
+        const byCell = aggregateByCell(points, res_)
+        const cells  = Array.from(byCell.entries()).map(([id, pts]) => ({ id, count: pts.length, center: cellCenter(id) }))
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ cells, total: cells.length, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Auto KG — extract triples from text + propose graph writes ──────────────
+  if (req.method === 'POST' && url.pathname === '/api/kg/auto') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { parseTriples, triplesToProposals, extractTriplesPrompt } = await import('./lib/auto-kg.js')
+        const text   = typeof p['text']   === 'string' ? p['text']   : ''
+        const source = typeof p['source'] === 'string' ? p['source'] : 'auto-kg'
+        if (!text) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'text required' })); return }
+        // If model output is provided, parse it; otherwise return the prompt for the caller to run.
+        const modelOutput = typeof p['modelOutput'] === 'string' ? p['modelOutput'] : null
+        if (modelOutput) {
+          const triples   = parseTriples(modelOutput)
+          const proposals = triplesToProposals(triples, source)
+          proposals.forEach((prop) => _graphProposals.set(prop.id, prop))
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ triples, proposals, count: triples.length, executionPerformed: false }))
+        } else {
+          const prompt = extractTriplesPrompt(text)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ prompt, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Entity Risk — signal-based risk score ────────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/entity/risk') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { entityRiskScore } = await import('./lib/entity-risk.js')
+        const signals = p['signals'] as Parameters<typeof entityRiskScore>[0]
+        if (!signals) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'signals required' })); return }
+        const result = entityRiskScore(signals)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Graph Shapes — SHACL-style node validation ───────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/graph/validate-shapes') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { validateAll } = await import('./lib/graph-shapes.js')
+        const nodes  = Array.isArray(p['nodes'])  ? p['nodes']  as Array<{ id: string; kind: string; props: Record<string, unknown> }> : []
+        const shapes = Array.isArray(p['shapes']) ? p['shapes'] as import('./lib/graph-shapes.js').Shape[] : []
+        if (nodes.length === 0 || shapes.length === 0) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'nodes and shapes required' })); return }
+        const violations = validateAll(nodes, shapes)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ violations, valid: violations.length === 0, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Lazy GraphRAG — budget-bounded subgraph extraction ───────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/graph/lazy-subgraph') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { lazySubgraph } = await import('./lib/lazy-graphrag.js')
+        const g = getHellGraph()
+        const seeds = Array.isArray(p['seeds']) ? p['seeds'] as string[] : []
+        const budget = typeof p['budget'] === 'number' ? p['budget'] : 25
+        if (seeds.length === 0) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'seeds required' })); return }
+        // Build adjacency map from HellGraph
+        const allEdges_ = g.allEdges() as Array<{ from: string; to: string; label?: string }>
+        const adj = new Map<string, Array<{ to: string; rel: string }>>()
+        for (const e of allEdges_) {
+          if (!adj.has(e.from)) adj.set(e.from, [])
+          adj.get(e.from)!.push({ to: e.to, rel: e.label ?? 'relates' })
+        }
+        // Relevance: seed nodes score 1, others by degree
+        const seedSet = new Set(seeds)
+        const result = lazySubgraph(adj, seeds, (node) => seedSet.has(node) ? 1 : (adj.get(node)?.length ?? 0) / 10, { budget })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Think-on-Graph — beam traversal for multi-hop reasoning ─────────────────
+  if (req.method === 'POST' && url.pathname === '/api/graph/beam-traverse') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { beamTraverse } = await import('./lib/think-on-graph.js')
+        const g = getHellGraph()
+        const seeds = Array.isArray(p['seeds']) ? p['seeds'] as string[] : []
+        const beam  = typeof p['beam']  === 'number' ? p['beam']  : 4
+        const depth = typeof p['depth'] === 'number' ? p['depth'] : 3
+        if (seeds.length === 0) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'seeds required' })); return }
+        const allEdges__ = g.allEdges() as Array<{ from: string; to: string; label?: string }>
+        const adj = new Map<string, Array<{ to: string; rel: string }>>()
+        for (const e of allEdges__) {
+          if (!adj.has(e.from)) adj.set(e.from, [])
+          adj.get(e.from)!.push({ to: e.to, rel: e.label ?? 'relates' })
+        }
+        const paths = beamTraverse(adj, seeds, (path) => path.nodes.length > 0 ? 1 / path.nodes.length : 0, { beam, depth })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ paths, count: paths.length, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Step Verify — process reward model for reasoning chains ─────────────────
+  if (req.method === 'POST' && url.pathname === '/api/reasoning/step-verify') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { stepValue } = await import('./lib/step-verify.js')
+        const rollout = Array.isArray(p['rollout']) ? (p['rollout'] as unknown[]).map(Boolean) : []
+        if (rollout.length === 0) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'rollout (boolean[]) required' })); return }
+        const value = stepValue(rollout)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ value, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Canon Route — deterministic query routing ────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/canon-route') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { canonRoute } = await import('./lib/canon-route.js')
+        const question = typeof p['question'] === 'string' ? p['question'] : ''
+        if (!question) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'question required' })); return }
+        const decision = canonRoute(question)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ decision, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── CRAG Vote — adaptive self-consistency gate ────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/crag-vote') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { cragVote } = await import('./lib/crag-gate.js')
+        const samples = Array.isArray(p['samples']) ? (p['samples'] as string[]) : []
+        const pattern = typeof p['pattern'] === 'string' ? p['pattern'] : null
+        if (samples.length === 0) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'samples required' })); return }
+        // Wrap pre-drawn samples so cragVote treats them as a sampler
+        const extract = (raw: string): string | null => {
+          if (pattern) { const m = new RegExp(pattern, 'i').exec(raw); return m ? (m[1] ?? m[0]).trim() : null }
+          return raw.trim().split('\n')[0]?.trim() ?? null
+        }
+        const result = await cragVote(async (i) => samples[i % samples.length] ?? '', extract, samples.length)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Council Vote — multi-arm weighted ensemble ────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/reasoning/council') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { councilVote } = await import('./lib/council.js')
+        const inp = p['input'] as import('./lib/council.js').CouncilInput
+        if (!inp || typeof inp['scLetter'] !== 'string') { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'input.scLetter required' })); return }
+        const result = councilVote(inp, { v2: p['v2'] === true, manip: p['manip'] === true })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Defeasible Reasoning — non-monotonic logic with superiority ──────────────
+  if (req.method === 'POST' && url.pathname === '/api/reasoning/defeasible') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { deriveDefeasible } = await import('./lib/defeasible.js')
+        const facts  = Array.isArray(p['facts'])       ? p['facts']       as string[]                             : []
+        const rules  = Array.isArray(p['rules'])       ? p['rules']       as import('./lib/defeasible.js').DefRule[]        : []
+        const supr   = Array.isArray(p['superiority']) ? p['superiority'] as import('./lib/defeasible.js').Superiority[]    : []
+        if (facts.length === 0 || rules.length === 0) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'facts and rules required' })); return }
+        const result = deriveDefeasible(facts, rules, supr)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Content Safeguard — policy-based content safety gate ─────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/content/safeguard') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { classify, gateSovereignLane, gateDefaultLane } = await import('./lib/content-safeguard.js')
+        const text = typeof p['text'] === 'string' ? p['text'] : ''
+        const lane = typeof p['lane'] === 'string' ? p['lane'] : 'default'
+        if (!text) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'text required' })); return }
+        const verdict = classify(text)
+        const gate = lane === 'sovereign' ? gateSovereignLane(text) : gateDefaultLane(text)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ verdict, gate, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Cite Match — best-source attribution for sentences ───────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/cite-match') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { bestSource } = await import('./lib/cite-match.js')
+        const sentences = Array.isArray(p['sentences']) ? p['sentences'] as string[] : []
+        const sources   = Array.isArray(p['sources'])   ? p['sources']   as import('./lib/cite-match.js').CiteSource[]     : []
+        const floor     = typeof p['floor'] === 'number' ? p['floor'] : 0.5
+        if (sentences.length === 0 || sources.length === 0) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'sentences and sources required' })); return }
+        const attributions = sentences.map((s) => ({ sentence: s, sourceIdx: bestSource(s, sources, floor) }))
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ attributions, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Choir Bench — model tier capability comparison ───────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/models/choir-bench') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { tierCapability, compareTiers } = await import('./lib/choir-bench.js')
+        const policies = Array.isArray(p['policies']) ? p['policies'] as Parameters<typeof tierCapability>[0][] : []
+        if (policies.length === 0) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'policies required' })); return }
+        const comparison = compareTiers(policies)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ comparison, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Cost Estimator — GPU run cost estimation ─────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/cloud/cost-estimate') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { estimateRun, estimateAll } = await import('./lib/cost-estimator.js')
+        const specs = Array.isArray(p['specs']) ? p['specs'] as import('./lib/cost-estimator.js').RunSpec[] : []
+        const spec  = p['spec'] as import('./lib/cost-estimator.js').RunSpec | undefined
+        if (!specs.length && !spec) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'spec or specs required' })); return }
+        const result = spec ? estimateRun(spec) : estimateAll(specs)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Geo Distance — haversine + point-in-polygon ───────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/geo/distance') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { haversine, pointInPolygon } = await import('./lib/geo-distance.js')
+        const a = p['a'] as { lon: number; lat: number } | undefined
+        const b = p['b'] as { lon: number; lat: number } | undefined
+        const pt   = p['point']   as { lon: number; lat: number } | undefined
+        const ring = Array.isArray(p['ring']) ? p['ring'] as Array<[number, number]> : []
+        if (!a && !pt) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'a+b or point+ring required' })); return }
+        const distKm = (a && b) ? haversine(a, b) : null
+        const inside = (pt && ring.length) ? pointInPolygon(pt, ring) : null
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ distKm, inside, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Inline Bind — evidence-grounded answer formatting ────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/inline-bind') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { formatEvidence, inlineBindPrompt, parseInlineAnswer } = await import('./lib/inline-bind.js')
+        const question  = typeof p['question']  === 'string' ? p['question']  : ''
+        const choices   = Array.isArray(p['choices'])   ? p['choices']   as string[] : []
+        const chunks_   = Array.isArray(p['chunks'])    ? p['chunks']    as Array<{ text: string }> : []
+        const modelOut  = typeof p['modelOutput'] === 'string' ? p['modelOutput'] : null
+        if (!question) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'question required' })); return }
+        const evidence = formatEvidence(chunks_)
+        const prompt   = inlineBindPrompt(question, choices, evidence)
+        const parsed   = modelOut ? parseInlineAnswer(modelOut) : null
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ prompt, parsed, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Isochrone — time-budget reachability graph ────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/geo/isochrone') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { reachableWithin } = await import('./lib/isochrone.js')
+        const graph_  = p['graph'] as Record<string, Array<{ to: string; minutes: number }>> | undefined
+        const source  = typeof p['source'] === 'string' ? p['source'] : ''
+        const budget  = typeof p['budget'] === 'number' ? p['budget'] : 30
+        if (!graph_ || !source) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'graph and source required' })); return }
+        const adjMap = new Map(Object.entries(graph_))
+        const reachable = reachableWithin(adjMap, source, budget)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ reachable, count: reachable.length, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── New Hope Membrane — content membrane conformance check ───────────────────
+  if (req.method === 'POST' && url.pathname === '/api/membrane/check') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { outcomeFor, conformsToMembrane } = await import('./lib/new-hope-membrane.js')
+        const event = p['event'] as Parameters<typeof conformsToMembrane>[0]
+        if (!event) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'event required' })); return }
+        const conformance = conformsToMembrane(event)
+        const outcome     = outcomeFor({ trust: p['trust'] as 'trusted' | 'internal' | 'untrusted', injected: Boolean(p['injected']), allowed: Boolean(p['allowed']) })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ conformance, outcome, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Fog Bridge — trust tier assignment ───────────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/fog/trust') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { meshTierToFogTrust, meetsTrust, trustRank } = await import('./lib/fog-bridge.js')
+        const tier    = typeof p['tier']    === 'string' ? p['tier']    : ''
+        const healthy = p['healthy'] !== false
+        if (!tier) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'tier required' })); return }
+        const fogTrust = meshTierToFogTrust(tier as Parameters<typeof meshTierToFogTrust>[0], { healthy })
+        const rank     = trustRank(fogTrust)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ fogTrust, rank, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Lattice Forge — runtime asset registration ────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/lattice/asset') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { modelRuntimeAsset, sidecarRuntimeAsset } = await import('./lib/lattice-forge.js')
+        const kind = typeof p['kind'] === 'string' ? p['kind'] : 'model'
+        let asset
+        if (kind === 'model') {
+          const model     = typeof p['model']     === 'string' ? p['model']     : ''
+          const createdAt = typeof p['createdAt'] === 'string' ? p['createdAt'] : new Date().toISOString()
+          if (!model) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'model required' })); return }
+          asset = modelRuntimeAsset(model, { createdAt, digest: typeof p['digest'] === 'string' ? p['digest'] : undefined })
+        } else {
+          const name         = typeof p['name']         === 'string' ? p['name']         : ''
+          const version      = typeof p['version']      === 'string' ? p['version']      : '0.0.0'
+          const createdAt    = typeof p['createdAt']    === 'string' ? p['createdAt']    : new Date().toISOString()
+          const languages    = Array.isArray(p['languages'])    ? p['languages']    as string[] : ['typescript']
+          const runtimeClass = typeof p['runtimeClass'] === 'string' ? p['runtimeClass'] : 'node'
+          if (!name) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'name required' })); return }
+          asset = sidecarRuntimeAsset(name, { version, createdAt, languages, runtimeClass })
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ asset, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Learning Path — prerequisite-ordered curriculum ──────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/learn/path') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { pathTo } = await import('./lib/learning-path.js')
+        const goal      = typeof p['goal']      === 'string' ? p['goal']      : ''
+        const completed = Array.isArray(p['completed']) ? p['completed'] as string[] : []
+        if (!goal) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'goal required' })); return }
+        const path = pathTo(goal, completed)
+        if (!path) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'goal_not_found' })); return }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ path, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Text Normalize — stem / tokenize / stopword filter ──────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/nlp/normalize') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { normalizeTerms, tokenize, stem } = await import('./lib/text-normalize.js')
+        const text = typeof p['text'] === 'string' ? p['text'] : ''
+        if (!text) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'text required' })); return }
+        const minLen = typeof p['minLen'] === 'number' ? p['minLen'] : 2
+        const tokens = tokenize(text)
+        const terms  = normalizeTerms(text, { minLen })
+        const stemmed = tokens.map(stem)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ tokens, terms, stemmed, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Vec Sim — cosine similarity between two vectors ──────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/vec-sim') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { cosineSim } = await import('./lib/vec-sim.js')
+        const a = Array.isArray(p['a']) ? (p['a'] as unknown[]).map(Number) : []
+        const b = Array.isArray(p['b']) ? (p['b'] as unknown[]).map(Number) : []
+        if (!a.length || !b.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'a and b vectors required' })); return }
+        const sim = cosineSim(a, b)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ sim, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── RAG Eval — retrieval precision/recall metrics ────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/eval') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { contextPrecision, contextRecall, contextualPrecisionAtK, noiseLeadingRanks } = await import('./lib/rag-eval.js')
+        const retrieved    = Array.isArray(p['retrieved'])    ? p['retrieved']    as Array<{ relevant: boolean }> : []
+        const referenceIds = Array.isArray(p['referenceIds']) ? p['referenceIds'] as string[]                     : []
+        const retrievedIds = Array.isArray(p['retrievedIds']) ? p['retrievedIds'] as string[]                     : []
+        const rankedRel    = retrieved.map((r) => r.relevant)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          precision:    retrieved.length                              ? contextPrecision(retrieved)                   : null,
+          recall:       (retrievedIds.length && referenceIds.length) ? contextRecall(retrievedIds, referenceIds)     : null,
+          precisionAtK: rankedRel.length                             ? contextualPrecisionAtK(rankedRel)             : null,
+          noiseLeading: rankedRel.length                             ? noiseLeadingRanks(rankedRel)                  : null,
+          executionPerformed: false,
+        }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── RAG Rerank Fuse — multi-signal fused reranking ───────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/fuse-rerank') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { fuseRerank } = await import('./lib/rag-rerank.js')
+        const semantic = Array.isArray(p['semantic']) ? p['semantic'] as import('./lib/rag-rerank.js').RankableHit[] : []
+        const lexical  = Array.isArray(p['lexical'])  ? p['lexical']  as import('./lib/rag-rerank.js').RankableHit[] : []
+        const query = typeof p['query'] === 'string' ? p['query'] : ''
+        if ((!semantic.length && !lexical.length) || !query) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'semantic/lexical hits and query required' })); return }
+        const ranked = fuseRerank(semantic, lexical, query)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ranked, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Reasoning Modes — token budget step advisor ───────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/reasoning/budget') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { budgetStep, draftChain } = await import('./lib/reasoning-modes.js')
+        const tokensUsed = typeof p['tokensUsed'] === 'number' ? p['tokensUsed'] : 0
+        const budget_    = typeof p['budget']     === 'number' ? p['budget']     : 2048
+        const steps      = Array.isArray(p['steps']) ? p['steps'] as string[] : []
+        const advice  = budgetStep(tokensUsed, budget_)
+        const drafts  = steps.length ? draftChain(steps) : []
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ advice, drafts, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Topic Closure — lexical cluster labels into closure sets ─────────────────
+  if (req.method === 'POST' && url.pathname === '/api/nlp/topic-closure') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { clusterByLexicalClosure } = await import('./lib/topic-closure.js')
+        const labels = Array.isArray(p['labels']) ? p['labels'] as string[] : []
+        if (!labels.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'labels required' })); return }
+        const result = clusterByLexicalClosure(labels)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Pattern of Life — behavioural deviation detection ────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/graph/pattern-of-life') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { buildBaseline, deviations } = await import('./lib/pattern-of-life.js')
+        const history  = Array.isArray(p['history'])  ? p['history']  as import('./lib/pattern-of-life.js').Activity[] : []
+        const activity = p['activity'] as import('./lib/pattern-of-life.js').Activity | undefined
+        if (!history.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'history required' })); return }
+        const baselines = buildBaseline(history)
+        const baselineObj = Object.fromEntries(Array.from(baselines.entries()).map(([k, v]) => [k, { hours: Array.from(v.hours), places: Array.from(v.places), count: v.count }]))
+        const devs = activity ? deviations(activity, baselines) : []
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ baselines: baselineObj, deviations: devs, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Symbol Query — structured symbolic query from question ───────────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/symbol-query') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { symbolQuery } = await import('./lib/symbol-query.js')
+        const question = typeof p['question'] === 'string' ? p['question'] : ''
+        if (!question) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'question required' })); return }
+        const extraHops = p['extraHops'] !== false
+        const sq = symbolQuery(question, extraHops)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ query: sq, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Plan Mode — structured plan creation + editing ───────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/plan') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { makePlan, editPlan, nextStep } = await import('./lib/plan-mode.js')
+        const steps = Array.isArray(p['steps']) ? p['steps'] as string[] : []
+        const plan_ = p['plan'] as import('./lib/plan-mode.js').Plan | undefined
+        const edits = p['edits'] as Parameters<typeof editPlan>[1] | undefined
+        if (!steps.length && !plan_) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'steps or plan required' })); return }
+        const plan   = plan_ ?? makePlan(steps)
+        const edited = edits ? editPlan(plan, edits) : plan
+        const next   = nextStep(edited)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ plan: edited, next, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Sherlock Evidence — build evidence answer from intel ─────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/intel/evidence-answer') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { buildEvidenceAnswer } = await import('./lib/sherlock-evidence.js')
+        const anchors  = Array.isArray(p['anchors'])  ? p['anchors']  as import('./lib/sherlock-evidence.js').Anchor[]       : []
+        const evidence = Array.isArray(p['evidence']) ? p['evidence'] as import('./lib/sherlock-evidence.js').EvidenceItem[]  : []
+        const proposedClaims = Array.isArray(p['proposedClaims']) ? p['proposedClaims'] as import('./lib/sherlock-evidence.js').ProposedClaim[] : []
+        const question = typeof p['question'] === 'string' ? p['question'] : ''
+        if (!anchors.length && !question) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'anchors or question required' })); return }
+        const answer = buildEvidenceAnswer({ anchors, evidence, proposedClaims, query: question })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ answer, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Characterization — tabular data profiling ─────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/data/characterize') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { parseDelimited } = await import('./lib/characterization.js')
+        const text  = typeof p['text']  === 'string' ? p['text']  : ''
+        const delim = typeof p['delim'] === 'string' ? p['delim'] : ','
+        if (!text) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'text required' })); return }
+        const table = parseDelimited(text, delim)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ table, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Proof Fabric — verified answer artifact ───────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/verify/proof-artifact') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { buildVerifiedAnswerArtifact, validateArtifact } = await import('./lib/proof-fabric.js')
+        const input    = p['input']    as import('./lib/proof-fabric.js').VerifiedAnswerInput | undefined
+        const existing = p['artifact']
+        if (existing) {
+          const valid = validateArtifact(existing)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ valid, executionPerformed: false }))
+          return
+        }
+        if (!input) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'input or artifact required' })); return }
+        const artifact = buildVerifiedAnswerArtifact(input)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ artifact, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Reasoning Benchmark — emit arm-level benchmark result ────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/reasoning/benchmark') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { emitReasoningBenchmark } = await import('./lib/reasoning-benchmark.js')
+        const result = p['result'] as import('./lib/reasoning-benchmark.js').BenchmarkResult | undefined
+        if (!result) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'result required' })); return }
+        const benchmark = emitReasoningBenchmark(result)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ benchmark, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── NLP / Chunk — entropy-aware semantic chunking ────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/nlp/chunk') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { hNetChunk } = await import('./lib/h-net-chunker.js')
+        const text = typeof p['text'] === 'string' ? p['text'] : ''
+        if (!text) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'text required' })); return }
+        const maxTokens = typeof p['maxTokens'] === 'number' ? p['maxTokens'] : 512
+        const minTokens = typeof p['minTokens'] === 'number' ? p['minTokens'] : 64
+        const chunks = hNetChunk(text, { maxTokens, minTokens })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ chunks, count: chunks.length }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Intel / Movement — stay-point detection from location pings ─────────────
+  if (req.method === 'POST' && url.pathname === '/api/intel/movement') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { detectStops } = await import('./lib/movement.js')
+        const pings = Array.isArray(p['pings']) ? p['pings'] as import('./lib/movement.js').Ping[] : []
+        if (!pings.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'pings required' })); return }
+        const maxMeters  = typeof p['maxMeters']  === 'number' ? p['maxMeters']  : 200
+        const minDwellMs = typeof p['minDwellMs'] === 'number' ? p['minDwellMs'] : 300_000
+        const stops = detectStops(pings, { maxMeters, minDwellMs })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ stops, count: stops.length }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Eval / Capture — promote production failures to regression cases ──────────
+  if (req.method === 'POST' && url.pathname === '/api/eval/capture') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { captureFailure } = await import('./lib/eval-capture.js')
+        const trace = p['trace'] as import('./lib/eval-capture.js').Trace | undefined
+        if (!trace) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'trace required' })); return }
+        const minCoverage = typeof p['minCoverage'] === 'number' ? p['minCoverage'] : undefined
+        const evalCase = captureFailure(trace, Date.now(), { minCoverage })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ evalCase, captured: evalCase !== null }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Eval / Replay — replay captured failures on current system ────────────────
+  if (req.method === 'POST' && url.pathname === '/api/eval/replay') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { parseEvalCases, selectForReplay, replayCase, summarizeReplay } = await import('./lib/eval-replay.js')
+        const casesRaw = typeof p['cases'] === 'string' ? p['cases'] : ''
+        const cap      = typeof p['cap']   === 'number'  ? p['cap']   : 20
+        if (!casesRaw) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'cases (JSONL string) required' })); return }
+        const cases    = selectForReplay(parseEvalCases(casesRaw), cap)
+        const outcomes = await Promise.all(cases.map((c) =>
+          replayCase(
+            c,
+            async (input) => {
+              const r = await generateOllamaText({ model: 'qwen3:14b', messages: [{ role: 'user', content: input }], temperature: 0.1 })
+              return { answer: r.content, sources: [] as { text: string }[] }
+            },
+            (answer, sources) => {
+              const covered = sources.length > 0
+              return { grounded: covered, score: covered ? 1 : 0 }
+            },
+          ).catch(() => null),
+        ))
+        const summary = summarizeReplay(outcomes.filter(Boolean) as Awaited<ReturnType<typeof replayCase>>[], Date.now())
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ summary, outcomes }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Eval / Memory Bench — score retriever on labeled probes ─────────────────
+  if (req.method === 'POST' && url.pathname === '/api/eval/memory-bench') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { runMemoryBench } = await import('./lib/memory-bench.js')
+        const { retrieveSimilar } = await import('./lib/solution-memory.js')
+        const probes = Array.isArray(p['probes']) ? p['probes'] as import('./lib/memory-bench.js').Probe[] : []
+        const k      = typeof p['k'] === 'number' ? p['k'] : 5
+        if (!probes.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'probes required' })); return }
+        const retriever = async (query: string, topK: number): Promise<string[]> => {
+          const hits = await retrieveSimilar(query, topK)
+          return hits.map((h) => h.task)
+        }
+        const result = await runMemoryBench(retriever, probes, k)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ result }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── A2A Trust — actor trust scoring + capability gating ─────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/a2a/trust/check') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { checkActorGrant } = await import('./lib/a2a-trust.js')
+        const rawSpiffe  = typeof p['spiffeId']   === 'string' ? p['spiffeId']   : ''
+        const spiffeId   = /^spiffe:\/\/[a-zA-Z0-9._-]+\/[^\s]+$/.test(rawSpiffe) ? rawSpiffe : ''
+        const capability = typeof p['capability'] === 'string' ? p['capability'] : ''
+        if (!spiffeId || !capability) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'valid spiffeId and capability required' })); return }
+        const floor = typeof p['floor'] === 'number' ? p['floor'] : undefined
+        const decision = floor !== undefined ? checkActorGrant(spiffeId, capability, floor) : checkActorGrant(spiffeId, capability)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...decision, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/a2a/trust/record') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { recordOutcome, authorityStatus, trustLedger } = await import('./lib/a2a-trust.js')
+        const rawId    = typeof p['spiffeId'] === 'string' ? p['spiffeId'] : ''
+        const spiffeId = /^spiffe:\/\/[a-zA-Z0-9._-]+\/[^\s]+$/.test(rawId) ? rawId : ''
+        if (!spiffeId) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'valid spiffeId required' })); return }
+        // Only update outcomes for already-registered actors (prevents arbitrary actor injection).
+        const ledger = trustLedger()
+        if (!Object.prototype.hasOwnProperty.call(ledger, spiffeId)) { res.writeHead(403, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'actor not registered' })); return }
+        const raw = typeof p['outcome'] === 'object' && p['outcome'] ? p['outcome'] as Record<string, unknown> : {}
+        const outcome: import('./lib/a2a-trust.js').TrustOutcome = {
+          ok:                 typeof raw['ok']                 === 'boolean' ? raw['ok']                 : undefined,
+          up:                 typeof raw['up']                 === 'boolean' ? raw['up']                 : undefined,
+          threat:             typeof raw['threat']             === 'boolean' ? raw['threat']             : undefined,
+          integrityViolation: typeof raw['integrityViolation'] === 'boolean' ? raw['integrityViolation'] : undefined,
+        }
+        const record = recordOutcome(spiffeId, outcome)
+        const status = authorityStatus(spiffeId)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ record, status, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/a2a/trust/ledger') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { trustLedger } = await import('./lib/a2a-trust.js')
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ledger: trustLedger(), executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Causal Graph — DAG analysis + identification strategies ──────────────────
+  if (req.method === 'POST' && url.pathname === '/api/causal/analyze') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { identifyCausalEffect, isAcyclic, topologicalSort, primaryCausalPath } = await import('./lib/causal-graph.js')
+        const dag = p['dag'] as import('./lib/causal-graph.js').CausalDAG | undefined
+        if (!dag) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'dag required' })); return }
+        const treatment = typeof p['treatment'] === 'string' ? p['treatment'] : undefined
+        const outcome   = typeof p['outcome']   === 'string' ? p['outcome']   : undefined
+        const identification = identifyCausalEffect(dag, treatment, outcome)
+        const acyclic   = isAcyclic(dag)
+        const topo      = acyclic ? topologicalSort(dag) : null
+        const path      = identification.identified && treatment && outcome ? primaryCausalPath(dag, treatment, outcome) : []
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ identification, acyclic, topologicalOrder: topo, primaryPath: path, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/causal/models') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { listCausalModels } = await import('./lib/causal-signal.js')
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ models: listCausalModels(), executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/causal/model') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { causalModelResponse } = await import('./lib/causal-signal.js')
+        const name = url.searchParams.get('name') ?? ''
+        if (!name) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'name query param required' })); return }
+        const result = causalModelResponse(name)
+        if (!result) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'model_not_found', name })); return }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Alignment — claim corroboration against brain statements ─────────────────
+  if (req.method === 'POST' && url.pathname === '/api/nlp/align') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { alignClaims, splitClaims } = await import('./lib/alignment.js')
+        const text   = typeof p['text'] === 'string' ? p['text'] : ''
+        const claims = Array.isArray(p['claims']) ? p['claims'] as string[] : text ? splitClaims(text) : []
+        const brain  = Array.isArray(p['brain'])  ? p['brain']  as import('./lib/alignment.js').BrainStatement[] : []
+        if (!claims.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'claims or text required' })); return }
+        const threshold = typeof p['threshold'] === 'number' ? p['threshold'] : undefined
+        const report = alignClaims(claims, brain, threshold !== undefined ? { threshold } : undefined)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...report, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── AG-UI — event validation + run construction ───────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/ag-ui/validate') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { isValidEvent, isWellFormedRun } = await import('./lib/ag-ui.js')
+        const event  = p['event']  as import('./lib/ag-ui.js').AGUIEvent | undefined
+        const events = Array.isArray(p['events']) ? p['events'] as import('./lib/ag-ui.js').AGUIEvent[] : undefined
+        if (event) {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ valid: isValidEvent(event), executionPerformed: false }))
+        } else if (events) {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ wellFormed: isWellFormedRun(events), executionPerformed: false }))
+        } else {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'event or events required' }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/ag-ui/build-run') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { buildTextRun } = await import('./lib/ag-ui.js')
+        const threadId  = typeof p['threadId']  === 'string' ? p['threadId']  : ''
+        const runId     = typeof p['runId']     === 'string' ? p['runId']     : ''
+        const messageId = typeof p['messageId'] === 'string' ? p['messageId'] : ''
+        const chunks    = Array.isArray(p['chunks']) ? p['chunks'] as string[] : []
+        if (!threadId || !runId || !messageId) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'threadId, runId, messageId required' })); return }
+        const events = buildTextRun(threadId, runId, messageId, chunks)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ events, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Artifact CMS — versioned content-addressed artifact store ────────────────
+  if (req.method === 'GET' && url.pathname === '/api/artifacts/cms') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { getArtifactCMS } = await import('./lib/artifact-cms.js')
+        const cms  = await getArtifactCMS()
+        const id   = url.searchParams.get('id')
+        if (id) {
+          const meta = cms.get(id)
+          if (!meta) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'not_found' })); return }
+          const version = url.searchParams.has('version') ? Number(url.searchParams.get('version')) : undefined
+          const content = cms.getContent(id, version)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ meta, content, history: cms.history(id), executionPerformed: false }))
+        } else {
+          const type = url.searchParams.get('type') as import('./lib/artifact-cms.js').ArtifactType | null
+          const tag  = url.searchParams.get('tag')  ?? undefined
+          const q    = url.searchParams.get('q')    ?? ''
+          const list = q ? cms.search(q) : cms.list(type ? { type, tag } : tag ? { tag } : undefined)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ artifacts: list, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/artifacts/cms') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { getArtifactCMS, persistArtifactCMS } = await import('./lib/artifact-cms.js')
+        const cms    = await getArtifactCMS()
+        const action = typeof p['action'] === 'string' ? p['action'] : 'create'
+        if (action === 'create') {
+          const title   = typeof p['title']   === 'string' ? p['title']   : 'Untitled'
+          const type    = (typeof p['type'] === 'string' ? p['type'] : 'document') as import('./lib/artifact-cms.js').ArtifactType
+          const content = typeof p['content'] === 'string' ? p['content'] : ''
+          const tags    = Array.isArray(p['tags']) ? p['tags'] as string[] : undefined
+          const meta    = cms.create({ title, type, content, tags })
+          await persistArtifactCMS()
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ meta, executionPerformed: false }))
+        } else if (action === 'update') {
+          const id      = typeof p['id']      === 'string' ? p['id']      : ''
+          const content = typeof p['content'] === 'string' ? p['content'] : ''
+          const message = typeof p['message'] === 'string' ? p['message'] : undefined
+          if (!id) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'id required' })); return }
+          const meta = cms.update(id, content, message)
+          if (!meta) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'not_found' })); return }
+          await persistArtifactCMS()
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ meta, executionPerformed: false }))
+        } else if (action === 'delete') {
+          const id = typeof p['id'] === 'string' ? p['id'] : ''
+          if (!id) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'id required' })); return }
+          const ok = cms.delete(id)
+          await persistArtifactCMS()
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok, executionPerformed: false }))
+        } else if (action === 'rollback') {
+          const id        = typeof p['id']        === 'string' ? p['id']        : ''
+          const toVersion = typeof p['toVersion'] === 'number' ? p['toVersion'] : 1
+          if (!id) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'id required' })); return }
+          const meta = cms.rollback(id, toVersion)
+          if (!meta) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'not_found' })); return }
+          await persistArtifactCMS()
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ meta, executionPerformed: false }))
+        } else {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'unknown action' }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Artifact Swarm — DHT-style content discovery across providers ─────────────
+  if (req.method === 'POST' && url.pathname === '/api/swarm/announce') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { getSwarm, persistSwarm } = await import('./lib/artifact-swarm.js')
+        const hash     = typeof p['hash']     === 'string' ? p['hash']     : ''
+        const title    = typeof p['title']    === 'string' ? p['title']    : 'Untitled'
+        const provider = typeof p['provider'] === 'string' ? p['provider'] : ''
+        if (!hash || !provider) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'hash and provider required' })); return }
+        const type = typeof p['type'] === 'string' ? p['type'] : 'document'
+        const size = typeof p['size'] === 'number' ? p['size'] : 0
+        const tags = Array.isArray(p['tags']) ? p['tags'] as string[] : undefined
+        const entry = getSwarm().announce({ hash, title, type, size, provider, tags })
+        await persistSwarm()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ entry: { ...entry, providers: Array.from(entry.providers) }, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/swarm/search') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { getSwarm } = await import('./lib/artifact-swarm.js')
+        const query = typeof p['query'] === 'string' ? p['query'] : ''
+        if (!query) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'query required' })); return }
+        const topK = typeof p['topK'] === 'number' ? p['topK'] : undefined
+        const type = typeof p['type'] === 'string' ? p['type'] : undefined
+        const results = getSwarm().search(query, { topK, type })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ results, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/swarm/health') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { getSwarm } = await import('./lib/artifact-swarm.js')
+        const hash = url.searchParams.get('hash') ?? ''
+        if (!hash) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'hash query param required' })); return }
+        const health    = getSwarm().health(hash)
+        const providers = getSwarm().providers(hash)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ hash, health, providers, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Choir Grounding — graph-grounded context + prompt assembly ───────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/choir-ground') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { buildGroundedContext, assemblePrompt, gateAction, checkGrounding } = await import('./lib/choir-grounding.js')
+        const focusNodeId = typeof p['focusNodeId'] === 'string' ? p['focusNodeId'] : ''
+        const question    = typeof p['question']    === 'string' ? p['question']    : ''
+        if (!focusNodeId || !question) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'focusNodeId and question required' })); return }
+        const action = (typeof p['action'] === 'string' ? p['action'] : 'ask') as import('./lib/choir-grounding.js').ChoirAction
+        const policy = (p['policy'] as import('./lib/choir-grounding.js').ChoirPolicy | undefined) ?? { read: true, write: false, egress: false }
+        const gate = gateAction(action, policy)
+        if (!gate.allowed) { res.writeHead(403, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'action_not_allowed', reason: gate.reason })); return }
+        // Build a KGraph view from HellGraph for the grounding context
+        const g_ = getHellGraph()
+        const hops = typeof p['hops'] === 'number' ? p['hops'] : undefined
+        const max  = typeof p['max']  === 'number' ? p['max']  : undefined
+        const allNodes_ = g_.allNodes() as unknown as Array<{ id: string; labels?: string[]; properties?: Record<string, unknown> }>
+        const allEdges_ = g_.allEdges() as Array<{ from: string; to: string; label?: string }>
+        const kGraph = {
+          nodes: allNodes_.map((n) => ({ id: n.id, kind: 'entity' as const, label: (n.labels?.[0] ?? n.id), props: n.properties ?? {} })),
+          edges: allEdges_.map((e) => ({ from: e.from, to: e.to, type: (e.label ?? 'RELATES') as import('./lib/knowledge-graph.js').EdgeType })),
+        }
+        const grounded = buildGroundedContext(kGraph, focusNodeId, hops !== undefined || max !== undefined ? { hops, max } : undefined)
+        const prompt   = assemblePrompt(action, question, grounded)
+        const answer   = typeof p['answer'] === 'string' ? p['answer'] : null
+        const groundingCheck = answer ? checkGrounding(answer, grounded) : null
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ grounded: { focus: grounded.focus, context: grounded.context, citationCount: grounded.citations.length }, prompt, groundingCheck, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Cloud Broker — multi-cloud compute brokering + vendor selection ───────────
+  if (req.method === 'POST' && url.pathname === '/api/cloud/broker/compute') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { brokerCompute, brokerSavings, toAgentplanePlacement } = await import('./lib/cloud-broker.js')
+        const req_ = p['request'] as import('./lib/cloud-broker.js').ComputeRequest | undefined
+        if (!req_) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'request required' })); return }
+        const result   = brokerCompute(req_)
+        const savings  = brokerSavings(result)
+        const placement = result.best ? toAgentplanePlacement(result) : null
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ result, savings, placement, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/cloud/broker/vendor') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { selectVendor, compareServices } = await import('./lib/cloud-broker.js')
+        const requirement = p['requirement'] as import('./lib/cloud-broker.js').ServiceRequirement | undefined
+        const kind = typeof p['kind'] === 'string' ? p['kind'] as import('./lib/cloud-broker.js').ServiceKind : undefined
+        if (requirement) {
+          const selection = selectVendor(requirement)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ selection, executionPerformed: false }))
+        } else if (kind) {
+          const offerings = compareServices(kind)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ offerings, executionPerformed: false }))
+        } else {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'requirement or kind required' }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Datalog Lite — semi-naive forward-chaining rule evaluation ────────────────
+  if (req.method === 'POST' && url.pathname === '/api/reason/datalog') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { evaluate } = await import('./lib/datalog-lite.js')
+        const facts = Array.isArray(p['facts']) ? p['facts'] as import('./lib/datalog-lite.js').Fact[] : []
+        const rules = Array.isArray(p['rules']) ? p['rules'] as import('./lib/datalog-lite.js').Rule[] : []
+        if (!facts.length && !rules.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'facts or rules required' })); return }
+        const maxIter = typeof p['maxIter'] === 'number' ? p['maxIter'] : undefined
+        const derived = evaluate(facts, rules, maxIter !== undefined ? { maxIter } : undefined)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ derived, count: derived.length, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Device Attestation — verify THIS device's own identity attestation ───────
+  // Note: the attestation is created from the server-side device-identity store (not
+  // user-provided keys) so the crypto path is under server control only.
+  if (req.method === 'POST' && url.pathname === '/api/device/attest/verify') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { createAttestation, verifyAttestation } = await import('./lib/device-attestation.js')
+        const attestation = createAttestation()   // uses the server's stored key — no user input in crypto path
+        const result = verifyAttestation(attestation)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Differential Privacy — noise-adding for count / histogram export ──────────
+  if (req.method === 'POST' && url.pathname === '/api/privacy/dp') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { privatizeCount, privatizeHistogram, laplaceNoise } = await import('./lib/dp-export.js')
+        const epsilon = typeof p['epsilon'] === 'number' ? p['epsilon'] : 1.0
+        const u       = Math.random() // fresh uniform draw per request
+        if (typeof p['count'] === 'number') {
+          const privatized = privatizeCount(p['count'] as number, epsilon, u)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ privatized, epsilon, executionPerformed: false }))
+        } else if (Array.isArray(p['counts'])) {
+          const counts     = (p['counts'] as unknown[]).map(Number)
+          const noiseFn    = (i: number) => laplaceNoise(1, epsilon, (u + i * 0.01) % 1)
+          const privatized = privatizeHistogram(counts, epsilon, noiseFn)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ privatized, epsilon, executionPerformed: false }))
+        } else {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'count or counts required' }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── GAIA Bridge — build GAIA-conformant JSON-LD records ──────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/graph/gaia/document') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { placeToFeatureEntry, entityToCanonical, gaiaDocument, conformsToGaia } = await import('./lib/gaia-bridge.js')
+        const places   = Array.isArray(p['places'])   ? p['places']   as Array<{ name: string; lat?: number; lon?: number; type?: string }> : []
+        const entities = Array.isArray(p['entities']) ? p['entities'] as Array<{ id: string; label: string }> : []
+        const records = [
+          ...places.map((pl) => placeToFeatureEntry(pl)),
+          ...entities.map((e) => entityToCanonical(e.id, e.label)),
+        ]
+        if (!records.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'places or entities required' })); return }
+        const doc        = gaiaDocument(records)
+        const conforms   = records.map((r) => conformsToGaia(r))
+        const allConform = conforms.every((c) => c.conforms)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ document: doc, conforms: allConform, violations: conforms.filter((c) => !c.conforms), executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── H-Net Chunker — hierarchical semantic text chunking ──────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/h-chunk') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { hNetChunk, hNetChunkTexts } = await import('./lib/h-net-chunker.js')
+        const text = typeof p['text'] === 'string' ? p['text'] : ''
+        if (!text) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'text required' })); return }
+        const opts: import('./lib/h-net-chunker.js').ChunkOptions = {}
+        if (typeof p['minTokens']          === 'number') opts.minTokens          = p['minTokens'] as number
+        if (typeof p['maxTokens']          === 'number') opts.maxTokens          = p['maxTokens'] as number
+        if (typeof p['windowSentences']    === 'number') opts.windowSentences    = p['windowSentences'] as number
+        if (typeof p['boundaryThreshold']  === 'number') opts.boundaryThreshold  = p['boundaryThreshold'] as number
+        const textsOnly = p['textsOnly'] === true
+        if (textsOnly) {
+          const texts = hNetChunkTexts(text, opts)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ texts, count: texts.length, executionPerformed: false }))
+        } else {
+          const chunks = hNetChunk(text, opts)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ chunks, count: chunks.length, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Knowledge Graph — doc projection + PageRank + path + query ────────────────
+  if (req.method === 'POST' && url.pathname === '/api/kg/analyze') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { pagerank, pathBetween, related, query: kgQuery, mergeGraphs } = await import('./lib/knowledge-graph.js')
+        const graphs = Array.isArray(p['graphs']) ? p['graphs'] as import('./lib/knowledge-graph.js').KGraph[] : []
+        const g = graphs.length > 1 ? mergeGraphs(graphs) : graphs[0]
+        if (!g) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'graphs required' })); return }
+        const op = typeof p['op'] === 'string' ? p['op'] : 'pagerank'
+        if (op === 'pagerank') {
+          const scores = pagerank(g)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ scores, executionPerformed: false }))
+        } else if (op === 'path') {
+          const a = typeof p['a'] === 'string' ? p['a'] : ''
+          const b = typeof p['b'] === 'string' ? p['b'] : ''
+          const path_ = pathBetween(g, a, b)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ path: path_, executionPerformed: false }))
+        } else if (op === 'related') {
+          const nodeId = typeof p['nodeId'] === 'string' ? p['nodeId'] : ''
+          const hops   = typeof p['hops']   === 'number' ? p['hops']   : undefined
+          const nodes  = related(g, nodeId, hops)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ nodes, executionPerformed: false }))
+        } else if (op === 'query') {
+          const type_ = typeof p['nodeType'] === 'string' ? p['nodeType'] : null
+          const nodes = kgQuery(g, type_ ? (n) => n.kind === type_ : () => true)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ nodes, executionPerformed: false }))
+        } else {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'unknown op', op }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Council Weights — model council configuration ─────────────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/models/council-weights') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { COUNCIL_WEIGHTS } = await import('./lib/council-weights.js')
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ weights: COUNCIL_WEIGHTS, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Movement — GPS stop detection + anomaly classification ──────────────────
+  if (req.method === 'POST' && url.pathname === '/api/intel/movement/stops') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { detectStops } = await import('./lib/movement.js')
+        const pings = Array.isArray(p['pings']) ? p['pings'] as import('./lib/movement.js').Ping[] : []
+        if (!pings.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'pings required' })); return }
+        const maxMeters  = typeof p['maxMeters']  === 'number' ? p['maxMeters']  : undefined
+        const minDwellMs = typeof p['minDwellMs'] === 'number' ? p['minDwellMs'] : undefined
+        const stops = detectStops(pings, (maxMeters !== undefined || minDwellMs !== undefined) ? { maxMeters, minDwellMs } : undefined)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ stops, count: stops.length, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Model Signing — manifest integrity verification ────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/models/verify-manifest') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { verifyManifest } = await import('./lib/model-signing.js')
+        const files    = Array.isArray(p['files'])    ? p['files']    as Array<{ path: string; sha256: string }> : []
+        const manifest = typeof p['manifest'] === 'object' && p['manifest'] ? p['manifest'] as Record<string, string> : {}
+        if (!files.length || !Object.keys(manifest).length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'files and manifest required' })); return }
+        const result = verifyManifest(files, manifest)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── OCW to PDOR — transform OCW resource into PDOR record ──────────────────
+  if (req.method === 'POST' && url.pathname === '/api/learn/ocw-to-pdor') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { ocwResourceToPdor } = await import('./lib/ocw-to-pdor.js')
+        const resource = p['resource'] as import('./lib/ocw-to-pdor.js').OcwResource | undefined
+        if (!resource) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'resource required' })); return }
+        const requester = typeof p['requester'] === 'string' ? p['requester'] : undefined
+        const pdor = ocwResourceToPdor(resource, requester !== undefined ? { requester } : undefined)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ pdor, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Operation Router — classify question into compute mode + tool ──────────
+  if (req.method === 'POST' && url.pathname === '/api/ops/route') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { operationRoute } = await import('./lib/operation-router.js')
+        const question = typeof p['question'] === 'string' ? p['question'] : ''
+        if (!question) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'question required' })); return }
+        const route = operationRoute(question)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ route, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Porter PaaS — generate + validate Porter deployment spec ──────────────
+  if (req.method === 'POST' && url.pathname === '/api/cloud/porter') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { porterApp, toPorterYaml, conformsToPorter, porterCommands } = await import('./lib/porter-paas.js')
+        const app = p['app'] as Partial<import('./lib/porter-paas.js').PorterApp> | undefined
+        if (app) {
+          const conforms  = conformsToPorter(app)
+          const yaml      = conforms.conforms ? toPorterYaml(app as import('./lib/porter-paas.js').PorterApp) : null
+          const commands  = conforms.conforms ? porterCommands((app as import('./lib/porter-paas.js').PorterApp).name) : null
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ conforms, yaml, commands, executionPerformed: false }))
+        } else {
+          const opts = p['opts'] as Parameters<typeof porterApp>[0] | undefined
+          if (!opts) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'app or opts required' })); return }
+          const built    = porterApp(opts)
+          const yaml     = toPorterYaml(built)
+          const commands = porterCommands(built.name)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ app: built, yaml, commands, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Prime Topics — prime-number topic algebra ───────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/nlp/prime-topics') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { exponentVector, dominantTopics, primeEncode, topicOverlap } = await import('./lib/prime-topics.js')
+        const weights  = typeof p['weights']  === 'object' && p['weights']  ? p['weights']  as Record<string, number> : {}
+        const weightsB = typeof p['weightsB'] === 'object' && p['weightsB'] ? p['weightsB'] as Record<string, number> : null
+        const topK_    = typeof p['topK']     === 'number' ? p['topK'] : 5
+        if (!Object.keys(weights).length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'weights required' })); return }
+        const ev  = exponentVector(weights)
+        const top = dominantTopics(ev, topK_)
+        const sig = primeEncode(ev).toString()
+        const overlap = weightsB ? topicOverlap(ev, exponentVector(weightsB)) : null
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ exponentVector: ev, dominantTopics: top, primeSignature: sig, overlap, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Reliability Gate — multi-arm vote gate ─────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/ops/reliability-gate') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { reliabilityGate } = await import('./lib/reliability-gate.js')
+        const question = typeof p['question'] === 'string' ? p['question'] : ''
+        const preds    = Array.isArray(p['preds']) ? p['preds'] as Array<string | null | undefined> : []
+        if (!question || !preds.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'question and preds required' })); return }
+        const result = reliabilityGate(question, preds)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Seat Scope — sovereign data access scope check ─────────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/seat/current') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { currentSeat } = await import('./lib/seat-scope.js')
+        const seat = currentSeat()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ seat, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/seat/check') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { deriveScopedSeat, seatCanAccess, currentSeat } = await import('./lib/seat-scope.js')
+        const collectionId = typeof p['collectionId'] === 'string' ? p['collectionId'] : ''
+        if (!collectionId) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'collectionId required' })); return }
+        const scopeId = typeof p['scopeId'] === 'string' ? p['scopeId'] : null
+        const seat = scopeId ? deriveScopedSeat(scopeId) : currentSeat()
+        const trustLevel = p['trustLevel'] as Parameters<typeof seatCanAccess>[2] | undefined
+        const allowed = seatCanAccess(seat, collectionId, trustLevel)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ allowed, seat: { scopeId: seat.scopeId, isOwner: seat.isOwner }, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Security Review — static review prompt builder + findings parser ────────
+  if (req.method === 'POST' && url.pathname === '/api/security/review-prompt') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { buildReviewPrompt, parseFindings, summarize } = await import('./lib/security-review.js')
+        const code    = typeof p['code']    === 'string' ? p['code']    : ''
+        const output  = typeof p['output']  === 'string' ? p['output']  : ''
+        const subject = typeof p['subject'] === 'string' ? p['subject'] : undefined
+        if (code) {
+          const prompt = buildReviewPrompt(code, subject !== undefined ? { subject } : undefined)
+          if (output) {
+            const findings = parseFindings(output)
+            const summary  = summarize(findings)
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ prompt, findings, summary, executionPerformed: false }))
+          } else {
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ prompt, executionPerformed: false }))
+          }
+        } else if (output) {
+          const findings = parseFindings(output)
+          const summary  = summarize(findings)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ findings, summary, executionPerformed: false }))
+        } else {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'code or output required' }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Session ID — validate safe session identifiers ─────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/session/validate-id') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { isSafeSessionId } = await import('./lib/session-id.js')
+        const id = typeof p['id'] === 'string' ? p['id'] : ''
+        if (!id) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'id required' })); return }
+        const safe = isSafeSessionId(id)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ id, safe, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Slash Topic Scope — apply topic pack scope filter ─────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/ops/topic-scope') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { applyScope, conformsToTopicPack } = await import('./lib/slash-topic-scope.js')
+        const pack = p['pack'] as import('./lib/slash-topic-scope.js').TopicPack | undefined
+        const items = Array.isArray(p['items']) ? p['items'] as Array<{ text: string }> : []
+        if (!pack) {
+          // validate only
+          const validity = conformsToTopicPack((p['packCandidate'] ?? {}) as Partial<import('./lib/slash-topic-scope.js').TopicPack>)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ...validity, executionPerformed: false }))
+          return
+        }
+        if (!items.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'items required' })); return }
+        const result = applyScope(items, pack)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── SynapseIQ Enrich — symbol extraction + knowledge triples ──────────────
+  if (req.method === 'POST' && url.pathname === '/api/data/symbol-extract') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { fallbackSymbols, enrichmentToTriples } = await import('./lib/synapseiq-enrich.js')
+        const content  = typeof p['content']  === 'string' ? p['content']  : ''
+        const filename = typeof p['filename'] === 'string' ? p['filename'] : undefined
+        const assetId  = typeof p['assetId']  === 'string' ? p['assetId']  : 'asset'
+        if (!content) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'content required' })); return }
+        const enrichment = fallbackSymbols(content, filename)
+        const triples    = enrichmentToTriples(assetId, enrichment as import('./lib/synapseiq-enrich.js').SynapseEnrichment)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ enrichment, triples, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Verb Sort — category-theoretic verb decomposition + closure ────────────
+  if (req.method === 'POST' && url.pathname === '/api/reason/verb-sort') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { sortVerb, adjointClosure } = await import('./lib/verb-sort.js')
+        const verb  = p['verb']  as import('./lib/verb-sort.js').Verb | undefined
+        const basis = Array.isArray(p['basis']) ? p['basis'] as string[] : []
+        const tau   = typeof p['tau'] === 'number' ? p['tau'] : 0.5
+        if (verb) {
+          const verdict = sortVerb(verb, tau)
+          const closure = basis.length ? adjointClosure(basis) : null
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ verdict, closure, executionPerformed: false }))
+        } else if (basis.length) {
+          const closure = adjointClosure(basis)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ closure, executionPerformed: false }))
+        } else {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'verb or basis required' }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Sync Engine — CRDT replica delta + merge ─────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/sync/replica') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { createReplica, addNode, addEdge, presentNodes, presentEdges, fingerprint } = await import('./lib/sync-engine.js')
+        const replicaId = typeof p['replicaId'] === 'string' ? p['replicaId'] : 'r1'
+        const ops = Array.isArray(p['ops']) ? p['ops'] as Array<{ type: string; id?: string; from?: string; to?: string; label?: string }> : []
+        const r = createReplica(replicaId)
+        for (const op of ops) {
+          if (op.type === 'addNode' && op.id)                     addNode(r, op.id)
+          else if (op.type === 'addEdge' && op.from && op.to)     addEdge(r, op.from, op.label ?? 'rel', op.to)
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          nodes:       presentNodes(r),
+          edges:       presentEdges(r),
+          fingerprint: fingerprint(r),
+          executionPerformed: false,
+        }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Checkpoint — in-memory pipeline step tracking ────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/ops/checkpoint') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { newCheckpoint, recordStep, isDone, remainingSteps, isComplete } = await import('./lib/checkpoint.js')
+        const action  = typeof p['action']  === 'string' ? p['action']  : 'new'
+        const runId   = typeof p['runId']   === 'string' ? p['runId']   : 'run'
+        const allSteps = Array.isArray(p['allSteps']) ? p['allSteps'] as string[] : []
+        if (action === 'new') {
+          const cp = newCheckpoint(runId)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ checkpoint: cp, executionPerformed: false }))
+        } else if (action === 'record') {
+          const cp     = p['checkpoint'] as import('./lib/checkpoint.js').Checkpoint
+          const stepId = typeof p['stepId'] === 'string' ? p['stepId'] : ''
+          const state  = typeof p['state']  === 'object' && p['state'] ? p['state'] as Record<string, unknown> : undefined
+          if (!cp || !stepId) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'checkpoint and stepId required' })); return }
+          const updated = recordStep(cp, stepId, state)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ checkpoint: updated, executionPerformed: false }))
+        } else if (action === 'status') {
+          const cp     = p['checkpoint'] as import('./lib/checkpoint.js').Checkpoint
+          const stepId = typeof p['stepId'] === 'string' ? p['stepId'] : null
+          if (!cp) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'checkpoint required' })); return }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({
+            done:      stepId ? isDone(cp, stepId) : null,
+            remaining: allSteps.length ? remainingSteps(cp, allSteps) : null,
+            complete:  allSteps.length ? isComplete(cp, allSteps) : null,
+            executionPerformed: false,
+          }))
+        } else {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'unknown action', action }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Judge — jury vote + swap-robust winner determination ──────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/eval/jury-vote') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { juryVote, swapRobustWinner } = await import('./lib/judge.js')
+        const verdicts = Array.isArray(p['verdicts']) ? p['verdicts'] as Array<'a' | 'b' | 'tie'> : []
+        if (!verdicts.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'verdicts required' })); return }
+        const vote = juryVote(verdicts)
+        const swapped = Array.isArray(p['swappedVerdicts']) ? p['swappedVerdicts'] as Array<'a' | 'b' | 'tie'> : null
+        const robust = swapped ? swapRobustWinner(vote.winner, juryVote(swapped).winner) : null
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ vote, robustWinner: robust, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Self-Consistency — majority vote over model answers ───────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/eval/consistency') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { majorityVote } = await import('./lib/self-consistency.js')
+        const answers = Array.isArray(p['answers']) ? p['answers'] as string[] : []
+        if (!answers.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'answers required' })); return }
+        const result = majorityVote(answers)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Topic Tier — lexical-cosine tiered topic grounding ────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/nlp/topic-tier') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { groundTiered } = await import('./lib/topic-tier.js')
+        const cands = Array.isArray(p['candidates']) ? p['candidates'] as import('./lib/topic-tier.js').TierTopic[] : []
+        if (!cands.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'candidates required' })); return }
+        const middleFloor = typeof p['middleFloor'] === 'number' ? p['middleFloor'] : undefined
+        const lowerFloor  = typeof p['lowerFloor']  === 'number' ? p['lowerFloor']  : undefined
+        const grounding = groundTiered(cands, (middleFloor !== undefined || lowerFloor !== undefined) ? { middleFloor, lowerFloor } : undefined)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ grounding, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── OpenCog Values — probabilistic truth values + attention algebra ───────────
+  if (req.method === 'POST' && url.pathname === '/api/reason/truth-values') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { stv, deduction, revision, expectation, stimulate, decay, weightedPageRank } = await import('./lib/opencog-values.js')
+        const op  = typeof p['op']  === 'string' ? p['op']  : 'stv'
+        const s   = typeof p['s']   === 'number' ? p['s']   : 0
+        const c   = typeof p['c']   === 'number' ? p['c']   : 0
+        const tv1 = p['tv1'] as import('./lib/opencog-values.js').TruthValue | undefined
+        const tv2 = p['tv2'] as import('./lib/opencog-values.js').TruthValue | undefined
+        if (op === 'stv') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ tv: stv(s, c), executionPerformed: false }))
+        } else if (op === 'deduction' && tv1 && tv2) {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ tv: deduction(tv1, tv2), expectation: expectation(deduction(tv1, tv2)), executionPerformed: false }))
+        } else if (op === 'revision' && tv1 && tv2) {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ tv: revision(tv1, tv2), executionPerformed: false }))
+        } else if (op === 'attention') {
+          const av  = p['av'] as import('./lib/opencog-values.js').AttentionValue | undefined
+          const amt = typeof p['amount'] === 'number' ? p['amount'] : 1
+          const rate = typeof p['rate']  === 'number' ? p['rate']  : undefined
+          if (!av) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'av required for attention op' })); return }
+          const decayed   = rate !== undefined ? decay(av, rate) : decay(av)
+          const stimulated = stimulate(av, amt)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ decayed, stimulated, executionPerformed: false }))
+        } else if (op === 'pagerank') {
+          const nodes = Array.isArray(p['nodes']) ? p['nodes'] as string[] : []
+          const edges = Array.isArray(p['edges']) ? p['edges'] as import('./lib/opencog-values.js').WeightedEdge[] : []
+          if (!nodes.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'nodes required for pagerank' })); return }
+          const scores = weightedPageRank(nodes, edges)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ scores: Object.fromEntries(scores), executionPerformed: false }))
+        } else {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'op must be stv|deduction|revision|attention|pagerank' }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Provenance — logical proof tree construction + explanation ────────────────
+  if (req.method === 'POST' && url.pathname === '/api/data/provenance') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { buildProof, baseFacts, rulesUsed, explainProof } = await import('./lib/provenance.js')
+        const fact = typeof p['fact'] === 'string' ? p['fact'] : ''
+        const derivations = p['derivations'] as Array<[string, { rule: string; premises: string[] }]> | undefined
+        if (!fact || !derivations?.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'fact and derivations required' })); return }
+        const derivMap = new Map<string, import('./lib/provenance.js').Derivation>(derivations)
+        const proof    = buildProof(fact, derivMap)
+        const depth    = typeof p['depth'] === 'number' ? p['depth'] : undefined
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ proof, baseFacts: baseFacts(proof), rulesUsed: rulesUsed(proof), explanation: explainProof(proof, depth), executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Ops Brain — semantic operational knowledge retrieval ─────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/ops/brain') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { opsBrainReady, opsBrainRetrieve } = await import('./lib/ops-brain.js')
+        const query = url.searchParams.get('q') ?? ''
+        const k     = parseInt(url.searchParams.get('k') ?? '5', 10)
+        if (!opsBrainReady()) {
+          res.writeHead(503, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'ops_brain_not_ready' }))
+          return
+        }
+        const hits = opsBrainRetrieve(query || 'status', isNaN(k) ? 5 : k)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ hits, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Multi-Agent — task decomposition + result aggregation ────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/agent/decompose') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { decompose, aggregate } = await import('./lib/multi-agent.js')
+        const parts   = Array.isArray(p['parts'])   ? p['parts']   as Array<{ objective: string; difficulty?: number }> : []
+        const results = Array.isArray(p['results']) ? p['results'] as Array<{ id: string; output: string; confidence?: number }> : []
+        if (!parts.length && !results.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'parts or results required' })); return }
+        const subtasks   = parts.length   ? decompose(parts)   : null
+        const aggregated = results.length ? aggregate(results) : null
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ subtasks, aggregated, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Connector Receipt — emit + verify data ingestion receipt ─────────────────
+  if (req.method === 'POST' && url.pathname === '/api/connector/receipt') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { emitConnectorReceipt, manifestHash } = await import('./lib/connector-receipt.js')
+        const action = typeof p['action'] === 'string' ? p['action'] : 'emit'
+        if (action === 'manifest-hash') {
+          const manifest = Array.isArray(p['manifest']) ? p['manifest'] as Array<{ filename: string; bytes: number }> : []
+          if (!manifest.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'manifest required' })); return }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ hash: manifestHash(manifest), executionPerformed: false }))
+          return
+        }
+        const args = p['args'] as Parameters<typeof emitConnectorReceipt>[0] | undefined
+        if (!args) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'args required' })); return }
+        const receipt = emitConnectorReceipt(args)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ receipt, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Office Toolkit — document format detection + conversion args ──────────────
+  if (req.method === 'GET' && url.pathname === '/api/data/office/can-view') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { canView, viewTargetFor } = await import('./lib/office-toolkit.js')
+        const filename = url.searchParams.get('filename') ?? ''
+        if (!filename) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'filename query param required' })); return }
+        const viewable = canView(filename)
+        const target   = viewable ? viewTargetFor(filename) : null
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ filename, canView: viewable, convertTo: target, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Runtime Orchestrator — pure bootstrap plan generation ────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/ops/runtime-plan') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { planBootstrap } = await import('./lib/runtime-orchestrator.js')
+        const profile = p['profile'] as import('./lib/host-profile.js').HostProfile | undefined
+        if (!profile) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'profile required' })); return }
+        const installed = Array.isArray(p['installedModels']) ? p['installedModels'] as string[] : undefined
+        const plan = planBootstrap(profile, installed)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ plan, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Knowledge Persist — in-degree centrality over stored edges ───────────────
+  if (req.method === 'POST' && url.pathname === '/api/kg/centrality') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { centralityOverStored } = await import('./lib/knowledge-persist.js')
+        const edges = Array.isArray(p['edges']) ? p['edges'] as import('./lib/knowledge-persist.js').StoredEdge[] : []
+        if (!edges.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'edges required' })); return }
+        const limit = typeof p['limit'] === 'number' ? p['limit'] : undefined
+        const ranked = centralityOverStored(edges, limit)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ranked, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Session Graph — extract file ontology (symbols, imports) ─────────────────
+  if (req.method === 'POST' && url.pathname === '/api/session/extract-ontology') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { extractFileOntology } = await import('./lib/session-graph.js')
+        const path_   = typeof p['path']    === 'string' ? p['path']    : ''
+        const content = typeof p['content'] === 'string' ? p['content'] : ''
+        if (!path_ || !content) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'path and content required' })); return }
+        const ontology = extractFileOntology(path_, content)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ontology, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Vector Index — build ephemeral index + k-NN search ───────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/vector/search') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { VectorIndex, hybridGraphVector } = await import('./lib/vector-index.js')
+        const items = Array.isArray(p['items']) ? p['items'] as Array<{ id: string; vec: number[] }> : []
+        const query = Array.isArray(p['query']) ? p['query'] as number[] : []
+        if (!items.length || !query.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'items and query required' })); return }
+        const k    = typeof p['k']    === 'number' ? p['k']    : 5
+        const mode = typeof p['mode'] === 'string' ? p['mode'] : 'knn'
+        const idx  = new VectorIndex()
+        idx.addMany(items)
+        if (mode === 'hybrid') {
+          const adjRaw = typeof p['adj'] === 'object' && p['adj'] ? p['adj'] as Record<string, string[]> : {}
+          const adj    = new Map<string, string[]>(Object.entries(adjRaw))
+          const hops   = typeof p['hops'] === 'number' ? p['hops'] : undefined
+          const hits   = hybridGraphVector(query, idx, adj, { k, hops })
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ hits, executionPerformed: false }))
+        } else {
+          const hits = idx.search(query, k)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ hits, size: idx.size(), executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Sovereign Identity — verify scope facet signature ────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/identity/verify-facet') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { verifyFacet } = await import('./lib/sovereign-id.js')
+        const pubHex = typeof p['publicKeyHex'] === 'string' ? p['publicKeyHex'] : ''
+        const msgStr = typeof p['message']      === 'string' ? p['message']      : ''
+        const sigHex = typeof p['signatureHex'] === 'string' ? p['signatureHex'] : ''
+        if (!pubHex || !msgStr || !sigHex) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'publicKeyHex, message, signatureHex required' })); return }
+        const valid = verifyFacet(Buffer.from(pubHex, 'hex'), msgStr, Buffer.from(sigHex, 'hex'))
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ valid, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Sovereign Identity — derive scope-scoped email alias ──────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/identity/scope-alias') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { loadOrCreateRoot, scopeAlias } = await import('./lib/sovereign-id.js')
+        const scopeId = typeof p['scopeId'] === 'string' ? p['scopeId'] : ''
+        const domain  = typeof p['domain']  === 'string' ? p['domain']  : ''
+        if (!scopeId || !domain) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'scopeId and domain required' })); return }
+        const root  = loadOrCreateRoot()
+        const alias = scopeAlias(root, scopeId, domain)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ alias, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Sovereign Vault — AES-256-GCM seal under scope key ───────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/vault/seal') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { sealForScope } = await import('./lib/sovereign-vault.js')
+        const { loadOrCreateRoot } = await import('./lib/sovereign-id.js')
+        const scopeId   = typeof p['scopeId']   === 'string' ? p['scopeId']   : ''
+        const plaintext = typeof p['plaintext'] === 'string' ? p['plaintext'] : ''
+        if (!scopeId || !plaintext) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'scopeId and plaintext required' })); return }
+        const root = loadOrCreateRoot()
+        const blob = sealForScope(root, scopeId, plaintext)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ blob, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Sovereign Vault — AES-256-GCM open under scope key ───────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/vault/open') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { openForScope } = await import('./lib/sovereign-vault.js')
+        const { loadOrCreateRoot } = await import('./lib/sovereign-id.js')
+        const scopeId = typeof p['scopeId'] === 'string' ? p['scopeId'] : ''
+        const blob    = typeof p['blob']    === 'string' ? p['blob']    : ''
+        if (!scopeId || !blob) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'scopeId and blob required' })); return }
+        const root      = loadOrCreateRoot()
+        const plaintext = openForScope(root, scopeId, blob).toString('utf8')
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ plaintext, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Remediation — lesson count from ops knowledge base ───────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/remediation/count') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { remediationCount } = await import('./lib/remediation.js')
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ count: remediationCount(), executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Blackboard — ephemeral shared workspace (writes applied, then read/snapshot)
+  if (req.method === 'POST' && url.pathname === '/api/blackboard/op') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { Blackboard } = await import('./lib/blackboard.js')
+        const op  = typeof p['op'] === 'string' ? p['op'] : 'snapshot'
+        const bb  = new Blackboard()
+        const writes = Array.isArray(p['writes']) ? p['writes'] as Array<{ key: string; value: unknown; by: string }> : []
+        for (const w of writes) {
+          if (typeof w['key'] === 'string' && typeof w['by'] === 'string') bb.write(w['key'], w['value'], w['by'])
+        }
+        if (op === 'snapshot') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ snapshot: bb.snapshot(), keys: bb.keys(), executionPerformed: false }))
+        } else if (op === 'read') {
+          const key = typeof p['key'] === 'string' ? p['key'] : ''
+          if (!key) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'key required for read op' })); return }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ value: bb.read(key), has: bb.has(key), version: bb.version(key), history: bb.history(key), executionPerformed: false }))
+        } else {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'op must be snapshot|read' }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── RAG / RAPTOR — recursive abstractive tree retrieval ──────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/raptor') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { buildRaptorIndex, raptorRetrieve } = await import('./lib/raptor-runtime.js')
+        const query     = typeof p['query']     === 'string' ? p['query']     : ''
+        const corpusKey = typeof p['corpusKey'] === 'string' ? p['corpusKey'] : 'default'
+        const chunks    = Array.isArray(p['chunks']) ? p['chunks'] as string[] : []
+        const topK      = typeof p['topK']      === 'number' ? p['topK']      : 6
+        if (!query) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'query required' })); return }
+        const tree = await buildRaptorIndex(corpusKey, chunks)
+        const results = await raptorRetrieve(tree, query, topK)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ results, count: results.length }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── RAG / Tiered Ground — KKO 3-tier ontology grounding ──────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/tiered-ground') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { tieredGround } = await import('./lib/tiered-ground.js')
+        const question = typeof p['question'] === 'string' ? p['question'] : typeof p['query'] === 'string' ? p['query'] : ''
+        if (!question) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'question required' })); return }
+        const result = await tieredGround(question)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ result }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Agent / Coordinate — file-claim locking for parallel agents ───────────────
+  if (req.method === 'POST' && url.pathname === '/api/agent/coordinate') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { claimFiles, releaseClaims, activeClaims, coordinationBrief, ensureAgent } = await import('./lib/agent-coordination.js')
+        type CoordNode = { id: string; labels: string[]; properties: Record<string, unknown> }
+        const g = globalThis as Record<string, unknown>
+        if (!g['__coordStore']) {
+          const ns = new Map<string, CoordNode>()
+          const es: Array<{ label: string; from: string; to: string }> = []
+          g['__coordStore'] = {
+            getNode: (id: string) => ns.get(id) ?? null,
+            addNode: (id: string, labels: string[], properties: Record<string, unknown>) => { const n = { id, labels, properties }; ns.set(id, n); return n },
+            addEdge: (label: string, from: string, to: string) => { es.push({ label, from, to }) },
+            out: (id: string, edgeLabel?: string) => es.filter(e => e.from === id && (edgeLabel == null || e.label === edgeLabel)).map(e => ns.get(e.to)).filter(Boolean) as CoordNode[],
+            nodesByLabel: (label: string) => [...ns.values()].filter(n => n.labels.includes(label)),
+          }
+        }
+        const store = g['__coordStore'] as Parameters<typeof claimFiles>[0]
+        const action    = typeof p['action']    === 'string' ? p['action']    : 'active'
+        const agentId   = typeof p['agentId']   === 'string' ? p['agentId']   : 'anon'
+        const sessionId = typeof p['sessionId'] === 'string' ? p['sessionId'] : 'default'
+        const paths     = Array.isArray(p['paths']) ? p['paths'] as string[] : []
+        ensureAgent(store, agentId, sessionId)
+        if (action === 'claim') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(claimFiles(store, { agentId, sessionId, paths }))); return }
+        if (action === 'release') { releaseClaims(store, agentId, paths); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ released: true })); return }
+        if (action === 'brief') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ brief: coordinationBrief(store, agentId) })); return }
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ active: activeClaims(store) }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Blackboard — shared keyed artifact store for multi-agent work ─────────────
+  if ((req.method === 'GET' || req.method === 'POST') && url.pathname === '/api/blackboard') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { Blackboard } = await import('./lib/blackboard.js')
+        const g = globalThis as Record<string, unknown>
+        if (!g['__blackboard']) g['__blackboard'] = new Blackboard()
+        const bb = g['__blackboard'] as InstanceType<typeof Blackboard>
+        if (req.method === 'GET') {
+          const key = url.searchParams.get('key')
+          if (key) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ value: bb.read(key), history: bb.history(key) })); return }
+          res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ keys: bb.keys(), snapshot: bb.snapshot() })); return
+        }
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const key = typeof p['key'] === 'string' ? p['key'] : ''
+        const by  = typeof p['by']  === 'string' ? p['by']  : 'api'
+        if (!key) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'key required' })); return }
+        bb.write(key, p['value'], by)
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ version: bb.version(key) }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Learn / Remediate — learn-from-failure distillation loop ─────────────────
+  if (req.method === 'POST' && url.pathname === '/api/learn/remediate') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { remediateFailure } = await import('./lib/remediation.js')
+        const failure = p['failure'] as import('./lib/remediation.js').Failure | undefined
+        if (!failure) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'failure required' })); return }
+        const lesson = await remediateFailure(failure)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ lesson }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Tune / Teacher-Refine — bounded teacher-student refinement loop ───────────
+  if (req.method === 'POST' && url.pathname === '/api/tune/teacher-refine') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { teacherStudentRefine } = await import('./lib/teacher-critique.js')
+        const trajectory = p['trajectory'] as import('./lib/teacher-critique.js').StudentTrajectory | undefined
+        if (!trajectory) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'trajectory required' })); return }
+        const maxRounds = typeof p['maxRounds'] === 'number' ? p['maxRounds'] : 3
+        const gen = (prompt: string) => generateOllamaText({ model: 'qwen3:14b', messages: [{ role: 'user', content: prompt }], temperature: 0.3 }).then((r) => r.content)
+        const deps = {
+          retrieve: async (_task: string, k: number) => { const r = await gen(`List ${k} relevant lessons for: ${_task}`); return r.split('\n').filter(Boolean).slice(0, k) },
+          critique: async (traj: import('./lib/teacher-critique.js').StudentTrajectory, retrieved: string[]) => {
+            const raw = await gen(`You are a teacher. Student answer: "${traj.answer}". Context: ${retrieved.join('; ')}. Critique in JSON: {"critique":"...","proposedAnswer":"...","confidence":0.8}`)
+            try { return JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] ?? '{}') } catch { return { critique: raw, proposedAnswer: traj.answer, confidence: 0.5 } }
+          },
+        }
+        const result = await teacherStudentRefine(trajectory, deps, { maxRounds })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ result }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Session Graph — per-session knowledge graph + long-horizon context ────────
+  if ((req.method === 'POST' || req.method === 'GET') && url.pathname === '/api/session/graph') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { buildSessionContext, recordTurnAtom, ensureSession } = await import('./lib/session-graph.js')
+        type SGNode = { id: string; labels: string[]; properties: Record<string, unknown> }
+        const g = globalThis as Record<string, unknown>
+        if (!g['__sessionGraphStore']) {
+          const ns = new Map<string, SGNode>()
+          const es: Array<{ label: string; from: string; to: string }> = []
+          g['__sessionGraphStore'] = {
+            getNode: (id: string) => ns.get(id) ?? null,
+            addNode: (id: string, labels: string[], properties: Record<string, unknown>) => { const n = { id, labels, properties }; ns.set(id, n); return n },
+            addEdge: (label: string, from: string, to: string) => { es.push({ label, from, to }) },
+            out: (id: string, edgeLabel?: string) => es.filter(e => e.from === id && (edgeLabel == null || e.label === edgeLabel)).map(e => ns.get(e.to)).filter(Boolean) as SGNode[],
+          }
+        }
+        const store = g['__sessionGraphStore'] as Parameters<typeof ensureSession>[0]
+        const sid = url.searchParams.get('sessionId') ?? (req.method === 'POST' ? 'default' : 'default')
+        if (req.method === 'GET') { const ctx = buildSessionContext(store, sid); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ context: ctx })); return }
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        ensureSession(store, sid)
+        const turn = p['turn'] as import('./lib/session-graph.js').TurnInput | undefined
+        if (turn) recordTurnAtom(store, turn)
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Study / Brain Retrieve — MIT-OCW dense+lexical hybrid ────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/study/retrieve') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { studyBrainRetrieve } = await import('./lib/study-brain.js')
+        const query  = typeof p['query']  === 'string' ? p['query']  : ''
+        const fields = Array.isArray(p['fields']) ? p['fields'] as string[] : []
+        const topK   = typeof p['topK']   === 'number' ? p['topK']   : 6
+        if (!query) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'query required' })); return }
+        const hits = await studyBrainRetrieve(query, fields, topK)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ hits, count: hits.length }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Study / Outputs — briefing, study guide, or audio script ─────────────────
+  if (req.method === 'POST' && url.pathname === '/api/study/outputs') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { generateBriefing, generateStudyGuide, generateAudioScript } = await import('./lib/study-outputs.js')
+        const type    = typeof p['type']    === 'string' ? p['type']    : 'briefing'
+        const sources = Array.isArray(p['sources']) ? p['sources'] as string[] : []
+        const format  = typeof p['format']  === 'string' ? p['format'] as import('./lib/study-outputs.js').AudioFormat : 'brief'
+        if (!sources.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'sources required' })); return }
+        const gen = (prompt: string) => generateOllamaText({ model: 'qwen3:14b', messages: [{ role: 'user', content: prompt }], temperature: 0.4 }).then((r) => r.content)
+        let output: unknown
+        if (type === 'study-guide') output = await generateStudyGuide(sources, gen)
+        else if (type === 'audio-script') output = await generateAudioScript(sources, gen, format)
+        else output = await generateBriefing(sources, gen)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ output, type }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Audio overview — auto-gather user doc chunks + generate dialogue script ─────
+  if (req.method === 'GET' && url.pathname === '/api/study/audio-overview') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { sampleUserChunks } = await import('./lib/doc-store.js')
+        const sources = sampleUserChunks(12)
+        if (!sources.length) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'no_docs' })); return }
+        const format = (url.searchParams.get('format') ?? 'brief') as import('./lib/study-outputs.js').AudioFormat
+        const { generateAudioScript } = await import('./lib/study-outputs.js')
+        const gen = (prompt: string) => generateOllamaText({ model: 'qwen3:14b', messages: [{ role: 'user', content: prompt }], temperature: 0.5 }).then((r) => r.content)
+        const turns = await generateAudioScript(sources, gen, format)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ turns }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Portfolio / K12 — homeschool compliance portfolio + transcript ─────────────
+  if (req.method === 'GET' && url.pathname === '/api/portfolio/k12') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { buildK12Portfolio, loadK12Profile } = await import('./lib/k12-portfolio.js')
+        const learnerId = url.searchParams.get('learnerId') ?? ''
+        const profile   = loadK12Profile(learnerId)
+        const { portfolio, transcript } = buildK12Portfolio(learnerId)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ profile, portfolio, transcript }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Cloud / Pricing — live multi-cloud price refresh ─────────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/cloud/pricing') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { fetchAzurePricing } = await import('./lib/cloud-pricing.js')
+        const region = url.searchParams.get('region') ?? 'eastus'
+        const prices = await fetchAzurePricing(region)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ prices, count: prices.length, providers: [...new Set(prices.map((p) => p.provider))] }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Knowledge / Persist — write projection to HellGraph ──────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/knowledge/persist') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { persistKnowledge } = await import('./lib/knowledge-persist.js')
+        type KNode = { id: string; kind: string; label: string; props: Record<string, unknown> }
+        type KEdge = { from: string; to: string; type: string }
+        const nodes = Array.isArray(p['nodes']) ? p['nodes'] as KNode[] : []
+        const edges = Array.isArray(p['edges']) ? p['edges'] as KEdge[] : []
+        if (!nodes.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'nodes required' })); return }
+        const rootHex = typeof p['root'] === 'string' ? p['root'] : ''
+        const root = rootHex ? Buffer.from(rootHex, 'hex') : Buffer.alloc(32)
+        // In-memory GraphStore (upsertNode/upsertEdge interface)
+        const kpNodes: import('./lib/knowledge-persist.js').StoredNode[] = []
+        const kpEdges: import('./lib/knowledge-persist.js').StoredEdge[] = []
+        const store = {
+          upsertNode: (n: import('./lib/knowledge-persist.js').StoredNode) => { const i = kpNodes.findIndex(x => x.id === n.id); if (i >= 0) kpNodes[i] = n; else kpNodes.push(n) },
+          upsertEdge: (e: import('./lib/knowledge-persist.js').StoredEdge) => { kpEdges.push(e) },
+        }
+        const result = await persistKnowledge(store, root, { nodes, edges } as import('./lib/knowledge-graph.js').KGraph)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, stored: { nodes: kpNodes, edges: kpEdges } }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Learn / Brief — learner profile + canon context primer ───────────────────
+  if (req.method === 'GET' && url.pathname === '/api/learn/brief') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { loadLearnerProfile, buildLearnerBrief } = await import('./lib/learner-brief.js')
+        const learnerId = url.searchParams.get('learnerId') ?? ''
+        const profile   = loadLearnerProfile(learnerId)
+        const brief     = buildLearnerBrief(learnerId)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ profile, brief }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Academic Graph — academic brain field/course stats ──────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/graph/academic-brain') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { projectAcademicBrain } = await import('./lib/academic-graph.js')
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...projectAcademicBrain(), executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Eval Calibration — Brier/ECE/risk-coverage curve ────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/eval/calibration') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { brier, ece, riskCoverage } = await import('./lib/calibration.js')
+        const preds = Array.isArray(p['predictions']) ? p['predictions'] as Array<{ confidence: number; correct: boolean }> : []
+        if (!preds.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'predictions required' })); return }
+        const bins = typeof p['bins'] === 'number' ? p['bins'] : undefined
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ brier: brier(preds), ece: ece(preds, bins), riskCoverage: riskCoverage(preds), executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Concept Defs — term lookup + field listing ────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/nlp/concept-lookup') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { cleanTerm, conceptLookup, conceptStoreFields } = await import('./lib/concept-defs.js')
+        const query  = typeof p['query']  === 'string' ? p['query']  : ''
+        const fields = Array.isArray(p['fields']) ? p['fields'] as string[] : undefined
+        if (!query) {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ fields: conceptStoreFields(), executionPerformed: false }))
+          return
+        }
+        const cleaned = cleanTerm(query)
+        const concept = cleaned ? conceptLookup(cleaned, fields) : null
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ cleaned, concept, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Defeasible Reasoning — derive conclusions with superiority ───────────────
+  if (req.method === 'POST' && url.pathname === '/api/reason/defeasible') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { deriveDefeasible } = await import('./lib/defeasible.js')
+        const facts = Array.isArray(p['facts']) ? p['facts'] as string[] : []
+        const rules = Array.isArray(p['rules']) ? p['rules'] as import('./lib/defeasible.js').DefRule[] : []
+        if (!facts.length || !rules.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'facts and rules required' })); return }
+        const supr = Array.isArray(p['superiority']) ? p['superiority'] as import('./lib/defeasible.js').Superiority[] : undefined
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...deriveDefeasible(facts, rules, supr), executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── NLI Entailment — classify premise/hypothesis relation ────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/nlp/entailment') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { jaccard, classifyEntailmentSemantic } = await import('./lib/entailment.js')
+        const premise    = typeof p['premise']    === 'string' ? p['premise']    : ''
+        const hypothesis = typeof p['hypothesis'] === 'string' ? p['hypothesis'] : ''
+        if (!premise || !hypothesis) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'premise and hypothesis required' })); return }
+        const threshold = typeof p['threshold'] === 'number' ? p['threshold'] : undefined
+        const result = await classifyEntailmentSemantic(premise, hypothesis, threshold !== undefined ? { threshold } : {})
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, jaccard: jaccard(premise, hypothesis), executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Episodic — format prior exchanges for context injection ──────────────────
+  if (req.method === 'POST' && url.pathname === '/api/memory/format-exchanges') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { formatExchanges } = await import('./lib/episodic.js')
+        const exchanges = Array.isArray(p['exchanges']) ? p['exchanges'] as import('./lib/episodic.js').PriorExchange[] : []
+        if (!exchanges.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'exchanges required' })); return }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ formatted: formatExchanges(exchanges), executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Hybrid Retrieve — BM25 + RRF dense fusion ────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/hybrid-retrieve') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { bm25, fuseHybrid } = await import('./lib/hybrid-retrieve.js')
+        const query = typeof p['query'] === 'string' ? p['query'] : ''
+        const docs  = Array.isArray(p['docs']) ? p['docs'] as Array<{ id: string; text: string }> : []
+        if (!query || !docs.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'query and docs required' })); return }
+        const mode = typeof p['mode'] === 'string' ? p['mode'] : 'bm25'
+        if (mode === 'hybrid') {
+          const denseIds = Array.isArray(p['denseRankedIds']) ? p['denseRankedIds'] as string[] : []
+          const k        = typeof p['k'] === 'number' ? p['k'] : undefined
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ranked: fuseHybrid(query, docs, denseIds, k), executionPerformed: false }))
+        } else {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ranked: bm25(query, docs), executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Logic Solver — symbolic answer + Gödel signature ─────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/reason/logic-solve') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { solveByLogic, godelSignature } = await import('./lib/logic-solver.js')
+        const question = typeof p['question'] === 'string' ? p['question'] : ''
+        if (!question) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'question required' })); return }
+        const hasDoc = typeof p['hasDoc'] === 'boolean' ? p['hasDoc'] : undefined
+        const result = solveByLogic(question, hasDoc !== undefined ? { hasDoc } : undefined)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, godelSignature: godelSignature(question) ?? null, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Rule Mining — association rules from triple store ────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/kg/mine-rules') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { mineRules } = await import('./lib/rule-mining.js')
+        const triples = Array.isArray(p['triples']) ? p['triples'] as Array<{ s: string; p: string; o: string }> : []
+        if (!triples.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'triples required' })); return }
+        const minConfidence = typeof p['minConfidence'] === 'number' ? p['minConfidence'] : undefined
+        const minSupport    = typeof p['minSupport']    === 'number' ? p['minSupport']    : undefined
+        const rules = mineRules(triples, (minConfidence !== undefined || minSupport !== undefined) ? { minConfidence, minSupport } : undefined)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ rules, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Symbolic Policy — reward / fit / predict ──────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/eval/symbolic-policy') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { computeReward, featuresOf, fitPolicy, predictReward } = await import('./lib/symbolic-policy.js')
+        const op = typeof p['op'] === 'string' ? p['op'] : 'reward'
+        if (op === 'reward') {
+          const worth     = typeof p['worth']     === 'number'  ? p['worth']     : 0
+          const latencyMs = typeof p['latencyMs'] === 'number'  ? p['latencyMs'] : 0
+          const grounded  = typeof p['grounded']  === 'boolean' ? p['grounded']  : false
+          const fillRate  = typeof p['fillRate']  === 'number'  ? p['fillRate']  : 0
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ reward: computeReward({ worth, latencyMs, grounded, fillRate }), executionPerformed: false }))
+        } else if (op === 'fit') {
+          const records = Array.isArray(p['records']) ? p['records'] as import('./lib/dialogue-tracker.js').TurnRecord[] : []
+          if (!records.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'records required for fit op' })); return }
+          const alpha = typeof p['alpha'] === 'number' ? p['alpha'] : undefined
+          const iters = typeof p['iters'] === 'number' ? p['iters'] : undefined
+          const lr    = typeof p['lr']    === 'number' ? p['lr']    : undefined
+          const policy = fitPolicy(records, (alpha !== undefined || iters !== undefined || lr !== undefined) ? { alpha, iters, lr } : undefined)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ policy, executionPerformed: false }))
+        } else if (op === 'predict') {
+          const policy = p['policy'] as import('./lib/symbolic-policy.js').FittedPolicy | undefined
+          const record = p['record'] as import('./lib/dialogue-tracker.js').TurnRecord  | undefined
+          if (!policy || !record) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'policy and record required' })); return }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ reward: predictReward(policy, featuresOf(record)), executionPerformed: false }))
+        } else {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'op must be reward|fit|predict' }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Canon Lookup — authored definitions, formulas, prereqs, bridging ────────
+  if (req.method === 'POST' && url.pathname === '/api/nlp/canon-lookup') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { canonDef, canonBridges, canonEntities, canonFormulas, canonPrereqs, canonGround, canonStats, canonTopics } = await import('./lib/canon-lookup.js')
+        const op = typeof p['op'] === 'string' ? p['op'] : 'ground'
+        if (op === 'stats') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ stats: canonStats(), topics: canonTopics(), executionPerformed: false }))
+        } else if (op === 'def') {
+          const term = typeof p['term'] === 'string' ? p['term'] : ''
+          if (!term) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'term required' })); return }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ def: canonDef(term), bridges: canonBridges(term), ancestors: [], executionPerformed: false }))
+        } else if (op === 'formulas') {
+          const domain = typeof p['domain'] === 'string' ? p['domain'] : ''
+          const topic  = typeof p['topic']  === 'string' ? p['topic']  : ''
+          if (!domain || !topic) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'domain and topic required' })); return }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ formulas: canonFormulas(domain, topic), prereqs: canonPrereqs(domain, topic), executionPerformed: false }))
+        } else if (op === 'entities') {
+          const text = typeof p['text'] === 'string' ? p['text'] : ''
+          if (!text) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'text required' })); return }
+          const max  = typeof p['max'] === 'number' ? p['max'] : undefined
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ entities: canonEntities(text, max), executionPerformed: false }))
+        } else {
+          const text = typeof p['text'] === 'string' ? p['text'] : ''
+          if (!text) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'text required' })); return }
+          const maxDefs = typeof p['maxDefs'] === 'number' ? p['maxDefs'] : undefined
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ grounded: canonGround(text, maxDefs !== undefined ? { maxDefs } : undefined), executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Crystallize — durable attested answer artifact + recall ──────────────────
+  if (req.method === 'POST' && url.pathname === '/api/knowledge/crystallize') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { crystallizeAnswer, recallArtifact, artifactCount } = await import('./lib/crystallize.js')
+        const op = typeof p['op'] === 'string' ? p['op'] : 'count'
+        if (op === 'count') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ count: artifactCount(), executionPerformed: false }))
+        } else if (op === 'recall') {
+          const question = typeof p['question'] === 'string' ? p['question'] : ''
+          if (!question) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'question required' })); return }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ artifact: recallArtifact(question), executionPerformed: false }))
+        } else {
+          const args = p['artifact'] as Parameters<typeof crystallizeAnswer>[0] | undefined
+          if (!args) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'artifact required' })); return }
+          const artifact = crystallizeAnswer(args)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ artifact, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── CSKG — commonsense knowledge graph edge projection + TSV export ───────────
+  if (req.method === 'POST' && url.pathname === '/api/kg/cskg') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { dimensionOf, relationLabel, toCskgEdge, toKgtkTsv } = await import('./lib/cskg.js')
+        const op = typeof p['op'] === 'string' ? p['op'] : 'dimension'
+        if (op === 'tsv') {
+          const edges = Array.isArray(p['edges']) ? p['edges'] as import('./lib/cskg.js').CskgEdge[] : []
+          if (!edges.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'edges required' })); return }
+          res.writeHead(200, { 'content-type': 'text/tab-separated-values' })
+          res.end(toKgtkTsv(edges))
+        } else if (op === 'project') {
+          const rawEdges = Array.isArray(p['edges']) ? p['edges'] as Array<import('./lib/cskg.js').RawEdge> : []
+          if (!rawEdges.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'edges required' })); return }
+          const projected = rawEdges.map((e) => toCskgEdge(e))
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ edges: projected, executionPerformed: false }))
+        } else {
+          const relation = typeof p['relation'] === 'string' ? p['relation'] : ''
+          if (!relation) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'relation required' })); return }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ dimension: dimensionOf(relation), label: relationLabel(relation), executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Dispatch Ledger — hash-chained immutable dispatch log ────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/audit/dispatch') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { recordDispatch, replayLedger, readDispatches, contentHash } = await import('./lib/dispatch-ledger.js')
+        const op = typeof p['op'] === 'string' ? p['op'] : 'read'
+        if (op === 'record') {
+          const input = p['input'] as import('./lib/dispatch-ledger.js').DispatchInput | undefined
+          if (!input) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'input required' })); return }
+          const entry = recordDispatch(input)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ entry, executionPerformed: false }))
+        } else if (op === 'replay') {
+          const result = replayLedger()
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ...result, executionPerformed: false }))
+        } else if (op === 'hash') {
+          const s = typeof p['s'] === 'string' ? p['s'] : ''
+          if (!s) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 's required' })); return }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ hash: contentHash(s), executionPerformed: false }))
+        } else {
+          const limit = typeof p['limit'] === 'number' ? p['limit'] : undefined
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ dispatches: readDispatches(limit), executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Doc Scope — filename → scope, collection, protection tier ────────────────
+  if (req.method === 'POST' && url.pathname === '/api/docs/scope') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { scopeOf, isCoreScope, isUserDoc, collectionPath, collectionIdOf, inCollection } = await import('./lib/doc-scope.js')
+        const filename = typeof p['filename'] === 'string' ? p['filename'] : ''
+        if (!filename) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'filename required' })); return }
+        const collectionId = typeof p['collectionId'] === 'string' ? p['collectionId'] : null
+        const subpath      = typeof p['path']         === 'string' ? p['path']         : null
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          scope:        scopeOf(filename),
+          isCore:       isCoreScope(filename),
+          isUserDoc:    isUserDoc(filename),
+          collectionId: collectionIdOf(filename),
+          inCollection: collectionId ? inCollection(filename, collectionId) : null,
+          collectionPath: collectionId && subpath ? collectionPath(collectionId, subpath) : null,
+          executionPerformed: false,
+        }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Economic Signal — GYG forecast decomposition ─────────────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/signal/economic') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { buildGYGSignal, buildForecastTable } = await import('./lib/economic-signal.js')
+        const signal   = buildGYGSignal()
+        const forecast = buildForecastTable()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ signal, forecast, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Extractive QA — sentence-level answer extraction from retrieved chunks ───
+  if (req.method === 'POST' && url.pathname === '/api/rag/extractive-qa') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { extractiveAnswer } = await import('./lib/extractive-qa.js')
+        const query = typeof p['query'] === 'string' ? p['query'] : ''
+        const hits  = Array.isArray(p['hits']) ? p['hits'] as import('./lib/doc-store.js').ChunkHit[] : []
+        if (!query || !hits.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'query and hits required' })); return }
+        const maxSentences = typeof p['maxSentences'] === 'number' ? p['maxSentences'] : undefined
+        const answer = extractiveAnswer(query, hits, maxSentences !== undefined ? { maxSentences } : undefined)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ answer, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Graph PPR — personalized PageRank + HippoRAG associative retrieval ────────
+  if (req.method === 'POST' && url.pathname === '/api/graph/ppr') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { personalizedPageRank, seedFromQuery, associativeRetrieve } = await import('./lib/graph-ppr.js')
+        const nodes   = Array.isArray(p['nodes']) ? p['nodes'] as import('./lib/graph-ppr.js').PPRNode[] : []
+        const edges   = Array.isArray(p['edges']) ? p['edges'] as import('./lib/graph-ppr.js').PPREdge[] : []
+        const query   = typeof p['query'] === 'string' ? p['query'] : ''
+        if (!nodes.length || !edges.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'nodes and edges required' })); return }
+        const labelsRaw = p['labels'] as Record<string, string> | undefined
+        const labelById = labelsRaw ? new Map(Object.entries(labelsRaw)) : new Map<string, string>(nodes.map((n) => [n.id, n.id]))
+        const op      = typeof p['op']      === 'string' ? p['op']      : 'retrieve'
+        const damping  = typeof p['damping']  === 'number' ? p['damping']  : undefined
+        const topK     = typeof p['topK']     === 'number' ? p['topK']     : undefined
+        if (op === 'ppr') {
+          const seedIds = Array.isArray(p['seedIds']) ? p['seedIds'] as string[] : query ? seedFromQuery(query, labelById) : []
+          if (!seedIds.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'seedIds or query required' })); return }
+          const scores = personalizedPageRank(nodes, edges, seedIds, damping !== undefined ? { damping } : undefined)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ scores: Object.fromEntries(scores), executionPerformed: false }))
+        } else {
+          if (!query) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'query required for retrieve op' })); return }
+          const result = associativeRetrieve(nodes, edges, labelById, query, topK !== undefined ? { topK } : undefined)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ...result, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Knowledge Domains — academic brain domain readiness ─────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/graph/domain-status') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { domainStatus } = await import('./lib/knowledge-domains.js')
+        const result = domainStatus()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Knowledge Type — classify question by ARC knowledge type ─────────────────
+  if (req.method === 'POST' && url.pathname === '/api/nlp/knowledge-type') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { classifyKnowledge } = await import('./lib/knowledge-type.js')
+        const question = typeof p['question'] === 'string' ? p['question'] : ''
+        if (!question) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'question required' })); return }
+        const result = classifyKnowledge(question)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── QA Pairs — training data flywheel (read + record + pareto) ───────────────
+  if (req.method === 'GET' && url.pathname === '/api/training/qa-pairs') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { readQAPairs, paretoReport, bestExemplars } = await import('./lib/qa-pairs.js')
+        const op = url.searchParams.get('op') ?? 'list'
+        if (op === 'pareto') {
+          const report = paretoReport()
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ report, executionPerformed: false }))
+        } else if (op === 'exemplars') {
+          const intent = url.searchParams.get('intent') ?? ''
+          const k = Number(url.searchParams.get('k') ?? '2')
+          const pairs = bestExemplars(intent, k)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ pairs, executionPerformed: false }))
+        } else {
+          const limit = Number(url.searchParams.get('limit') ?? '5000')
+          const pairs = readQAPairs(limit)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ pairs, count: pairs.length, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/training/record-qa') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { recordQAPair } = await import('./lib/qa-pairs.js')
+        const question = typeof p['question'] === 'string' ? p['question'] : ''
+        const answer   = typeof p['answer']   === 'string' ? p['answer']   : ''
+        const intent   = typeof p['intent']   === 'string' ? p['intent']   : ''
+        const model    = typeof p['model']    === 'string' ? p['model']    : ''
+        const worth    = typeof p['worth']    === 'number' ? p['worth']    : 0
+        const reward   = typeof p['reward']   === 'number' ? p['reward']   : 0
+        const grounded = typeof p['grounded'] === 'boolean' ? p['grounded'] : false
+        if (!question || !answer || !intent) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'question, answer, intent required' })); return }
+        const kept = recordQAPair({ question, answer, intent, model, worth, reward, grounded })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ kept, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Memory Decay — salience-based decay + pruning ────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/memory/decay') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { salience, decayRank, pruneToBudget } = await import('./lib/memory-decay.js')
+        const op   = typeof p['op']   === 'string' ? p['op'] : 'rank'
+        const mems = Array.isArray(p['memories']) ? p['memories'] as import('./lib/memory-decay.js').DecayMemory[] : []
+        const halfLifeDays = typeof p['halfLifeDays'] === 'number' ? p['halfLifeDays'] : undefined
+        const now          = typeof p['now']          === 'number' ? p['now']          : undefined
+        const opts = { halfLifeDays, now }
+        if (op === 'salience') {
+          const single = mems[0]
+          if (!single) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'memories[0] required' })); return }
+          const score = salience(single, opts)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ score, executionPerformed: false }))
+        } else if (op === 'prune') {
+          const budget = typeof p['budget'] === 'number' ? p['budget'] : 100
+          const result = pruneToBudget(mems, budget, opts)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ...result, executionPerformed: false }))
+        } else {
+          const ranked = decayRank(mems, opts)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ranked, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Model Registry — model catalogue with origin + benchmarks ────────────────
+  if (req.method === 'GET' && url.pathname === '/api/model/registry') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { MODELS, getModel, composite, originOf } = await import('./lib/model-registry.js')
+        const id = url.searchParams.get('id')
+        if (id) {
+          const spec = getModel(id)
+          if (!spec) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'not_found' })); return }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ spec, composite: composite(spec), executionPerformed: false }))
+        } else {
+          const originFilter = url.searchParams.get('origin')
+          const models = (originFilter ? MODELS.filter((m) => m.origin === originFilter) : MODELS)
+            .map((m) => ({ ...m, composite: composite(m) }))
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ models, executionPerformed: false }))
+        }
+        void originOf
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Graph Writeback — persist proposals/inferred facts into HellGraph ─────────
+  if (req.method === 'POST' && url.pathname === '/api/graph/writeback') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { persistProposals, persistInferred } = await import('./lib/graph-writeback.js')
+        const op = typeof p['op'] === 'string' ? p['op'] : 'proposals'
+        if (op === 'inferred') {
+          const inferred = Array.isArray(p['inferred']) ? p['inferred'] as Array<{ subject: string; predicate: string; object: string; via?: string; verified?: boolean }> : []
+          const result = persistInferred(inferred)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ...result, executionPerformed: false }))
+        } else {
+          const proposals = Array.isArray(p['proposals']) ? p['proposals'] as import('./lib/graph-proposals.js').GraphProposal[] : []
+          const result = persistProposals(proposals)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ...result, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Graph Embed — entity embeddings for semantic link prediction ──────────────
+  if (req.method === 'POST' && url.pathname === '/api/graph/embed-entities') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { embedEntities, similarEntities, semanticPredict } = await import('./lib/graph-embed.js')
+        const op = typeof p['op'] === 'string' ? p['op'] : 'embed'
+        if (op === 'similar') {
+          const vectorsRaw = p['vectors'] as Record<string, number[]> | undefined
+          const vectors = new Map<string, number[]>(Object.entries(vectorsRaw ?? {}))
+          const targetId = typeof p['targetId'] === 'string' ? p['targetId'] : ''
+          const k        = typeof p['k'] === 'number' ? p['k'] : 8
+          if (!targetId) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'targetId required' })); return }
+          const similar = similarEntities(targetId, vectors, k)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ similar, executionPerformed: false }))
+        } else if (op === 'predict') {
+          const vectorsRaw = p['vectors'] as Record<string, number[]> | undefined
+          const vectors = new Map<string, number[]>(Object.entries(vectorsRaw ?? {}))
+          const edges = Array.isArray(p['edges']) ? p['edges'] as Array<{ from: string; to: string }> : []
+          const topK   = typeof p['topK']   === 'number' ? p['topK']   : undefined
+          const minSim = typeof p['minSim'] === 'number' ? p['minSim'] : undefined
+          const candidates = semanticPredict(vectors, edges, { topK, minSim })
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ candidates, executionPerformed: false }))
+        } else {
+          const entities = Array.isArray(p['entities']) ? p['entities'] as Array<{ id: string; text: string }> : []
+          if (!entities.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'entities required' })); return }
+          const vectors = await embedEntities(entities)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ vectors: Object.fromEntries(vectors), executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Graph Infer — rule-based transitivity inference + optional verification ───
+  if (req.method === 'POST' && url.pathname === '/api/graph/infer') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { inferFacts } = await import('./lib/graph-infer.js')
+        const facts  = Array.isArray(p['facts'])  ? p['facts']  as Array<{ subject: string; predicate: string; object: string }> : []
+        const verify = typeof p['verify'] === 'boolean' ? p['verify'] : false
+        const max    = typeof p['max']    === 'number'  ? p['max']    : undefined
+        const model  = typeof p['model'] === 'string'   ? p['model']  : undefined
+        if (!facts.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'facts required' })); return }
+        const inferred = await inferFacts(facts, { verify, max, model })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ inferred, count: inferred.length, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Graph Predict — structural link prediction (Adamic-Adar) ─────────────────
+  if (req.method === 'POST' && url.pathname === '/api/graph/predict-links') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { predictLinks } = await import('./lib/graph-predict.js')
+        const nodes  = Array.isArray(p['nodes']) ? p['nodes'] as Array<{ id: string }> : []
+        const edges  = Array.isArray(p['edges']) ? p['edges'] as Array<{ from: string; to: string }> : []
+        const topK      = typeof p['topK']      === 'number' ? p['topK']      : undefined
+        const minCommon = typeof p['minCommon'] === 'number' ? p['minCommon'] : undefined
+        if (!nodes.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'nodes required' })); return }
+        const predictions = predictLinks(nodes, edges, { topK, minCommon })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ predictions, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Narration — concierge announcer voice (templated, no model) ──────────────
+  if (req.method === 'POST' && url.pathname === '/api/memory/narrate') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { narrateRoute, narrateEscalation, narrateRetrieve, narrateGenerate, narrateDispatch, narrateWorking } = await import('./lib/narration.js')
+        const stage      = typeof p['stage']      === 'string' ? p['stage']      : 'route'
+        const model      = typeof p['model']      === 'string' ? p['model']      : ''
+        const intent     = typeof p['intent']     === 'string' ? p['intent']     : ''
+        const reason     = typeof p['reason']     === 'string' ? p['reason']     : ''
+        const capability = typeof p['capability'] === 'string' ? p['capability'] : ''
+        const passages   = typeof p['passages']   === 'number' ? p['passages']   : 0
+        const fast       = typeof p['fast']       === 'boolean' ? p['fast']      : false
+        const concierge  = typeof p['concierge']  === 'boolean' ? p['concierge'] : false
+        let narration
+        if (stage === 'escalate')  narration = narrateEscalation(model, intent, reason)
+        else if (stage === 'retrieve') narration = narrateRetrieve(passages)
+        else if (stage === 'generate') narration = narrateGenerate(model)
+        else if (stage === 'dispatch') narration = narrateDispatch(capability)
+        else if (stage === 'working')  narration = narrateWorking(model)
+        else narration = narrateRoute(model, intent, { fast, concierge })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ narration, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Rerank RRF — Reciprocal Rank Fusion over multiple rankers ────────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/rrf') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { reciprocalRankFusion } = await import('./lib/rerank-rrf.js')
+        const rankings = Array.isArray(p['rankings']) ? p['rankings'] as string[][] : []
+        const k        = typeof p['k'] === 'number' ? p['k'] : 60
+        if (!rankings.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'rankings required' })); return }
+        const fused = reciprocalRankFusion(rankings, k)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ fused, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── LazyGraphRAG — best-first subgraph expansion (deferred LLM cost) ─────────
+  if (req.method === 'POST' && url.pathname === '/api/graph/lazy') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { lazySubgraph } = await import('./lib/lazy-graphrag.js')
+        const adjRaw = p['adj'] as Record<string, Array<{ to: string; rel: string }>> | undefined
+        const adj    = new Map(Object.entries(adjRaw ?? {}))
+        const seeds  = Array.isArray(p['seeds']) ? p['seeds'] as string[] : []
+        const scoreMap = p['scores'] as Record<string, number> | undefined
+        const budget = typeof p['budget'] === 'number' ? p['budget'] : 25
+        if (!seeds.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'seeds required' })); return }
+        const relevance = (node: string) => (scoreMap ? (scoreMap[node] ?? 0) : (seeds.includes(node) ? 1 : 0))
+        const result = lazySubgraph(adj, seeds, relevance, { budget })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Routing Log — read opt-in routing decisions ──────────────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/routing/log') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { readRoutingLog } = await import('./lib/routing-log.js')
+        const limit = Number(url.searchParams.get('limit') ?? '200')
+        const decisions = readRoutingLog(limit)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ decisions, count: decisions.length, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Semantic Probe — uncertainty proxies (spread + stability) ────────────────
+  if (req.method === 'POST' && url.pathname === '/api/nlp/semantic-probe') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { scoreSpread, answerStability } = await import('./lib/semantic-probe.js')
+        const op = typeof p['op'] === 'string' ? p['op'] : 'spread'
+        if (op === 'stability') {
+          const samples = Array.isArray(p['samples']) ? p['samples'] as string[] : []
+          const stability = answerStability(samples)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ stability, executionPerformed: false }))
+        } else {
+          const scores = Array.isArray(p['scores']) ? p['scores'] as number[] : []
+          const result = scoreSpread(scores)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ...result, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Procedural Memory — skill distillation + retrieval ───────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/memory/skill') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { distillSkill, retrieveSkills, isPromotableTrajectory, renderExperiences, retrieveExperiences } = await import('./lib/procedural-memory.js')
+        const op = typeof p['op'] === 'string' ? p['op'] : 'distill'
+        if (op === 'retrieve') {
+          const task   = typeof p['task']   === 'string' ? p['task']   : ''
+          const skills = Array.isArray(p['skills']) ? p['skills'] as import('./lib/procedural-memory.js').Skill[] : []
+          const topK   = typeof p['topK']   === 'number' ? p['topK']   : 3
+          const matchFn = (a: string, b: string) => {
+            const ta = new Set(a.toLowerCase().split(/\s+/)), tb = new Set(b.toLowerCase().split(/\s+/))
+            const inter = [...ta].filter((t) => tb.has(t)).length
+            return inter / (ta.size + tb.size - inter || 1)
+          }
+          const hits = retrieveSkills(task, skills, matchFn, { topK })
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ hits, executionPerformed: false }))
+        } else if (op === 'experiences') {
+          const task    = typeof p['task']   === 'string' ? p['task']   : ''
+          const store   = Array.isArray(p['experiences']) ? p['experiences'] as import('./lib/procedural-memory.js').ReasoningExperience[] : []
+          const topK    = typeof p['topK']   === 'number' ? p['topK']   : 3
+          const matchFn = (a: string, b: string) => {
+            const ta = new Set(a.toLowerCase().split(/\s+/)), tb = new Set(b.toLowerCase().split(/\s+/))
+            const inter = [...ta].filter((t) => tb.has(t)).length
+            return inter / (ta.size + tb.size - inter || 1)
+          }
+          const hits  = retrieveExperiences(task, store, matchFn, { topK })
+          const rendered = renderExperiences(hits)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ hits, rendered, executionPerformed: false }))
+        } else if (op === 'promotable') {
+          const gate       = typeof p['gate']       === 'string' ? p['gate']       : null
+          const replayClass = typeof p['replayClass'] === 'string' ? p['replayClass'] : null
+          const ok = isPromotableTrajectory(gate, replayClass)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ promotable: ok, executionPerformed: false }))
+        } else {
+          const task        = typeof p['task']        === 'string' ? p['task']        : ''
+          const abstraction = typeof p['abstraction'] === 'string' ? p['abstraction'] : ''
+          const steps       = Array.isArray(p['steps']) ? p['steps'] as string[] : []
+          if (!task || !abstraction) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'task and abstraction required' })); return }
+          const skill = distillSkill(task, abstraction, steps)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ skill, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Step Verify — process-reward model (step value scoring) ──────────────────
+  if (req.method === 'POST' && url.pathname === '/api/eval/step-value') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { stepValue } = await import('./lib/step-verify.js')
+        const rollouts = Array.isArray(p['rollouts']) ? p['rollouts'] as boolean[] : []
+        const value = stepValue(rollouts)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ value, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Solution Memory — coding agent compounding loop quality metrics ───────────
+  if (req.method === 'GET' && url.pathname === '/api/code/solutions') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { qualityMetrics } = await import('./lib/solution-memory.js')
+        const metrics = qualityMetrics()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ metrics, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── RAG Trust — trust-tier derivation + injection detection + sanitization ───
+  if (req.method === 'POST' && url.pathname === '/api/rag/trust') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { trustOf, deriveTrust, detectInjection, sanitizeRetrieved, applyTrust } = await import('./lib/rag-trust.js')
+        const op = typeof p['op'] === 'string' ? p['op'] : 'trust-of'
+        if (op === 'derive') {
+          const tiers = Array.isArray(p['tiers']) ? p['tiers'] as import('./lib/rag-trust.js').TrustTier[] : []
+          const derived = deriveTrust(tiers)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ derived, executionPerformed: false }))
+        } else if (op === 'detect') {
+          const text = typeof p['text'] === 'string' ? p['text'] : ''
+          const result = detectInjection(text)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ...result, executionPerformed: false }))
+        } else if (op === 'sanitize') {
+          const text = typeof p['text'] === 'string' ? p['text'] : ''
+          const result = sanitizeRetrieved(text)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ...result, executionPerformed: false }))
+        } else if (op === 'apply') {
+          const retrieved = Array.isArray(p['retrieved']) ? p['retrieved'] as Array<{ text: string; src: { validated?: boolean; origin?: string; ingestPath?: string } }> : []
+          const selected = applyTrust(retrieved)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ selected, count: selected.length, executionPerformed: false }))
+        } else {
+          const src = typeof p['src'] === 'object' && p['src'] ? p['src'] as { validated?: boolean; origin?: string; ingestPath?: string } : {}
+          const tier = trustOf(src)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ tier, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Research Verify — claim grounding verification ────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/research/verify-grounding') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { verifyGrounding } = await import('./lib/research-verify.js')
+        const answer    = typeof p['answer']    === 'string' ? p['answer']    : ''
+        const sources   = Array.isArray(p['sources']) ? p['sources'] as Array<{ text: string }> : []
+        const claimCover = typeof p['claimCover'] === 'number' ? p['claimCover'] : undefined
+        const passAt     = typeof p['passAt']     === 'number' ? p['passAt']     : undefined
+        if (!answer || !sources.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'answer and sources required' })); return }
+        const result = claimCover !== undefined || passAt !== undefined
+          ? verifyGrounding(answer, sources, claimCover, passAt)
+          : verifyGrounding(answer, sources)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Symbol Index — code symbol search ────────────────────────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/code/symbol-index') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { searchSymbols, symbolStats } = await import('./lib/symbol-index.js')
+        const q     = url.searchParams.get('q') ?? ''
+        const limit = Number(url.searchParams.get('limit') ?? '25')
+        const symbols = searchSymbols(q, limit)
+        const stats   = symbolStats()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ symbols, stats, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── SFT Harvest — verified training-data promotion ───────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/eval/sft-harvest') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { captureVerified, exampleHash, excludeTrained } = await import('./lib/sft-harvest.js')
+        const op = typeof p['op'] === 'string' ? p['op'] : 'capture'
+        if (op === 'hash') {
+          const input  = typeof p['input']  === 'string' ? p['input']  : ''
+          const output = typeof p['output'] === 'string' ? p['output'] : ''
+          const hash = exampleHash({ input, output })
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ hash, executionPerformed: false }))
+        } else if (op === 'exclude') {
+          const examples = Array.isArray(p['examples']) ? p['examples'] as import('./lib/sft-harvest.js').SftExample[] : []
+          const trained  = new Set(Array.isArray(p['trained']) ? p['trained'] as string[] : [])
+          const filtered = excludeTrained(examples, trained)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ filtered, count: filtered.length, executionPerformed: false }))
+        } else {
+          const trace = p['trace'] as import('./lib/eval-capture.js').Trace | undefined
+          if (!trace) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'trace required' })); return }
+          const now         = typeof p['now']         === 'number' ? p['now']         : Date.now()
+          const minCoverage = typeof p['minCoverage'] === 'number' ? p['minCoverage'] : undefined
+          const example = captureVerified(trace, now, minCoverage !== undefined ? { minCoverage } : undefined)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ example, captured: example !== null, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Portfolio Lens — live portfolio-lens snapshot ─────────────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/graph/portfolio-lens') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { buildPortfolioLens } = await import('./lib/portfolio-lens.js')
+        const lens = buildPortfolioLens()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ lens, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Sloan Brain — MBA knowledge catalog ──────────────────────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/graph/sloan-brain') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { sloanCourseCatalog, projectSloanBrain } = await import('./lib/sloan-brain.js')
+        const op = url.searchParams.get('op') ?? 'status'
+        if (op === 'catalog') {
+          const catalog = sloanCourseCatalog()
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ catalog, executionPerformed: false }))
+        } else {
+          const status = projectSloanBrain()
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ...status, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Lattice Forge — runtime asset manifests (lattice.socioprophet.dev) ────────
+  if (req.method === 'POST' && url.pathname === '/api/platform/lattice') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { modelRuntimeAsset, sidecarRuntimeAsset, conformsToLattice } = await import('./lib/lattice-forge.js')
+        const op = typeof p['op'] === 'string' ? p['op'] : 'model'
+        if (op === 'conform') {
+          const asset = p['asset'] as import('./lib/lattice-forge.js').RuntimeAsset | undefined
+          if (!asset) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'asset required' })); return }
+          const result = conformsToLattice(asset)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ...result, executionPerformed: false }))
+        } else if (op === 'sidecar') {
+          const name         = typeof p['name']         === 'string' ? p['name']         : ''
+          const version      = typeof p['version']      === 'string' ? p['version']      : ''
+          const createdAt    = typeof p['createdAt']    === 'string' ? p['createdAt']    : new Date().toISOString()
+          const runtimeClass = typeof p['runtimeClass'] === 'string' ? p['runtimeClass'] : 'node'
+          const languages    = Array.isArray(p['languages']) ? p['languages'] as string[] : []
+          if (!name || !version) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'name and version required' })); return }
+          const asset = sidecarRuntimeAsset(name, { version, createdAt, languages, runtimeClass })
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ asset, executionPerformed: false }))
+        } else {
+          const model     = typeof p['model']     === 'string' ? p['model']     : ''
+          const createdAt = typeof p['createdAt'] === 'string' ? p['createdAt'] : new Date().toISOString()
+          const digest    = typeof p['digest']    === 'string' ? p['digest']    : undefined
+          if (!model) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'model required' })); return }
+          const asset = modelRuntimeAsset(model, { createdAt, digest })
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ asset, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Managed Ollama — local Ollama runtime profile + launch recipe ─────────────
+  if (req.method === 'GET' && url.pathname === '/api/runtime/ollama') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { seatbeltProfile, runtimeComplete, resolveManagedOllamaBinary, buildLaunchRecipe, MANAGED_PORT } = await import('./lib/managed-ollama.js')
+        const binary  = resolveManagedOllamaBinary(process.env as Record<string, string | undefined>)
+        const ready   = runtimeComplete()
+        const profile = seatbeltProfile()
+        const recipe  = binary ? buildLaunchRecipe(binary) : null
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ready, port: MANAGED_PORT, profile, recipe, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Planner-Executor — task ledger + progress tracking ───────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/code/planner') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { stateSignature, recordProgress, shouldReplan, confirmFact, newProgress } = await import('./lib/planner-executor.js')
+        const op = typeof p['op'] === 'string' ? p['op'] : 'signature'
+        if (op === 'progress') {
+          const progress  = p['progress'] as import('./lib/planner-executor.js').ProgressLedger | undefined ?? newProgress()
+          const facts     = Array.isArray(p['facts']) ? p['facts'] as string[] : []
+          const maxStalls = typeof p['maxStalls'] === 'number' ? p['maxStalls'] : 2
+          const updated   = recordProgress(progress, facts)
+          const replan    = shouldReplan(updated, maxStalls)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ progress: updated, replan, executionPerformed: false }))
+        } else if (op === 'confirm') {
+          const ledger = p['ledger'] as import('./lib/planner-executor.js').TaskLedger | undefined
+          const fact   = typeof p['fact'] === 'string' ? p['fact'] : ''
+          if (!ledger || !fact) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'ledger and fact required' })); return }
+          const updated = confirmFact(ledger, fact)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ledger: updated, executionPerformed: false }))
+        } else {
+          const facts = Array.isArray(p['facts']) ? p['facts'] as string[] : []
+          const sig   = stateSignature(facts)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ signature: sig, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Stack Graph — ingest codebase structure into HellGraph ───────────────────
+  if (req.method === 'POST' && url.pathname === '/api/graph/stack') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { ingestStackIndex } = await import('./lib/stack-graph.js')
+        const result = ingestStackIndex()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── News Events — materiality scoring + catalyst tagging ─────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/news/events') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { enrichNewsEvents, newsAlertSummary, scoreEvent, tagCatalyst } = await import('./lib/news-scraper.js')
+        const op = typeof p['op'] === 'string' ? p['op'] : 'enrich'
+        if (op === 'summary') {
+          const events = Array.isArray(p['events']) ? p['events'] as import('./lib/news-scraper.js').NewsEvent[] : undefined
+          const summary = newsAlertSummary(events)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ summary, executionPerformed: false }))
+        } else if (op === 'score') {
+          const event = p['event'] as import('./lib/news-scraper.js').NewsEvent | undefined
+          if (!event) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'event required' })); return }
+          const score    = scoreEvent(event)
+          const catalyst = tagCatalyst(event)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ score, catalyst, executionPerformed: false }))
+        } else {
+          const events = Array.isArray(p['events']) ? p['events'] as import('./lib/news-scraper.js').NewsEvent[] : undefined
+          const enriched = enrichNewsEvents(events)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ enriched, count: enriched.length, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Trajectory Monitor — cross-turn agent trajectory safety check ─────────────
+  if (req.method === 'POST' && url.pathname === '/api/nlp/trajectory') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { monitorTrajectory } = await import('./lib/trajectory-monitor.js')
+        const actions = Array.isArray(p['actions']) ? p['actions'] as import('./lib/trajectory-monitor.js').AgentAction[] : []
+        if (!actions.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'actions required' })); return }
+        const sensitiveTypes = Array.isArray(p['sensitiveTypes']) ? p['sensitiveTypes'] as string[] : undefined
+        const maxSensitive   = typeof p['maxSensitive'] === 'number' ? p['maxSensitive'] : undefined
+        const loopWindow     = typeof p['loopWindow']   === 'number' ? p['loopWindow']   : undefined
+        const result = monitorTrajectory(actions, { sensitiveTypes, maxSensitive, loopWindow })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Sprint Contract — contractBlock formatting ────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/ops/sprint-contract') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { contractBlock } = await import('./lib/sprint-contract.js')
+        const contract = p['contract'] as import('./lib/sprint-contract.js').SprintContract | undefined
+        if (!contract) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'contract required' })); return }
+        const block = contractBlock(contract)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ block, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Model Signing — digest + manifest verification ────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/security/model-signing') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { digestEquals, verifyModelHash, verifyManifest } = await import('./lib/model-signing.js')
+        const op = typeof p['op'] === 'string' ? p['op'] : 'verify-hash'
+        if (op === 'digest-equals') {
+          const a = typeof p['a'] === 'string' ? p['a'] : ''
+          const b = typeof p['b'] === 'string' ? p['b'] : ''
+          const ok = digestEquals(a, b)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok, executionPerformed: false }))
+        } else if (op === 'verify-manifest') {
+          const files    = Array.isArray(p['files'])    ? p['files']    as Array<{ path: string; sha256: string }> : []
+          const manifest = typeof p['manifest'] === 'object' && p['manifest'] ? p['manifest'] as Record<string, string> : {}
+          if (!files.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'files required' })); return }
+          const result = verifyManifest(files, manifest)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ...result, executionPerformed: false }))
+        } else {
+          const actual   = typeof p['actual']   === 'string' ? p['actual']   : ''
+          const expected = typeof p['expected'] === 'string' ? p['expected'] : ''
+          const ok = verifyModelHash(actual, expected)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── New-Hope Membrane — conformance bridge outcome + event ────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/platform/membrane') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { outcomeFor, membraneEvent, conformsToMembrane } = await import('./lib/new-hope-membrane.js')
+        const op = typeof p['op'] === 'string' ? p['op'] : 'outcome'
+        if (op === 'conforms') {
+          const event = p['event'] as Partial<import('./lib/new-hope-membrane.js').MembraneEvent> | undefined
+          if (!event) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'event required' })); return }
+          const result = conformsToMembrane(event)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ...result, executionPerformed: false }))
+        } else if (op === 'event') {
+          const opts = p['opts'] as Parameters<typeof membraneEvent>[0] | undefined
+          if (!opts) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'opts required' })); return }
+          const event = membraneEvent(opts)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ event, executionPerformed: false }))
+        } else {
+          const d = typeof p['decision'] === 'object' && p['decision'] ? p['decision'] as Parameters<typeof outcomeFor>[0] : {}
+          const outcome = outcomeFor(d)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ...outcome, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Swarm Volume — DHT swarm membership + blackboard ─────────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/graph/swarm') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { listSwarms, swarmMembers, readBlackboard } = await import('./lib/swarm-volume.js')
+        const swarmId = url.searchParams.get('swarmId')
+        if (swarmId) {
+          const members   = swarmMembers(swarmId)
+          const board     = readBlackboard(swarmId)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ swarmId, members, board, executionPerformed: false }))
+        } else {
+          const swarms = listSwarms()
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ swarms, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/graph/swarm') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { joinSwarm, leaveSwarm, writeBlackboard } = await import('./lib/swarm-volume.js')
+        const op      = typeof p['op']      === 'string' ? p['op']      : 'join'
+        const swarmId = typeof p['swarmId'] === 'string' ? p['swarmId'] : ''
+        if (!swarmId) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'swarmId required' })); return }
+        if (op === 'leave') {
+          const agentId = typeof p['agentId'] === 'string' ? p['agentId'] : ''
+          if (!agentId) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'agentId required' })); return }
+          const manifest = leaveSwarm(swarmId, agentId)
+          if (!manifest) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'swarm_not_found' })); return }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ manifest, executionPerformed: false }))
+        } else if (op === 'write') {
+          const key  = typeof p['key'] === 'string' ? p['key'] : ''
+          if (!key) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'key required' })); return }
+          writeBlackboard(swarmId, key, p['data'] ?? null)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, executionPerformed: false }))
+        } else {
+          const agentId = typeof p['agentId'] === 'string' ? p['agentId'] : ''
+          const role    = typeof p['role']    === 'string' ? p['role']    : undefined
+          if (!agentId) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'agentId required' })); return }
+          const manifest = joinSwarm(swarmId, agentId, role)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ manifest, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── PDOR Ingest — governed data-asset catalog graph proposals ─────────────────
+  if (req.method === 'POST' && url.pathname === '/api/data/pdor') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { buildCatalogGraph } = await import('./lib/pdor-ingest.js')
+        const pdor     = p['pdor']     as import('./lib/data-onboarding.js').Pdor     | undefined
+        const decision = p['decision'] as import('./lib/data-onboarding.js').PdorDecision | undefined
+        if (!pdor || !decision) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'pdor and decision required' })); return }
+        const inputs = (p['inputs'] as import('./lib/pdor-ingest.js').IngestInputs | undefined) ?? {}
+        const result = buildCatalogGraph(pdor, decision, inputs)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Sovereign Broker — challenge + credential verification ────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/identity/sovereign-challenge') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { newChallenge } = await import('./lib/sovereign-broker.js')
+        const challenge = newChallenge()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ challenge, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/identity/sovereign-verify') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { verifyCredential } = await import('./lib/sovereign-broker.js')
+        const credential = p['credential'] as import('./lib/sovereign-broker.js').CredentialRecord | undefined
+        if (!credential) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'credential required' })); return }
+        const ok = verifyCredential(credential)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Question Context — episode count + outcome recording ─────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/graph/episodes') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { episodeCount } = await import('./lib/question-context.js')
+        const count = episodeCount()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ count, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/graph/episodes') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { recordEpisodeOutcome } = await import('./lib/question-context.js')
+        const episodeId = typeof p['episodeId'] === 'string' ? p['episodeId'] : ''
+        const answer    = typeof p['answer']    === 'string' ? p['answer']    : ''
+        const correct   = typeof p['correct']   === 'boolean' ? p['correct']  : false
+        const lane      = typeof p['lane']      === 'string' ? p['lane']      : undefined
+        if (!episodeId || !answer) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'episodeId and answer required' })); return }
+        recordEpisodeOutcome(episodeId, { answer, correct, lane })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── SynapseIQ Enrich — symbol extraction + KG triples ────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/nlp/synapseiq-triples') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { enrichmentToTriples, fallbackSymbols } = await import('./lib/synapseiq-enrich.js')
+        const op = typeof p['op'] === 'string' ? p['op'] : 'triples'
+        if (op === 'symbols') {
+          const content  = typeof p['content']  === 'string' ? p['content']  : ''
+          const filename = typeof p['filename'] === 'string' ? p['filename'] : undefined
+          if (!content) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'content required' })); return }
+          const result = fallbackSymbols(content, filename)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ...result, executionPerformed: false }))
+        } else {
+          const assetId     = typeof p['assetId'] === 'string' ? p['assetId'] : ''
+          const enrichment  = p['enrichment'] as import('./lib/synapseiq-enrich.js').SynapseEnrichment | undefined
+          if (!assetId || !enrichment) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'assetId and enrichment required' })); return }
+          const triples = enrichmentToTriples(assetId, enrichment)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ triples, count: triples.length, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Agent Registry — custom agent CRUD ──────────────────────────────────────
+  if (url.pathname === '/api/agents/registry') {
+    setCORSHeaders(res)
+    if (req.method === 'GET') {
+      void (async () => {
+        try {
+          const { listCustomAgents, getCustomAgent } = await import('./lib/agent-registry.js')
+          const id = url.searchParams.get('id') ?? undefined
+          if (id) {
+            const agent = getCustomAgent(id)
+            if (!agent) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'not_found' })); return }
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ agent, executionPerformed: false }))
+          } else {
+            const agents = listCustomAgents()
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ agents, count: agents.length, executionPerformed: false }))
+          }
+        } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+      })()
+      return
+    }
+    if (req.method === 'POST') {
+      void (async () => {
+        try {
+          const body = await readBody(req)
+          let p: Record<string, unknown>
+          try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+          const { saveCustomAgent } = await import('./lib/agent-registry.js')
+          const agent = saveCustomAgent(p as unknown as import('./lib/agent-registry.js').CustomAgent)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ agent, executionPerformed: false }))
+        } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+      })()
+      return
+    }
+    if (req.method === 'DELETE') {
+      void (async () => {
+        try {
+          const body = await readBody(req)
+          let p: Record<string, unknown>
+          try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+          const { deleteCustomAgent } = await import('./lib/agent-registry.js')
+          const id = typeof p['id'] === 'string' ? p['id'] : ''
+          if (!id) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'id required' })); return }
+          const ok = deleteCustomAgent(id)
+          res.writeHead(ok ? 200 : 404, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok, executionPerformed: false }))
+        } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+      })()
+      return
+    }
+  }
+
+  // ── Best-of-N — candidate selection by agreement ─────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/eval/best-of-n') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { selectBestOfN, shouldStop } = await import('./lib/best-of-n.js')
+        const candidates = Array.isArray(p['candidates']) ? p['candidates'] as import('./lib/best-of-n.js').VerifiedCandidate[] : []
+        if (!candidates.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'candidates required' })); return }
+        const result = selectBestOfN(candidates)
+        const stop = shouldStop(result, {
+          minAgreement: typeof p['minAgreement'] === 'number' ? p['minAgreement'] : undefined,
+          minCoverage:  typeof p['minCoverage']  === 'number' ? p['minCoverage']  : undefined,
+        })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, shouldStop: stop, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Capability Model — UCB bandit arm selection + reward recording ────────────
+  if (url.pathname === '/api/model/capability') {
+    setCORSHeaders(res)
+    if (req.method === 'GET') {
+      void (async () => {
+        try {
+          const { banditStandings, capabilitySummary } = await import('./lib/capability-model.js')
+          const standings = banditStandings()
+          const summary   = capabilitySummary()
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ standings, summary, executionPerformed: false }))
+        } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+      })()
+      return
+    }
+    if (req.method === 'POST') {
+      void (async () => {
+        try {
+          const body = await readBody(req)
+          let p: Record<string, unknown>
+          try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+          const { recordCapability, recordReward, selectArmUCB, resetCapabilities } = await import('./lib/capability-model.js')
+          const op = typeof p['op'] === 'string' ? p['op'] : 'select'
+          if (op === 'record') {
+            const provider = typeof p['provider'] === 'string' ? p['provider'] : ''
+            const model    = typeof p['model']    === 'string' ? p['model']    : ''
+            if (!provider || !model) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'provider and model required' })); return }
+            recordCapability({ provider, model, task: typeof p['task'] === 'string' ? p['task'] : undefined, error: typeof p['error'] === 'boolean' ? p['error'] : false, latencyMs: typeof p['latencyMs'] === 'number' ? p['latencyMs'] : 0 })
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ ok: true, executionPerformed: false }))
+          } else if (op === 'reward') {
+            const provider = typeof p['provider'] === 'string' ? p['provider'] : ''
+            const model    = typeof p['model']    === 'string' ? p['model']    : ''
+            const reward   = typeof p['reward']   === 'number' ? p['reward']   : 0
+            if (!provider || !model) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'provider and model required' })); return }
+            recordReward({ provider, model, task: typeof p['task'] === 'string' ? p['task'] : undefined, reward })
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ ok: true, executionPerformed: false }))
+          } else if (op === 'reset') {
+            const n = resetCapabilities()
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ removed: n, executionPerformed: false }))
+          } else {
+            const task       = typeof p['task']       === 'string' ? p['task']       : ''
+            const candidates = Array.isArray(p['candidates']) ? p['candidates'] as string[] : []
+            const provider   = typeof p['provider']   === 'string' ? p['provider']   : undefined
+            if (!candidates.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'candidates required' })); return }
+            const selected = selectArmUCB(task, candidates, provider)
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ selected, executionPerformed: false }))
+          }
+        } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+      })()
+      return
+    }
+  }
+
+  // ── GAIA Observe — user twin ingestion + belief snapshot ─────────────────────
+  if (url.pathname === '/api/gaia/observe') {
+    setCORSHeaders(res)
+    if (req.method === 'GET') {
+      void (async () => {
+        try {
+          const { getRecentObservations, getTwinState } = await import('./lib/gaia.js')
+          const observations = getRecentObservations(Number(url.searchParams.get('limit') ?? 20))
+          const state = getTwinState()
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ observations, state, executionPerformed: false }))
+        } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+      })()
+      return
+    }
+    if (req.method === 'POST') {
+      void (async () => {
+        try {
+          const body = await readBody(req)
+          let p: Record<string, unknown>
+          try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+          const { ingestGaiaObservation, ensureUserTwin } = await import('./lib/gaia.js')
+          ensureUserTwin()
+          const payload: import('./lib/gaia.js').GaiaObservationPayload = {
+            session_id:   typeof p['session_id']   === 'string' ? p['session_id']   : 'api',
+            captured_at:  typeof p['captured_at']  === 'string' ? p['captured_at']  : new Date().toISOString(),
+            goal:         typeof p['goal']         === 'string' ? p['goal']         : undefined,
+            app_context:  typeof p['app_context']  === 'string' ? p['app_context']  : undefined,
+            step_summary: typeof p['step_summary'] === 'string' ? p['step_summary'] : undefined,
+            succeeded:    typeof p['succeeded']    === 'boolean'? p['succeeded']    : undefined,
+          }
+          const nodeId = ingestGaiaObservation(payload)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ nodeId, executionPerformed: false }))
+        } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+      })()
+      return
+    }
+  }
+
+  // ── Goal Model — intent detection + slot filling ──────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/nlp/goal') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { detectGoalIntent, sanitizeGoalText, slotFill, goalProgress } = await import('./lib/goal-model.js')
+        const op   = typeof p['op']   === 'string' ? p['op']   : 'detect'
+        const text = typeof p['text'] === 'string' ? sanitizeGoalText(p['text']) : ''
+        if (!text) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'text required' })); return }
+        if (op === 'slot-fill') {
+          const slots = Array.isArray(p['slots']) ? p['slots'] as import('./lib/goal-model.js').GoalSlot[] : []
+          const filled = slotFill(slots, text)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ filled, executionPerformed: false }))
+        } else if (op === 'progress') {
+          const goal = p['goal'] as import('./lib/goal-model.js').Goal | undefined
+          if (!goal) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'goal required' })); return }
+          const progress = goalProgress(goal)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ progress, executionPerformed: false }))
+        } else {
+          const intent = detectGoalIntent(text)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ intent, text, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Graph Hygiene — label classification + edit distance ─────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/graph/hygiene') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { classifyLabel, editDistance, isActionLabel } = await import('./lib/graph-hygiene.js')
+        const op = typeof p['op'] === 'string' ? p['op'] : 'classify'
+        if (op === 'distance') {
+          const a = typeof p['a'] === 'string' ? p['a'] : ''
+          const b = typeof p['b'] === 'string' ? p['b'] : ''
+          if (!a || !b) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'a and b required' })); return }
+          const distance = editDistance(a, b)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ distance, executionPerformed: false }))
+        } else {
+          const label = typeof p['label'] === 'string' ? p['label'] : ''
+          if (!label) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'label required' })); return }
+          const isAction = isActionLabel(label)
+          const kind     = classifyLabel(label, (w) => isActionLabel(w))
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ label, isAction, kind, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── IPI Datamark — external content marking + injection stripping ─────────────
+  if (req.method === 'POST' && url.pathname === '/api/security/ipi') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { markExternalContent, buildIpiSystemPromptPrefix, stripPotentialInjection } = await import('./lib/ipi-datamark.js')
+        const op = typeof p['op'] === 'string' ? p['op'] : 'strip'
+        if (op === 'mark') {
+          const content = typeof p['content'] === 'string' ? p['content'] : ''
+          const source  = typeof p['source']  === 'string' ? p['source']  : ''
+          if (!content) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'content required' })); return }
+          const marked = markExternalContent(content, source)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ marked, executionPerformed: false }))
+        } else if (op === 'prefix') {
+          const prefix = buildIpiSystemPromptPrefix()
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ prefix, executionPerformed: false }))
+        } else {
+          const content = typeof p['content'] === 'string' ? p['content'] : ''
+          if (!content) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'content required' })); return }
+          const result = stripPotentialInjection(content)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ...result, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Memory Poison Guard — detect adversarial memory writes ───────────────────
+  if (req.method === 'POST' && url.pathname === '/api/security/memory-poison') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { detectMemoryPoisonAttempt } = await import('./lib/memory-poison-guard.js')
+        const content = typeof p['content'] === 'string' ? p['content'] : ''
+        if (!content) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'content required' })); return }
+        const result = detectMemoryPoisonAttempt(content)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── PLN Judgment — graph-grounded claim evaluation ───────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/graph/pln-judgment') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { extractClaimEntities, assessAgainstGraph } = await import('./lib/pln-judgment.js')
+        const text = typeof p['text'] === 'string' ? p['text'] : ''
+        if (!text) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'text required' })); return }
+        const entities  = extractClaimEntities(text)
+        const grounding = assessAgainstGraph(text, {
+          runPln: typeof p['runPln'] === 'boolean' ? p['runPln'] : undefined,
+        })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ entities, grounding, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Quality Samples — SR quality recording + worth trend ─────────────────────
+  if (url.pathname === '/api/eval/quality-samples') {
+    setCORSHeaders(res)
+    if (req.method === 'GET') {
+      void (async () => {
+        try {
+          const { qualitySamples, worthTrend } = await import('./lib/quality-sr.js')
+          const samples = qualitySamples()
+          const trend   = worthTrend()
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ samples, trend, count: samples.length, executionPerformed: false }))
+        } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+      })()
+      return
+    }
+    if (req.method === 'POST') {
+      void (async () => {
+        try {
+          const body = await readBody(req)
+          let p: Record<string, unknown>
+          try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+          const { recordQualitySample, resetQuality } = await import('./lib/quality-sr.js')
+          const op = typeof p['op'] === 'string' ? p['op'] : 'record'
+          if (op === 'reset') {
+            const n = resetQuality()
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ removed: n, executionPerformed: false }))
+          } else {
+            const model = typeof p['model'] === 'string' ? p['model'] : ''
+            const task  = typeof p['task']  === 'string' ? p['task']  : ''
+            if (!model || !task) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'model and task required' })); return }
+            const sample: import('./lib/quality-sr.js').QualitySample = {
+              model, task,
+              provider:         typeof p['provider']         === 'string' ? p['provider']         : 'local',
+              worth:            typeof p['worth']            === 'number' ? p['worth']            : 0,
+              grounding:        typeof p['grounding']        === 'number' ? p['grounding']        : 0,
+              graph_grounding:  typeof p['graph_grounding']  === 'number' ? p['graph_grounding']  : 0,
+              belief_alignment: typeof p['belief_alignment'] === 'number' ? p['belief_alignment'] : 0,
+              latency_ms:       typeof p['latency_ms']       === 'number' ? p['latency_ms']       : 0,
+              input_tokens:     typeof p['input_tokens']     === 'number' ? p['input_tokens']     : 0,
+              ts:               typeof p['ts']               === 'string' ? p['ts']               : new Date().toISOString(),
+            }
+            recordQualitySample(sample)
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ ok: true, executionPerformed: false }))
+          }
+        } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+      })()
+      return
+    }
+  }
+
+  // ── SRS — spaced-repetition card management ───────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/learning/srs') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { newCard, review, dueCards } = await import('./lib/srs.js')
+        const op  = typeof p['op']  === 'string' ? p['op']  : 'new'
+        const now = typeof p['now'] === 'number' ? p['now'] : Date.now()
+        if (op === 'review') {
+          const card  = p['card']  as import('./lib/srs.js').Card | undefined
+          const grade = p['grade'] as 0|1|2|3 | undefined
+          if (!card || grade == null) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'card and grade required' })); return }
+          const updated = review(card, grade, now)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ card: updated, executionPerformed: false }))
+        } else if (op === 'due') {
+          const items = Array.isArray(p['items']) ? p['items'] as Array<{ card: import('./lib/srs.js').Card }> : []
+          const due = dueCards(items, now)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ due, count: due.length, executionPerformed: false }))
+        } else {
+          const card = newCard(now)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ card, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Value Judgment — answer quality assessment ────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/eval/value-judgment') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { judgeAnswer } = await import('./lib/value-judgment.js')
+        const answer      = typeof p['answer']      === 'string' ? p['answer']      : ''
+        const contextText = typeof p['contextText'] === 'string' ? p['contextText'] : ''
+        if (!answer) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'answer required' })); return }
+        const input: import('./lib/value-judgment.js').VJInputs = {
+          answer,
+          contextText,
+          reasoning:    typeof p['reasoning'] === 'string' ? p['reasoning'] : undefined,
+          beliefs:      Array.isArray(p['beliefs'])  ? p['beliefs']  as Array<{ claim: string }> : [],
+          laws:         Array.isArray(p['laws'])     ? p['laws']     as Array<{ law: string; confidence: number }> : [],
+          graphGrounding: typeof p['graphGrounding'] === 'number' ? p['graphGrounding'] : undefined,
+          novelClaims:  Array.isArray(p['novelClaims']) ? p['novelClaims'] as string[] : undefined,
+        }
+        const judgment = judgeAnswer(input)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ judgment, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Voice Runtime — voice sidecar provisioning status ────────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/voice/provision-status') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { voiceProvisionStatus } = await import('./lib/voice-runtime.js')
+        const status = voiceProvisionStatus()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...status, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Phantom Anomaly — FTLE/ESN time-series anomaly detection ─────────────────
+  if (req.method === 'POST' && url.pathname === '/api/graph/anomaly-ftle') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { ftleSeries, detectAnomalies } = await import('./lib/phantom-anomaly.js')
+        const op     = typeof p['op']     === 'string' ? p['op']     : 'detect'
+        const series = Array.isArray(p['series']) ? p['series'] as number[] : []
+        if (!series.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'series required' })); return }
+        if (op === 'ftle') {
+          const window  = typeof p['window']  === 'number' ? p['window']  : undefined
+          const horizon = typeof p['horizon'] === 'number' ? p['horizon'] : undefined
+          const ftle = ftleSeries(series, { window, horizon })
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ftle, executionPerformed: false }))
+        } else {
+          const result = detectAnomalies(series)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ...result, executionPerformed: false }))
+        }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Learning Progress — adaptive learner track + brief ───────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/learning/progress') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { learnerTrack, buildAdaptiveBrief, progressArtifact } = await import('./lib/progress.js')
+        const id    = url.searchParams.get('id') ?? ''
+        if (!id) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'id required' })); return }
+        const track    = learnerTrack(id)
+        const brief    = buildAdaptiveBrief(id)
+        const artifact = progressArtifact(id)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ id, track, brief, artifact, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Mesh Config — sovereign mesh tier ladder ─────────────────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/mesh/config') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { meshLadder, sovereignConfig } = await import('./lib/mesh.js')
+        const ladder = meshLadder()
+        const config = sovereignConfig()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ladder, config, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Runtime Presets — hardware-gated config resolution ───────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/runtime/presets') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { detectPreset, resolveConfig } = await import('./lib/presets.js')
+        const preset = detectPreset()
+        const config = resolveConfig()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ preset, config, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Slash Topics — topic taxonomy classification ──────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/nlp/slash-topics') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { classifyTerms, titleCaseTopic, SLASH_CATEGORIES } = await import('./lib/slash-topics.js')
+        const terms = Array.isArray(p['terms']) ? p['terms'] as string[] : typeof p['text'] === 'string' ? p['text'].split(/\s+/) : []
+        if (!terms.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'terms or text required' })); return }
+        const match = classifyTerms(terms)
+        const label = match ? titleCaseTopic(match.topic) : null
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ match, label, categories: SLASH_CATEGORIES, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Search Verify Config — enabled flag + candidate prompt ───────────────────
+  if (req.method === 'GET' && url.pathname === '/api/eval/search-verify') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { searchVerifyEnabled, candidatePrompt } = await import('./lib/search-verify.js')
+        const enabled  = searchVerifyEnabled()
+        const question = url.searchParams.get('question') ?? ''
+        const prompt   = question ? candidatePrompt(question) : null
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ enabled, prompt, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Reason Lane — reasoning lane routing config ───────────────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/routing/reason-lane') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { reasonLaneEnabled, reasonSCK, isReasonLaneIntent, REASON_LANE_INTENTS } = await import('./lib/reason-lane.js')
+        const enabled = reasonLaneEnabled()
+        const sck     = reasonSCK()
+        const intent  = url.searchParams.get('intent')
+        const isReason = intent ? isReasonLaneIntent(intent) : null
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ enabled, sck, intents: [...REASON_LANE_INTENTS], isReason, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Canonical Shapes — SHACL entity validation ───────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/graph/validate-entity') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { validateEntity } = await import('./lib/canonical-shapes.js')
+        const labels     = Array.isArray(p['labels'])     ? p['labels']     as string[]              : []
+        const properties = typeof p['properties'] === 'object' && p['properties'] ? p['properties'] as Record<string, unknown> : {}
+        if (!labels.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'labels required' })); return }
+        const violations = validateEntity(labels, properties)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ valid: violations.length === 0, violations, executionPerformed: false }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Audit / Device Key ─────────────────────────────────────────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/audit/device-key') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { loadOrCreateDeviceKey } = await import('./lib/audit-key.js')
+        const key = loadOrCreateDeviceKey()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ fingerprint: key.fingerprint, publicKeyPem: key.publicKeyPem }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Brain / Home ────────────────────────────────────────────────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/brain/home') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { brainHome, academicBrainDir, opsBrainFile, opsBrainDir } = await import('./lib/brain-home.js')
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ brainHome: brainHome(), academicBrainDir: academicBrainDir(), opsBrainDir: opsBrainDir(), opsBrainFile: opsBrainFile() }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Connector / Run ─────────────────────────────────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/connector/run') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { runConnector, manualConnector } = await import('./lib/connector.js')
+        const docs   = Array.isArray(p['docs']) ? p['docs'] as Array<{ id?: string; text: string; meta?: Record<string, unknown> }> : []
+        const connId = typeof p['connectorId'] === 'string' ? p['connectorId'] : 'manual'
+        const run = await runConnector(manualConnector(connId, docs))
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ run }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Sovereign ID ────────────────────────────────────────────────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/sovereign/id') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { loadOrCreateRoot, scopeAlias } = await import('./lib/sovereign-id.js')
+        const root = loadOrCreateRoot()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ rootLen: root.length, alias: scopeAlias(root, url.searchParams.get('scopeId') ?? 'default', url.searchParams.get('domain') ?? 'noetica') }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/sovereign/id/scope') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { loadOrCreateRoot, deriveScope } = await import('./lib/sovereign-id.js')
+        const scopeId = typeof p['scopeId'] === 'string' ? p['scopeId'] : ''
+        if (!scopeId) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'scopeId required' })); return }
+        const facet = deriveScope(loadOrCreateRoot(), scopeId)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ scopeId, publicKeyHex: facet.publicKeyRaw.toString('hex'), pseudonym: facet.pseudonym }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Sovereign OIDC — JWKS + token issuance ─────────────────────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/sovereign/oidc/jwks') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { generateSigningKey, jwks } = await import('./lib/sovereign-oidc.js')
+        const g = globalThis as Record<string, unknown>
+        if (!g['__oidcKey']) g['__oidcKey'] = generateSigningKey()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(jwks(g['__oidcKey'] as import('./lib/sovereign-oidc.js').SigningKey)))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/sovereign/oidc/token') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { generateSigningKey, issueIdToken } = await import('./lib/sovereign-oidc.js')
+        const g = globalThis as Record<string, unknown>
+        if (!g['__oidcKey']) g['__oidcKey'] = generateSigningKey()
+        const claims = p['claims'] as Record<string, unknown> | undefined
+        if (!claims) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'claims required' })); return }
+        const token = await issueIdToken(g['__oidcKey'] as import('./lib/sovereign-oidc.js').SigningKey, claims as never)
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ token }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Sovereign Vault — seal/open ─────────────────────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/sovereign/vault/seal') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { sealForScope } = await import('./lib/sovereign-vault.js')
+        const { loadOrCreateRoot } = await import('./lib/sovereign-id.js')
+        const plaintext = typeof p['plaintext'] === 'string' ? p['plaintext'] : ''
+        if (!plaintext) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'plaintext required' })); return }
+        const blob = sealForScope(loadOrCreateRoot(), typeof p['scopeId'] === 'string' ? p['scopeId'] : 'default', plaintext)
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ blob }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/sovereign/vault/open') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { openForScope } = await import('./lib/sovereign-vault.js')
+        const { loadOrCreateRoot } = await import('./lib/sovereign-id.js')
+        const blob = typeof p['blob'] === 'string' ? p['blob'] : ''
+        if (!blob) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'blob required' })); return }
+        const plaintext = openForScope(loadOrCreateRoot(), typeof p['scopeId'] === 'string' ? p['scopeId'] : 'default', blob).toString('utf8')
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ plaintext }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Vector Index — flat cosine index CRUD ──────────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/vector/index/add') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { VectorIndex } = await import('./lib/vector-index.js')
+        const g = globalThis as Record<string, unknown>
+        if (!g['__vecIdx']) g['__vecIdx'] = new VectorIndex()
+        const idx = g['__vecIdx'] as InstanceType<typeof VectorIndex>
+        const items = Array.isArray(p['items']) ? p['items'] as Array<{ id: string; vec: number[] }> : []
+        const id  = typeof p['id']  === 'string' ? p['id']  : ''
+        const vec = Array.isArray(p['vec']) ? p['vec'] as number[] : []
+        if (items.length) { idx.addMany(items.map((i) => ({ id: i.id, vec: new Float32Array(i.vec) }))); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ added: items.length, size: idx.size() })); return }
+        if (id && vec.length) { idx.add(id, new Float32Array(vec)); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ added: 1, size: idx.size() })); return }
+        res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'items or id+vec required' }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/vector/index/search') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { VectorIndex } = await import('./lib/vector-index.js')
+        const g = globalThis as Record<string, unknown>
+        if (!g['__vecIdx']) g['__vecIdx'] = new VectorIndex()
+        const idx = g['__vecIdx'] as InstanceType<typeof VectorIndex>
+        const query = Array.isArray(p['query']) ? new Float32Array(p['query'] as number[]) : null
+        const k = typeof p['k'] === 'number' ? p['k'] : 6
+        if (!query) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'query vector required' })); return }
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ results: idx.search(query, k), size: idx.size() }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Managed Ollama — status + provision ────────────────────────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/runtime/ollama/status') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { runtimeComplete, resolveManagedOllamaBinary, MANAGED_PORT } = await import('./lib/managed-ollama.js')
+        const binary = resolveManagedOllamaBinary()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ready: runtimeComplete(binary ?? undefined), binary, port: MANAGED_PORT }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/runtime/ollama/provision') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown> = {}
+        try { p = JSON.parse(body) } catch { /* body optional */ }
+        const { provisionOllamaRuntime } = await import('./lib/managed-ollama.js')
+        const binary = await provisionOllamaRuntime(typeof p['version'] === 'string' ? p['version'] : undefined)
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ binary, provisioned: binary !== null }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── KG / Auto-Extract — triple extraction → proposals ──────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/kg/auto-extract') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { extractKnowledgeGraph } = await import('./lib/auto-kg.js')
+        const text   = typeof p['text']   === 'string' ? p['text']   : ''
+        const source = typeof p['source'] === 'string' ? p['source'] : 'api'
+        if (!text) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'text required' })); return }
+        const gen = (prompt: string) => generateOllamaText({ model: 'qwen3:14b', messages: [{ role: 'user', content: prompt }], temperature: 0.2 }).then((r) => r.content)
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ result: await extractKnowledgeGraph(text, source, gen) }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Canon — classify + lookup canonical terms ───────────────────────────────────
+  if (req.method === 'GET' && url.pathname === '/api/canon') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { canonRoute, canonLookup } = await import('./lib/canon-route.js')
+        const q    = url.searchParams.get('q') ?? ''
+        const kind = url.searchParams.get('kind') as import('./lib/canon-route.js').LookupKind | null
+        if (!q) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'q required' })); return }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ route: canonRoute(q), lookup: canonLookup(q, kind ?? undefined) }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Geo / Colocations ──────────────────────────────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/geo/colocations') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { findColocations } = await import('./lib/colocation.js')
+        const pings = Array.isArray(p['pings']) ? p['pings'] as import('./lib/colocation.js').Ping[] : []
+        if (!pings.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'pings required' })); return }
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ colocations: findColocations(pings, p['opts'] as never) }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Calibrate / Conformal threshold ────────────────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/calibrate/conformal') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { calibrateThreshold, shouldAbstain, coverageAt } = await import('./lib/conformal.js')
+        const calib = Array.isArray(p['calib']) ? p['calib'] as import('./lib/conformal.js').CalibPoint[] : []
+        const alpha = typeof p['alpha'] === 'number' ? p['alpha'] : 0.1
+        const score = typeof p['score'] === 'number' ? p['score'] : undefined
+        if (!calib.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'calib required' })); return }
+        const threshold = calibrateThreshold(calib, alpha)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ threshold, coverage: coverageAt(calib, threshold), abstain: score !== undefined ? shouldAbstain(score, threshold) : undefined }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Council / Vote ─────────────────────────────────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/council/vote') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { learnedCouncilVote } = await import('./lib/council.js')
+        const inp = p['input'] as import('./lib/council.js').LearnedInput | undefined
+        if (!inp) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'input required' })); return }
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ result: learnedCouncilVote(inp) }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── RAG / CRAG Gate ────────────────────────────────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/rag/crag-gate') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { cragVote, gateShouldRetrieve, acceptRetrievedAnswer } = await import('./lib/crag-gate.js')
+        const question   = typeof p['question']   === 'string' ? p['question']   : ''
+        const candidates = Array.isArray(p['candidates']) ? p['candidates'] as string[] : []
+        const k          = typeof p['k']          === 'number' ? p['k']          : 5
+        if (!question || !candidates.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'question and candidates required' })); return }
+        let ci = 0
+        const vote = await cragVote(async () => { const c = candidates[ci % candidates.length]!; ci++; return c }, (r) => r.trim() || null, k)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ vote, shouldRetrieve: gateShouldRetrieve(vote.agree), accept: acceptRetrievedAnswer(vote.agree, vote.agree) }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Memory / Crystallize — persist verified Q&A ────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/memory/crystallize') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { crystallizeAnswer, artifactCount } = await import('./lib/crystallize.js')
+        const { question, answer, session, action, attestation, worth } = p
+        if (!question || !answer) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'question and answer required' })); return }
+        const artifact = crystallizeAnswer({ question: String(question), answer: String(answer), session: String(session ?? ''), action: String(action ?? ''), attestation: String(attestation ?? ''), worth: Number(worth ?? 0.8) })
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ artifact, count: artifactCount() }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/memory/crystallize') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { recallArtifact, artifactCount } = await import('./lib/crystallize.js')
+        const q = url.searchParams.get('q') ?? ''
+        if (!q) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'q required' })); return }
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ hit: recallArtifact(q), count: artifactCount() }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Entailment — premise/hypothesis NLI classification ──────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/entailment/classify') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { classifyEntailmentSemantic, jaccard } = await import('./lib/entailment.js')
+        const premise    = typeof p['premise']    === 'string' ? p['premise']    : ''
+        const hypothesis = typeof p['hypothesis'] === 'string' ? p['hypothesis'] : ''
+        if (!premise || !hypothesis) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'premise and hypothesis required' })); return }
+        const threshold = typeof p['threshold'] === 'number' ? p['threshold'] : undefined
+        const result = await classifyEntailmentSemantic(premise, hypothesis, threshold !== undefined ? { threshold } : {})
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, jaccard: jaccard(premise, hypothesis) }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Causal Graph — DAG topology + backdoor criterion + IV validity ───────────
+  if (req.method === 'POST' && url.pathname === '/api/causal/analyze') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { topologicalSort, isAcyclic, ancestors, descendants, backdoorCriterion, ivValidity } = await import('./lib/causal-graph.js')
+        const dag = p['dag'] as import('./lib/causal-graph.js').CausalDAG | undefined
+        if (!dag) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'dag required' })); return }
+        const action = typeof p['action'] === 'string' ? p['action'] : 'sort'
+        if (action === 'sort')      { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ order: topologicalSort(dag), acyclic: isAcyclic(dag) })); return }
+        if (action === 'ancestors') { const id = String(p['id'] ?? ''); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ancestors: [...ancestors(dag, id)] })); return }
+        if (action === 'descendants') { const id = String(p['id'] ?? ''); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ descendants: [...descendants(dag, id)] })); return }
+        if (action === 'backdoor')  { const from = String(p['from'] ?? ''); const to = String(p['to'] ?? ''); const adjSet = Array.isArray(p['adjustmentSet']) ? p['adjustmentSet'] as string[] : []; res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(backdoorCriterion(dag, from, to, adjSet))); return }
+        if (action === 'iv')        { const iv = String(p['iv'] ?? ''); const treat = String(p['treatment'] ?? ''); const out = String(p['outcome'] ?? ''); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(ivValidity(dag, iv, treat, out))); return }
+        res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'unknown action' }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Late Interaction — ColBERT-style MaxSim reranking ────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/retrieve/late-interaction') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { rerankLate } = await import('./lib/late-interaction.js')
+        const queryVecs = p['queryVecs'] as number[][] | undefined
+        const docs      = p['docs']      as Array<{ id: string; vecs: number[][] }> | undefined
+        const topK      = typeof p['topK'] === 'number' ? p['topK'] : 10
+        if (!queryVecs || !docs) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'queryVecs and docs required' })); return }
+        const ranked = rerankLate(queryVecs, docs, topK)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ranked, count: ranked.length }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Self-Consistency — majority vote over sampled answers ────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/reasoning/consistency') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { majorityVote } = await import('./lib/self-consistency.js')
+        const answers = Array.isArray(p['answers']) ? p['answers'] as string[] : []
+        if (!answers.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'answers required' })); return }
+        const result = majorityVote(answers)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(result))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Uncertainty — semantic entropy + answer decision ─────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/reasoning/uncertainty') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { semanticClusters, semanticEntropy, normalizedEntropy, decideAnswer } = await import('./lib/uncertainty.js')
+        const answers = Array.isArray(p['answers']) ? p['answers'] as string[] : []
+        if (!answers.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'answers required' })); return }
+        const clusters   = semanticClusters(answers, (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase())
+        const entropy    = semanticEntropy(clusters)
+        const normEnt    = normalizedEntropy(clusters)
+        const coverage   = clusters.reduce((m, c) => Math.max(m, c.length), 0) / answers.length
+        const state      = p['state'] as import('./lib/uncertainty.js').ConfidenceState | undefined
+        const decision   = state ? decideAnswer(state) : null
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ clusters: clusters.length, entropy, normalizedEntropy: normEnt, coverage, decision }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Think-on-Graph — beam search over knowledge graph for paths ──────────────
+  if (req.method === 'POST' && url.pathname === '/api/graph/think') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { beamTraverse } = await import('./lib/think-on-graph.js')
+        const adjRaw = p['adj'] as Record<string, Array<{ to: string; rel: string }>> | undefined
+        const seeds  = Array.isArray(p['seeds']) ? p['seeds'] as string[] : []
+        if (!adjRaw || !seeds.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'adj and seeds required' })); return }
+        const adj   = new Map(Object.entries(adjRaw))
+        const beam  = typeof p['beam']  === 'number' ? p['beam']  : 4
+        const depth = typeof p['depth'] === 'number' ? p['depth'] : 3
+        const paths = beamTraverse(adj, seeds, (path) => path.score, { beam, depth })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ paths, count: paths.length }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Plan Mode — create / edit / inspect agent execution plans ────────────────
+  if ((req.method === 'GET' || req.method === 'POST') && url.pathname === '/api/plan') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { makePlan, editPlan, nextStep, completeStep, canExecute } = await import('./lib/plan-mode.js')
+        if (req.method === 'GET') {
+          const stepsParam = url.searchParams.get('steps') ?? ''
+          const steps = stepsParam ? stepsParam.split(',').map(s => s.trim()).filter(Boolean) : []
+          if (!steps.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'steps required' })); return }
+          const plan = makePlan(steps)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ plan, next: nextStep(plan), canExecute: canExecute(plan) }))
+          return
+        }
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const action = typeof p['action'] === 'string' ? p['action'] : 'make'
+        if (action === 'make') { const steps = Array.isArray(p['steps']) ? p['steps'] as string[] : []; const plan = makePlan(steps); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ plan, next: nextStep(plan), canExecute: canExecute(plan) })); return }
+        const plan = p['plan'] as import('./lib/plan-mode.js').Plan | undefined
+        if (!plan) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'plan required' })); return }
+        if (action === 'edit')     { const edits = p['edits'] as Parameters<typeof editPlan>[1]; const updated = editPlan(plan, edits); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ plan: updated, next: nextStep(updated), canExecute: canExecute(updated) })); return }
+        if (action === 'complete') { const id = Number(p['id'] ?? 0); const updated = completeStep(plan, id); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ plan: updated, next: nextStep(updated), canExecute: canExecute(updated) })); return }
+        res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'unknown action' }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Eval Capture — record failure / procedural traces for learning ────────────
+  if (req.method === 'POST' && url.pathname === '/api/eval/capture') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { captureFailure, captureProcedural } = await import('./lib/eval-capture.js')
+        const trace  = p['trace']  as import('./lib/eval-capture.js').Trace | undefined
+        const action = typeof p['action'] === 'string' ? p['action'] : 'failure'
+        if (!trace) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'trace required' })); return }
+        if (action === 'procedural') { captureProcedural(trace, Date.now()); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true })); return }
+        const minCoverage = typeof p['minCoverage'] === 'number' ? p['minCoverage'] : undefined
+        const evalCase = captureFailure(trace, Date.now(), minCoverage !== undefined ? { minCoverage } : {})
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ case: evalCase, captured: evalCase !== null }))
       } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
     })()
     return
@@ -10369,6 +16058,7 @@ Question: ${question}`
   // 404
   res.writeHead(404, { 'content-type': 'application/json' })
   res.end(JSON.stringify({ error: 'not_found', path: url.pathname }))
+
 })
 
 // ── Learning-state persistence ─────────────────────────────────────────────────

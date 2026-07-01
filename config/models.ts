@@ -1,4 +1,4 @@
-import type { ModelConfig } from '@/lib/types/model'
+import type { ModelConfig, Provider } from '@/lib/types/model'
 
 export const models: ModelConfig[] = [
   // ── Auto mesh routing (prophet-mesh) ─────────────────────────────────────────
@@ -45,32 +45,33 @@ export const models: ModelConfig[] = [
 
   // ── OpenAI ───────────────────────────────────────────────────────────────────
   {
-    id: 'gpt-4o',
-    label: 'GPT-4o',
+    id: 'gpt-5.5',
+    label: 'GPT-5.5',
     provider: 'openai',
     steering: 'none',
     local_capable: false,
-    context_window: 128000,
-    description: 'OpenAI blackbox provider for live standalone chat with provenance only.'
-  },
-  {
-    id: 'gpt-4o-mini',
-    label: 'GPT-4o mini',
-    provider: 'openai',
-    steering: 'none',
-    local_capable: false,
-    context_window: 128000,
-    description: 'Lower-cost OpenAI blackbox provider for live standalone chat with provenance only.'
-  },
-  {
-    id: 'o3',
-    label: 'o3',
-    provider: 'openai',
-    steering: 'none',
-    local_capable: false,
-    context_window: 200000,
+    context_window: 400000,
     extended_thinking: true,
-    description: 'OpenAI o3 reasoning model for complex multi-step problems.'
+    description: 'OpenAI flagship — strongest general, coding, and agentic model. Blackbox provider with provenance only.'
+  },
+  {
+    id: 'gpt-5.5-pro',
+    label: 'GPT-5.5 Pro',
+    provider: 'openai',
+    steering: 'none',
+    local_capable: false,
+    context_window: 400000,
+    extended_thinking: true,
+    description: 'OpenAI most capable — deepest reasoning for the hardest problems. Higher cost and latency.'
+  },
+  {
+    id: 'gpt-5.4-mini',
+    label: 'GPT-5.4 mini',
+    provider: 'openai',
+    steering: 'none',
+    local_capable: false,
+    context_window: 400000,
+    description: 'Fast, low-cost OpenAI model for high-throughput tasks.'
   },
 
   // ── Neuronpedia-hosted SAE targets — GPT-2 family ───────────────────────────
@@ -365,10 +366,29 @@ export const models: ModelConfig[] = [
 
 export const defaultModelId = 'auto'
 
-// Models shown in the picker by default (local-first). All others require showAllModels=true.
-export function visibleModels(showAll: boolean) {
+// Providers the user has supplied an API key for — those models become visible without
+// needing the "show all" toggle. Accepts a minimal settings shape to avoid a settings→config cycle.
+export function providersWithKeys(s: {
+  anthropicApiKey?: string
+  openaiApiKey?: string
+  googleApiKey?: string
+  mistralApiKey?: string
+  neuronpediaApiKey?: string
+}): Set<Provider> {
+  const set = new Set<Provider>()
+  if (s.anthropicApiKey?.trim()) set.add('anthropic')
+  if (s.openaiApiKey?.trim()) set.add('openai')
+  if (s.googleApiKey?.trim()) set.add('google')
+  if (s.mistralApiKey?.trim()) set.add('mistral')
+  if (s.neuronpediaApiKey?.trim()) set.add('neuronpedia')
+  return set
+}
+
+// Models shown in the picker by default (local-first): Auto + local Ollama, plus any provider
+// the user has a key for. Everything else (SAE targets, keyless cloud) requires showAllModels=true.
+export function visibleModels(showAll: boolean, keyedProviders?: ReadonlySet<Provider>) {
   if (showAll) return models
   return models.filter(
-    (m) => m.id === 'auto' || m.provider === 'meta'
+    (m) => m.id === 'auto' || m.provider === 'meta' || (keyedProviders?.has(m.provider) ?? false)
   )
 }
