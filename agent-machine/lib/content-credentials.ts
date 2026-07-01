@@ -56,14 +56,15 @@ export interface ComplianceLogEntry {
  * Raw response text is never stored — only its SHA-256 hash.
  */
 export function logAIActEvent(opts: { responseText: string; cred: ContentCredential; logsDir: string | null }): ComplianceLogEntry {
+  const sanitize = (s: string) => s.replace(/\r/g, '').replace(/\n/g, '')
   const entry: ComplianceLogEntry = {
     event: 'ai_generated_response',
     complianceStandard: 'EU-AI-Act-Art50',
-    model: opts.cred.model,
-    generator: opts.cred.generator,
+    model: sanitize(opts.cred.model),
+    generator: sanitize(opts.cred.generator),
     responseHash: responseHash(opts.responseText),
     digest: manifestDigest(opts.cred),
-    timestamp: opts.cred.timestamp,
+    timestamp: sanitize(opts.cred.timestamp),
     markedAt: new Date().toISOString(),
   }
   if (opts.logsDir) {
