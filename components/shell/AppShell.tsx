@@ -76,6 +76,7 @@ import type { ModelConfig } from '@/lib/types/model'
 import type { GovernanceTrace } from '@/lib/types/governance'
 import type { ProviderTool, ToolUseBlock } from '@/lib/providers'
 import { mcpManager } from '@/lib/mcp/client'
+import { amUrl } from '@/lib/tauri/bridge'
 
 const SURFACE_ORDER: ActiveSurface[] = ['chat', 'notes', 'canvas', 'workrooms', 'cowork', 'projects', 'artifacts', 'code', 'evaluate', 'operate', 'computer']
 
@@ -745,7 +746,7 @@ export function AppShell() {
       autoTitle(content)
       setMessages((cur) => { const next = [...cur, u, a]; updateMessages(next); return next })
       try {
-        const r = await fetch('/api/research/solve', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question: q }) })
+        const r = await fetch(amUrl('/api/research/solve'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question: q }) })
         const j = (await r.json()) as { answer?: string; grounded?: boolean; score?: number; sources?: { n: number; filename: string }[] }
         const pct = Math.round((j.score ?? 0) * 100)
         const badge = j.grounded ? `✅ Grounded (${pct}%)` : `⚠️ Partially grounded (${pct}%) — treat with care`
@@ -1549,7 +1550,7 @@ export function AppShell() {
                 onNavigateToOperate={() => setActiveSurface('operate')}
                 onSpeak={speak}
                 onFeedback={(messageId, rating) => {
-                  void fetch('/api/learning/feedback', {
+                  void fetch(amUrl('/api/learning/feedback'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ messageId, rating, sessionId: activeSession?.id }),
