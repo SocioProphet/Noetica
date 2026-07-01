@@ -35,6 +35,7 @@ import { ArtifactPane } from '@/components/artifacts/ArtifactPane'
 import { OperateSurface } from '@/components/surfaces/OperateSurface'
 import { TuneSurface } from '@/components/surfaces/TuneSurface'
 import { HolographMeSurface } from '@/components/surfaces/HolographMeSurface'
+import { MarketplaceSurface } from '@/components/surfaces/MarketplaceSurface'
 import { CoworkPanel } from '@/components/panels/CoworkPanel'
 import { CodePanel } from '@/components/panels/CodePanel'
 import { EvaluatePanel } from '@/components/panels/EvaluatePanel'
@@ -1773,7 +1774,7 @@ function CenterWorkspace({ activeSurface, sessionId, messages, isStreaming, work
   if (activeSurface === 'tune')         return <TuneSurface thinkingBudget={thinkingBudget} />
   if (activeSurface === 'computer')     return <ComputerUseSurface />
   if (activeSurface === 'holographme')  return <HolographMeSurface />
-  if (activeSurface === 'marketplace')  return <PlaceholderSurface title="Agent Supervisor Marketplace" description="Post availability as an agent supervisor. Browse and hire supervisors. Reputation accrues from agent performance." badge="Coming soon" />
+  if (activeSurface === 'marketplace')  return <MarketplaceSurface />
 
   return (
     <div className={`grid min-h-0 flex-1 overflow-hidden transition-[grid-template-columns] duration-300 ${activeArtifact ? 'grid-cols-[minmax(320px,1fr)_480px]' : 'grid-cols-1'}`}>
