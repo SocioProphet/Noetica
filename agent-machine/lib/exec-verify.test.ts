@@ -26,14 +26,27 @@ test('extractCode pulls a fenced python block', () => {
 })
 
 test('ensureOperatorImport injects the missing math_operators import (the NameError leak fix)', () => {
-  // model forgot the import → would NameError; repair prepends the star import
+  // model forgot the import entirely → would NameError; repair prepends the star import
   assert.equal(ensureOperatorImport('print(n_choose_k(10, 2))'),
     'from math_operators import *\nprint(n_choose_k(10, 2))')
-  // already imported (any form) → untouched, never double-imports
-  assert.equal(ensureOperatorImport('from math_operators import n_choose_k\nprint(n_choose_k(10,2))'),
-    'from math_operators import n_choose_k\nprint(n_choose_k(10,2))')
-  assert.equal(ensureOperatorImport('import math_operators\nprint(math_operators.gcd(8,4))'),
-    'import math_operators\nprint(math_operators.gcd(8,4))')
+  // already a WILDCARD import → untouched, never double-imports
+  assert.equal(ensureOperatorImport('from math_operators import *\nprint(n_choose_k(10,2))'),
+    'from math_operators import *\nprint(n_choose_k(10,2))')
+})
+
+test('ensureOperatorImport supplements a PARTIAL import that misses a name the model later calls', () => {
+  // measured live (importfix0701b): `from math_operators import n_permute_k` present, but the model also
+  // calls n_choose_k -> NameError, because the old check treated ANY import as "already handled" and skipped.
+  // Prepending a wildcard alongside is safe (re-binding an already-imported name is a harmless no-op).
+  assert.equal(
+    ensureOperatorImport('from math_operators import n_permute_k\ntotal = n_choose_k(10, 2)\nprint(total)'),
+    'from math_operators import *\nfrom math_operators import n_permute_k\ntotal = n_choose_k(10, 2)\nprint(total)',
+  )
+  // same gap via the module-import form
+  assert.equal(
+    ensureOperatorImport('import math_operators\nprint(gcd(8, 4))'),
+    'from math_operators import *\nimport math_operators\nprint(gcd(8, 4))',
+  )
 })
 
 test('extractCode accepts bare code that looks like code', () => {

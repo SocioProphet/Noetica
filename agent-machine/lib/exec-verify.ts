@@ -119,7 +119,14 @@ const operatorPrompt = (question: string) =>
 // Inject the math_operators import when a generated operator program omits it (the common NameError leak).
 // No-op if the model already wrote any form of the import, so it never double-imports or fights the model.
 export function ensureOperatorImport(code: string): string {
-  if (/\b(from\s+math_operators\s+import|import\s+math_operators)\b/.test(code)) return code
+  // Only a WILDCARD import covers every name the model might call. A PARTIAL import like
+  // `from math_operators import n_permute_k` still left `n_choose_k` undefined below it — measured live
+  // (importfix0701b): 5 residual NameErrors were exactly this "imported some names, called a different one"
+  // case, which the old "any import present -> skip" check silently let through.
+  if (/from\s+math_operators\s+import\s+\*/.test(code)) return code
+  // Prepending is always safe even alongside an existing partial/plain import — re-binding an
+  // already-imported name via the wildcard is a harmless no-op, and it fills in whatever the
+  // partial import missed.
   return `from math_operators import *\n${code}`
 }
 
