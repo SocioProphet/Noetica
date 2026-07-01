@@ -16072,9 +16072,7 @@ Question: ${question}`
         const { generateOllamaText } = await import('./lib/ollama.js')
         const generate = async (prompt: string) => { try { const r = await generateOllamaText({ model: 'qwen2.5:7b', messages: [{ role: 'user', content: prompt }], temperature: 0 }); return r.content } catch { return 'NEUTRAL' } }
         const entail = makeLlmEntail(generate)
-        const topK   = typeof p['topK']    === 'number' ? p['topK']    : 4
-        const passAt = typeof p['passAt']  === 'number' ? p['passAt']  : 0.7
-        const result = await verifyGroundingNLI(answer, sources, entail, { topK, passAt })
+        const result = await verifyGroundingNLI(answer, sources, entail)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify(result))
       } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
@@ -16097,9 +16095,7 @@ Question: ${question}`
         const { generateOllamaText } = await import('./lib/ollama.js')
         const generate = async (prompt: string) => { try { const r = await generateOllamaText({ model: 'qwen2.5:7b', messages: [{ role: 'user', content: prompt }], temperature: 0 }); return r.content } catch { return 'NEUTRAL' } }
         const entail = makeLlmEntail(generate)
-        const passAt   = typeof p['passAt']   === 'number' ? p['passAt']   : 0.7
-        const supportAt = typeof p['supportAt'] === 'number' ? p['supportAt'] : 0.5
-        const result = await verifyGroundingCombo(answer, sources, { entail }, { passAt, supportAt })
+        const result = await verifyGroundingCombo(answer, sources, { entail })
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify(result))
       } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
@@ -16124,8 +16120,7 @@ Question: ${question}`
         const { generateOllamaText } = await import('./lib/ollama.js')
         const generate = async (prompt: string) => { try { const r = await generateOllamaText({ model: 'qwen2.5:7b', messages: [{ role: 'user', content: prompt }], temperature: 0 }); return r.content } catch { return 'NEUTRAL' } }
         const entail = makeLlmEntail(generate)
-        const entailAt = typeof p['entailAt'] === 'number' ? p['entailAt'] : 0.5
-        const result = await verifyInlineBinding(answer, evidence, entail, { entailAt })
+        const result = await verifyInlineBinding(answer, evidence, entail)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify(result))
       } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
