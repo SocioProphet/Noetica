@@ -11537,6 +11537,323 @@ Question: ${question}`
     return
   }
 
+  // ── A2A Trust — actor trust scoring + capability gating ─────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/a2a/trust/check') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { checkActorGrant } = await import('./lib/a2a-trust.js')
+        const spiffeId   = typeof p['spiffeId']   === 'string' ? p['spiffeId']   : ''
+        const capability = typeof p['capability'] === 'string' ? p['capability'] : ''
+        if (!spiffeId || !capability) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'spiffeId and capability required' })); return }
+        const floor = typeof p['floor'] === 'number' ? p['floor'] : undefined
+        const decision = floor !== undefined ? checkActorGrant(spiffeId, capability, floor) : checkActorGrant(spiffeId, capability)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...decision, executionPerformed: false }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/a2a/trust/record') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { recordOutcome, authorityStatus } = await import('./lib/a2a-trust.js')
+        const spiffeId = typeof p['spiffeId'] === 'string' ? p['spiffeId'] : ''
+        if (!spiffeId) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'spiffeId required' })); return }
+        const outcome = p['outcome'] as import('./lib/a2a-trust.js').TrustOutcome ?? {}
+        const record = recordOutcome(spiffeId, outcome)
+        const status = authorityStatus(spiffeId)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ record, status, executionPerformed: false }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/a2a/trust/ledger') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { trustLedger } = await import('./lib/a2a-trust.js')
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ledger: trustLedger(), executionPerformed: false }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Causal Graph — DAG analysis + identification strategies ──────────────────
+  if (req.method === 'POST' && url.pathname === '/api/causal/analyze') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { identifyCausalEffect, isAcyclic, topologicalSort, primaryCausalPath } = await import('./lib/causal-graph.js')
+        const dag = p['dag'] as import('./lib/causal-graph.js').CausalDAG | undefined
+        if (!dag) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'dag required' })); return }
+        const treatment = typeof p['treatment'] === 'string' ? p['treatment'] : undefined
+        const outcome   = typeof p['outcome']   === 'string' ? p['outcome']   : undefined
+        const identification = identifyCausalEffect(dag, treatment, outcome)
+        const acyclic   = isAcyclic(dag)
+        const topo      = acyclic ? topologicalSort(dag) : null
+        const path      = identification.identified && treatment && outcome ? primaryCausalPath(dag, treatment, outcome) : []
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ identification, acyclic, topologicalOrder: topo, primaryPath: path, executionPerformed: false }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/causal/models') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { listCausalModels } = await import('./lib/causal-signal.js')
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ models: listCausalModels(), executionPerformed: false }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/causal/model') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { causalModelResponse } = await import('./lib/causal-signal.js')
+        const name = url.searchParams.get('name') ?? ''
+        if (!name) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'name query param required' })); return }
+        const result = causalModelResponse(name)
+        if (!result) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'model_not_found', name })); return }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...result, executionPerformed: false }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Alignment — claim corroboration against brain statements ─────────────────
+  if (req.method === 'POST' && url.pathname === '/api/nlp/align') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { alignClaims, splitClaims } = await import('./lib/alignment.js')
+        const text   = typeof p['text'] === 'string' ? p['text'] : ''
+        const claims = Array.isArray(p['claims']) ? p['claims'] as string[] : text ? splitClaims(text) : []
+        const brain  = Array.isArray(p['brain'])  ? p['brain']  as import('./lib/alignment.js').BrainStatement[] : []
+        if (!claims.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'claims or text required' })); return }
+        const threshold = typeof p['threshold'] === 'number' ? p['threshold'] : undefined
+        const report = alignClaims(claims, brain, threshold !== undefined ? { threshold } : undefined)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...report, executionPerformed: false }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── AG-UI — event validation + run construction ───────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/api/ag-ui/validate') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { isValidEvent, isWellFormedRun } = await import('./lib/ag-ui.js')
+        const event  = p['event']  as import('./lib/ag-ui.js').AGUIEvent | undefined
+        const events = Array.isArray(p['events']) ? p['events'] as import('./lib/ag-ui.js').AGUIEvent[] : undefined
+        if (event) {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ valid: isValidEvent(event), executionPerformed: false }))
+        } else if (events) {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ wellFormed: isWellFormedRun(events), executionPerformed: false }))
+        } else {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'event or events required' }))
+        }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/ag-ui/build-run') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { buildTextRun } = await import('./lib/ag-ui.js')
+        const threadId  = typeof p['threadId']  === 'string' ? p['threadId']  : ''
+        const runId     = typeof p['runId']     === 'string' ? p['runId']     : ''
+        const messageId = typeof p['messageId'] === 'string' ? p['messageId'] : ''
+        const chunks    = Array.isArray(p['chunks']) ? p['chunks'] as string[] : []
+        if (!threadId || !runId || !messageId) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'threadId, runId, messageId required' })); return }
+        const events = buildTextRun(threadId, runId, messageId, chunks)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ events, executionPerformed: false }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Artifact CMS — versioned content-addressed artifact store ────────────────
+  if (req.method === 'GET' && url.pathname === '/api/artifacts/cms') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { getArtifactCMS } = await import('./lib/artifact-cms.js')
+        const cms  = await getArtifactCMS()
+        const id   = url.searchParams.get('id')
+        if (id) {
+          const meta = cms.get(id)
+          if (!meta) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'not_found', id })); return }
+          const version = url.searchParams.has('version') ? Number(url.searchParams.get('version')) : undefined
+          const content = cms.getContent(id, version)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ meta, content, history: cms.history(id), executionPerformed: false }))
+        } else {
+          const type = url.searchParams.get('type') as import('./lib/artifact-cms.js').ArtifactType | null
+          const tag  = url.searchParams.get('tag')  ?? undefined
+          const q    = url.searchParams.get('q')    ?? ''
+          const list = q ? cms.search(q) : cms.list(type ? { type, tag } : tag ? { tag } : undefined)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ artifacts: list, executionPerformed: false }))
+        }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/artifacts/cms') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { getArtifactCMS, persistArtifactCMS } = await import('./lib/artifact-cms.js')
+        const cms    = await getArtifactCMS()
+        const action = typeof p['action'] === 'string' ? p['action'] : 'create'
+        if (action === 'create') {
+          const title   = typeof p['title']   === 'string' ? p['title']   : 'Untitled'
+          const type    = (typeof p['type'] === 'string' ? p['type'] : 'document') as import('./lib/artifact-cms.js').ArtifactType
+          const content = typeof p['content'] === 'string' ? p['content'] : ''
+          const tags    = Array.isArray(p['tags']) ? p['tags'] as string[] : undefined
+          const meta    = cms.create({ title, type, content, tags })
+          await persistArtifactCMS()
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ meta, executionPerformed: false }))
+        } else if (action === 'update') {
+          const id      = typeof p['id']      === 'string' ? p['id']      : ''
+          const content = typeof p['content'] === 'string' ? p['content'] : ''
+          const message = typeof p['message'] === 'string' ? p['message'] : undefined
+          if (!id) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'id required' })); return }
+          const meta = cms.update(id, content, message)
+          if (!meta) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'not_found', id })); return }
+          await persistArtifactCMS()
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ meta, executionPerformed: false }))
+        } else if (action === 'delete') {
+          const id = typeof p['id'] === 'string' ? p['id'] : ''
+          if (!id) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'id required' })); return }
+          const ok = cms.delete(id)
+          await persistArtifactCMS()
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok, executionPerformed: false }))
+        } else if (action === 'rollback') {
+          const id        = typeof p['id']        === 'string' ? p['id']        : ''
+          const toVersion = typeof p['toVersion'] === 'number' ? p['toVersion'] : 1
+          if (!id) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'id required' })); return }
+          const meta = cms.rollback(id, toVersion)
+          if (!meta) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'not_found', id })); return }
+          await persistArtifactCMS()
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ meta, executionPerformed: false }))
+        } else {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'unknown action', action }))
+        }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  // ── Artifact Swarm — DHT-style content discovery across providers ─────────────
+  if (req.method === 'POST' && url.pathname === '/api/swarm/announce') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { getSwarm, persistSwarm } = await import('./lib/artifact-swarm.js')
+        const hash     = typeof p['hash']     === 'string' ? p['hash']     : ''
+        const title    = typeof p['title']    === 'string' ? p['title']    : 'Untitled'
+        const provider = typeof p['provider'] === 'string' ? p['provider'] : ''
+        if (!hash || !provider) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'hash and provider required' })); return }
+        const type = typeof p['type'] === 'string' ? p['type'] : 'document'
+        const size = typeof p['size'] === 'number' ? p['size'] : 0
+        const tags = Array.isArray(p['tags']) ? p['tags'] as string[] : undefined
+        const entry = getSwarm().announce({ hash, title, type, size, provider, tags })
+        await persistSwarm()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ entry: { ...entry, providers: Array.from(entry.providers) }, executionPerformed: false }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/swarm/search') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { getSwarm } = await import('./lib/artifact-swarm.js')
+        const query = typeof p['query'] === 'string' ? p['query'] : ''
+        if (!query) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'query required' })); return }
+        const topK = typeof p['topK'] === 'number' ? p['topK'] : undefined
+        const type = typeof p['type'] === 'string' ? p['type'] : undefined
+        const results = getSwarm().search(query, { topK, type })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ results, executionPerformed: false }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/swarm/health') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { getSwarm } = await import('./lib/artifact-swarm.js')
+        const hash = url.searchParams.get('hash') ?? ''
+        if (!hash) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'hash query param required' })); return }
+        const health    = getSwarm().health(hash)
+        const providers = getSwarm().providers(hash)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ hash, health, providers, executionPerformed: false }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+    })()
+    return
+  }
+
   // 404
   res.writeHead(404, { 'content-type': 'application/json' })
   res.end(JSON.stringify({ error: 'not_found', path: url.pathname }))
