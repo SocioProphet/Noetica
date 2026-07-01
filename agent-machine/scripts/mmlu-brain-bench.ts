@@ -842,6 +842,26 @@ async function goldContext(q: Q, pools: Chunk[][], card = ''): Promise<string> {
   return (card ? `Formula sheet (use these canonical formulas):\n${card}\n\n` : '') + (worked ? `Worked examples:\n${worked}` : '')
 }
 
+const KGBERT_RETRIEVE_PY = path.join(__dirname, 'kg-bert-retrieve.py')
+// ground_kgbert arm: retrieve the structurally-nearest concepts (KG-BERT entity kNN) as a grounding block —
+// the decorrelated retriever the operator-board proved the ground tier needs (canon defs did NOT lift it).
+// One python call per subject (loads the .npz + bert-base once); returns a grounding string per question.
+function kgbertGroundBatch(qs: Q[]): string[] {
+  const res: string[] = qs.map(() => '')
+  if (!qs.length || !process.env['MMLU_KGBERT_NPZ']) return res   // opt-in: needs the encoded .npz present
+  const input = qs.map((q, i) => JSON.stringify({ id: i, question: q.question, choices: q.choices })).join('\n') + '\n'
+  const args = [KGBERT_RETRIEVE_PY, '--batch', '--npz', process.env['MMLU_KGBERT_NPZ']!,
+    '--device', process.env['MMLU_KGBERT_DEVICE'] || 'cuda', '--k', process.env['MMLU_KGBERT_K'] || '6']
+  try {
+    const out = execFileSync('python3', args, { input, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, env: { ...process.env }, timeout: SUBPROC_TIMEOUT, killSignal: 'SIGKILL' })
+    for (const line of out.split('\n')) {
+      if (!line.trim()) continue
+      try { const r = JSON.parse(line) as { i: number; ground: string }; if (typeof r.i === 'number' && r.i < res.length) res[r.i] = r.ground } catch { /* skip */ }
+    }
+  } catch { /* no .npz / no torch → empty grounding, arm falls back to bare question */ }
+  return res
+}
+
 const KTYPE_PY = path.join(__dirname, 'knowledge_type.py')
 interface KType { types: string[]; solver: string }
 /** Classify each question's knowledge type (one python call) so the CHAMPION arm understands the
@@ -935,6 +955,7 @@ async function main() {
     // knowledge-type per question (the 'understand first' step) — used by the champion router
     const kt: KType[] = (ARMS.includes('champion') || ARMS.includes('gate') || ARMS.includes('groundgate') || ARMS.includes('learned')) ? ktypeBatch(sample) : []
     const af: CompRes[] = ARMS.includes('autoform') ? await autoformBatch(sample) : []   // LLM-formalize → sympy-execute → vote
+    const kgbertCtx: string[] = ARMS.includes('ground_kgbert') ? kgbertGroundBatch(sample) : []   // KG-BERT entity-kNN grounding
 
     const scoreQuestion = async (i: number) => {
       const q = sample[i]!
@@ -1018,6 +1039,9 @@ async function main() {
         } else if (arm === 'ground') {            // CANON GROUNDING: the question's entities → glossary defs + related equations/models + prereq decomposition + bridges
           const g = canonGround(`${q.question} ${q.choices.join(' ')}`)
           letter = extractLetter(await ask(`${g ? g + '\n\n' : ''}Exam question:\n${base}${ANSWER_RULE}`)); mode = g ? 'ground' : 'no-canon'
+        } else if (arm === 'ground_kgbert') {     // KG-BERT GROUNDING: structurally-nearest concepts (entity-vector kNN) — the decorrelated retriever
+          const g = kgbertCtx[i] ?? ''
+          letter = extractLetter(await ask(`${g ? g + '\n\n' : ''}Exam question:\n${base}${ANSWER_RULE}`)); mode = g ? 'kgbert' : 'no-kgbert'
         } else if (arm === 'cohere') {            // Choice-Coherence Elimination. EMITS the RAW per-choice feature
           // matrix (cohesion, uniqueness, set-incl) into the row — NOT just the argmax pick — so the transcript is
           // training data for the n-furcated combiner (no aggregation that loses the points). The letter is still
