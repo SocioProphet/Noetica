@@ -7709,6 +7709,33 @@ Question: ${question}`
     return
   }
 
+  // POST /api/embed — single or batch text → embedding vector(s). Used by the client-side memory
+  // search hooks (useMemory.ts) which call this in both dev (Next.js) and Tauri (this handler).
+  // Matches the Next.js /api/embed/route.ts contract: { text? } → { embedding } | { texts? } → { embeddings }.
+  if (req.method === 'POST' && url.pathname === '/api/embed') {
+    setCORSHeaders(res)
+    let embedBody = ''
+    req.on('data', (c: Buffer) => { embedBody += c.toString(); if (embedBody.length > 512 * 1024) req.destroy() })
+    req.on('end', () => {
+      ;(async () => {
+        try {
+          const p = JSON.parse(embedBody || '{}') as { text?: string; texts?: string[] }
+          const { embedText, embedBatch } = await import('./lib/ollama.js')
+          if (p.texts && p.texts.length > 0) {
+            const embeddings = await embedBatch(p.texts)
+            res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ embeddings }))
+          } else if (p.text) {
+            const embedding = await embedText(p.text)
+            res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ embedding }))
+          } else {
+            res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'text or texts required' }))
+          }
+        } catch { res.writeHead(503, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'embed_unavailable' })) }
+      })()
+    })
+    return
+  }
+
   // POST /api/embed/reindex — re-embed all doc chunks with the current embedder (run AFTER flipping
   // NOETICA_EMBED_RUST=1 so chunk vectors move to the Rust embedder's space). Token-gated (heavy op).
   if (req.method === 'POST' && url.pathname === '/api/embed/reindex') {
