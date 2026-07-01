@@ -23,11 +23,13 @@ SPOT="${MESH_SPOT:-1}"
 N="${1:-8}"
 FW="${NAME}-ollama"
 
-# Image: RHEL-family (Rocky Linux 9, a 1:1 RHEL rebuild) with the NVIDIA driver PREINSTALLED, so no
-# at-boot driver compile. Override for a different distro (e.g. rhel-9 / rhel-cloud — driver then
-# installs at boot via cloud-init) or the Ubuntu driver-ready image (common-cu129-ubuntu-2204 / ml-images).
-IMG_FAMILY="${MESH_IMAGE_FAMILY:-rocky-linux-9-optimized-gcp-nvidia-latest}"
-IMG_PROJECT="${MESH_IMAGE_PROJECT:-rocky-linux-cloud}"
+# Image: stock RHEL 9 (rhel-cloud) — the RHEL standard, guaranteed bootable by consumer projects; the
+# NVIDIA driver installs at boot via cloud-init.sh. (Rocky's driver-ready "optimized-nvidia" images are
+# published but NOT accessible to consumer projects — describe/create 404 — so we don't use them.)
+# Guaranteed driver-READY fallback if the RHEL boot-install ever flakes (Ubuntu, driver preinstalled):
+#   MESH_IMAGE_FAMILY=ubuntu-accelerator-2204-amd64-with-nvidia-580 MESH_IMAGE_PROJECT=ubuntu-os-accelerator-images
+IMG_FAMILY="${MESH_IMAGE_FAMILY:-rhel-9}"
+IMG_PROJECT="${MESH_IMAGE_PROJECT:-rhel-cloud}"
 
 # GPU selection. L4 is bundled into the g2 machine family (no --accelerator). Everything else
 # (V100/P100/T4/A100) attaches to an n1/a2 machine via --accelerator. Pick with MESH_GPU:
