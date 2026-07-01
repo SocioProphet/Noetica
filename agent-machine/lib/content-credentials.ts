@@ -36,8 +36,7 @@ export function markAIGenerated(text: string, cred: ContentCredential): string {
 
 /** SHA-256 hash of the response text — stored in the compliance log instead of the raw content. */
 export function responseHash(text: string): string {
-  const { createHash } = require('node:crypto') as typeof import('node:crypto')
-  return 'sha256:' + createHash('sha256').update(text, 'utf8').digest('hex')
+  return 'sha256:' + crypto.createHash('sha256').update(text, 'utf8').digest('hex')
 }
 
 export interface ComplianceLogEntry {
@@ -69,9 +68,7 @@ export function logAIActEvent(opts: { responseText: string; cred: ContentCredent
   }
   if (opts.logsDir) {
     try {
-      const { appendFileSync } = require('node:fs') as typeof import('node:fs')
-      const { join } = require('node:path') as typeof import('node:path')
-      appendFileSync(join(opts.logsDir, 'ai-act.log'), JSON.stringify(entry) + '\n', 'utf8')
+      fs.appendFileSync(path.join(opts.logsDir, 'ai-act.log'), JSON.stringify(entry) + '\n', 'utf8')
     } catch { /* log failure must never throw */ }
   }
   return entry

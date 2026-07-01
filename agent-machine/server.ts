@@ -1486,7 +1486,7 @@ async function executeToolWithTimeout(
     const result = await Promise.race([executeToolWithRetry(name, input, keys), timeout])
     // #16 — tool output from EXTERNAL/untrusted sources can carry indirect prompt injection ("ignore your
     // instructions…"). Flag it + spotlight so the model treats embedded directives as DATA, not commands.
-    const EXTERNAL = new Set(['web_search', 'public_data', 'read_file', 'ocr', 'registry_lookup'])
+    const EXTERNAL = new Set(['web_search', 'public_data', 'read_file', 'ocr', 'registry_lookup', 'dispatch_agent'])
     if (EXTERNAL.has(name) && typeof result === 'string' && result.length > 0) {
       try {
         const { isLikelyInjection } = await import('./lib/injection-classifier.js')
