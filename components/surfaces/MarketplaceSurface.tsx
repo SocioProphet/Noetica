@@ -351,7 +351,7 @@ export function MarketplaceSurface() {
               <span className="text-[10px] text-[var(--color-text-tertiary)]">{filteredTemplates.length} templates</span>
             </div>
             {filteredTemplates.length === 0 ? (
-              <div className="py-8 text-center text-[12px] text-[var(--color-text-tertiary)]">No templates match "{search}"</div>
+              <div className="py-8 text-center text-[12px] text-[var(--color-text-tertiary)]">No templates match &ldquo;{search}&rdquo;</div>
             ) : (
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 {filteredTemplates.map((t) => <TemplateCard key={t.id} t={t} onDeploy={handleDeploy} />)}
@@ -377,9 +377,9 @@ export function MarketplaceSurface() {
         {/* Partners */}
         {!loading && tab === 'partners' && (
           <div>
-            <p className="mb-4 text-[11px] text-[var(--color-text-tertiary)]">Sovereign operators publishing capabilities to the mesh. Each partner's identity is anchored to a did:key credential held at their edge.</p>
+            <p className="mb-4 text-[11px] text-[var(--color-text-tertiary)]">Sovereign operators publishing capabilities to the mesh. Each partner&apos;s identity is anchored to a did:key credential held at their edge.</p>
             {filteredPartners.length === 0 ? (
-              <div className="py-8 text-center text-[12px] text-[var(--color-text-tertiary)]">{search ? `No partners match "${search}"` : 'No partners registered yet.'}</div>
+              <div className="py-8 text-center text-[12px] text-[var(--color-text-tertiary)]">{search ? `No partners match “${search}”` : 'No partners registered yet.'}</div>
             ) : (
               <div className="grid gap-3 lg:grid-cols-2">
                 {filteredPartners.map((p) => <PartnerCard key={p.id} p={p} />)}
