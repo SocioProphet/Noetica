@@ -17,8 +17,12 @@ const FENCE_RE = /```(?:python|py)?\s*([\s\S]*?)```/i
 export function extractCode(text: string): string | null {
   const m = text.match(FENCE_RE)
   if (m && m[1] && m[1].trim()) return m[1].trim()
-  // No fence — accept the whole thing only if it looks like code (has print/assignment).
-  if (/\bprint\s*\(/.test(text) || /^[a-z_]\w*\s*=/im.test(text)) return text.trim()
+  // No CLOSED fence — usually a truncated generation (hit the token cap mid code-block), so the opening
+  // ` ```python ` marker is still attached. Strip it before the print/assignment sniff-check, else the
+  // marker line gets written verbatim as the executed program's first statement -> guaranteed SyntaxError
+  // (measured: 11/14 SyntaxErrors in one board run were exactly this literal fence-leak bug).
+  const stripped = text.replace(/^\s*```(?:python|py)?\s*\n?/i, '').trim()
+  if (/\bprint\s*\(/.test(stripped) || /^[a-z_]\w*\s*=/im.test(stripped)) return stripped
   return null
 }
 
@@ -74,7 +78,7 @@ const POT_PROMPT = (question: string) =>
 export const OPERATOR_API = `You have a verified Python library 'math_operators' (already correct — CALL it, never reimplement):
   permutation_index(cycle_str, n)               # index of <p> in S_n; cycle_str like '(1,2,5,4)(2,3)'
   finite_field_zeros(coeffs, p)                 # zeros over Z_p; coeffs highest-degree-first (x^2+1 -> [1,0,1])
-  mod_pow(base, exponent, modulus)
+  mod_pow(base, exponent, modulus)              # INTEGER modular exponentiation only (base**exponent % modulus) — NOT a general power/exponent operator
   linear_ode_eval(ode_lhs, x0, y0, x_eval)      # solve 'expr=0' in x and y(x); use Derivative(y,x); y(x0)=y0
   factorial_trailing_zeros_count(target)        # how many k have EXACTLY target trailing zeros in k!
   ring_char_product(component_chars)            # characteristic of a product ring; 0 for an infinite component
@@ -148,10 +152,13 @@ export async function operatorProgramOfThought(
   // the verified answer is silently lost. This path's whole contract IS to use math_operators, so if the
   // import is missing, inject the star import (also resolves bare sympy names like `symbols`/`solve`,
   // which math_operators re-exports). Deterministic, only adds what the model plainly intended.
+  // usedOperator reflects the MODEL's intent — test the ORIGINAL code, not the post-injection code2 (which
+  // now ALWAYS contains "math_operators" once injected, which would destroy the cold-vs-routed signal callers
+  // rely on to decide whether to fall back to programOfThought).
+  const usedOperator = /math_operators/.test(code)
   const code2 = ensureOperatorImport(code)
   // Prepend the lib dir to sys.path so `from math_operators import ...` resolves — exactly the
   // bench's mechanism. JSON.stringify safely escapes the path into a Python string literal.
-  const usedOperator = /math_operators/.test(code2)
   const wrapped = `import sys\nsys.path.insert(0, ${JSON.stringify(libDir)})\n${code2}`
   let output: string
   try { output = await deps.execute('python', wrapped) } catch { return null }

@@ -40,6 +40,13 @@ test('extractCode accepts bare code that looks like code', () => {
   assert.equal(extractCode('x = 5\nprint(x*2)'), 'x = 5\nprint(x*2)')
 })
 
+test('extractCode strips a leading fence marker on a truncated (unclosed) code block', () => {
+  // measured bug: a generation cut off mid-block (no closing ```) left the opening marker attached, so it got
+  // written verbatim as the executed program's first line -> guaranteed SyntaxError (11/14 in one board run)
+  assert.equal(extractCode('```python\nimport math\nprint(math.pi)'), 'import math\nprint(math.pi)')
+  assert.equal(extractCode('```\nx = 5\nprint(x)'), 'x = 5\nprint(x)')
+})
+
 test('extractCode returns null for prose', () => {
   assert.equal(extractCode('The answer is probably 27, I think.'), null)
 })

@@ -15,6 +15,12 @@ from fractions import Fraction
 from sympy import symbols, Function, dsolve, Eq, exp, solve, sympify, im, integrate, diff, limit, oo, Matrix, Rational, factorial as sym_factorial
 from sympy.combinatorics import Permutation
 
+# Common constants/functions the model reaches for even when told to use only the operator menu (measured:
+# 'pi' and 'factorial' were the two genuine ImportErrors in a leak audit — not hallucinated formula names,
+# just missing trivial re-exports). `from math_operators import *` should have these.
+pi = math.pi
+factorial = math.factorial
+
 
 def permutation_index(cycle_str: str, n: int) -> int:
     """Index of <p> in S_n, where p is 1-indexed cycle notation e.g. '(1,2,5,4)(2,3)'. = n! / order(p)."""
@@ -433,4 +439,7 @@ if __name__ == '__main__':
     assert abs(r_squared([1, 2, 3, 4], [3, 5, 7, 9]) - 1.0) < 1e-9
     rs, ic = linear_regression([1, 2, 3, 4], [3, 5, 7, 9]); assert abs(rs - 2) < 1e-9 and abs(ic - 1) < 1e-9
     assert abs(correlation([1, 2, 3], [3, 2, 1]) + 1.0) < 1e-9    # perfect negative
-    print('all math_operators unit tests PASS (', 43 + 6 + 3, 'operators )')
+    # common re-exports the model reaches for even off-menu (leak-audit finding: pi/factorial were genuine gaps)
+    assert abs(pi - 3.14159265) < 1e-6
+    assert factorial(5) == 120
+    print('all math_operators unit tests PASS (', 43 + 6 + 3 + 2, 'operators )')

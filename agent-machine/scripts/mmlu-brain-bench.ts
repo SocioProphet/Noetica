@@ -34,6 +34,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { ensureOperatorImport, extractCode } from '../lib/exec-verify.js'
 import { embedText } from '../lib/ollama.js'
 import { sanitizeRetrieved } from '../lib/rag-trust.js'
 import { councilVote, learnedCouncilVote } from '../lib/council.js'
@@ -709,7 +710,7 @@ const LIBDIR = path.join(__dirname, '..', 'lib')
 const OPERATOR_API = `You have a verified Python library 'math_operators' (already correct — CALL it, never reimplement):
   permutation_index(cycle_str, n)               # index of <p> in S_n; cycle_str like '(1,2,5,4)(2,3)'
   finite_field_zeros(coeffs, p)                 # zeros over Z_p; coeffs highest-degree-first (x^2+1 -> [1,0,1])
-  mod_pow(base, exponent, modulus)
+  mod_pow(base, exponent, modulus)              # INTEGER modular exponentiation only (base**exponent % modulus) — NOT a general power/exponent operator
   linear_ode_eval(ode_lhs, x0, y0, x_eval)      # solve 'expr=0' in x and y(x); use Derivative(y,x); y(x0)=y0
   factorial_trailing_zeros_count(target)        # how many k have EXACTLY target trailing zeros in k!
   ring_char_product(component_chars)            # characteristic of a product ring; 0 for an infinite component
@@ -747,9 +748,16 @@ math_operators and prints ONLY the final answer value on the last line. If none 
 async function operatorCompute(question: string, choices: string[]): Promise<string> {
   const prompt = `${OPERATOR_API}\n\nProblem: ${question}\nChoices: ${choices.map((c, i) => `${LETTERS[i]}. ${c}`).join(' | ')}\n\nReturn ONLY a \`\`\`python code block.`
   const raw = await ask(prompt, 0)
-  const code = (/```python\s*([\s\S]*?)```/.exec(raw)?.[1] ?? raw).trim()
+  // was a naive local regex whose "no closing fence" fallback returned the RAW text — including the literal
+  // leading '```python' marker on truncated generations (measured: 11/14 SyntaxErrors in one run were exactly
+  // this). extractCode strips that marker even in the unclosed-fence case; reuse it instead of duplicating.
+  const code = extractCode(raw) ?? ''
   if (!/print|math_operators/.test(code)) return ''
-  const wrapped = `import sys\nsys.path.insert(0, ${JSON.stringify(LIBDIR)})\n${code}`
+  // THE ACTUAL FIX SITE (was mistakenly applied only to lib/exec-verify.ts's separate operatorProgramOfThought,
+  // which this bench's opcompute/prod arms never call — the importfix0701 board measured a fix that could never
+  // fire). This is the real codegen path (the 'opc_*.py' tempfile below) that produced the v0 NameError leak.
+  const code2 = ensureOperatorImport(code)
+  const wrapped = `import sys\nsys.path.insert(0, ${JSON.stringify(LIBDIR)})\n${code2}`
   let out = ''
   try {
     const f = path.join(os.tmpdir(), `opc_${Date.now()}_${Math.random().toString(36).slice(2)}.py`)
