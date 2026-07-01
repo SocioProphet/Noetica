@@ -18,11 +18,26 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 PROJECT="${GCP_PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
 ZONE="${GCP_ZONE:-us-central1-a}"
 NAME="${MESH_NODE:-noetica-proof}"
-SKU="${MESH_SKU:-g2-standard-8}"
 MODEL="${MESH_MODEL:-qwen2.5-coder:7b}"
 SPOT="${MESH_SPOT:-1}"
 N="${1:-8}"
 FW="${NAME}-ollama"
+
+# GPU selection. L4 is bundled into the g2 machine family (no --accelerator). Everything else
+# (V100/P100/T4/A100) attaches to an n1/a2 machine via --accelerator. Pick with MESH_GPU:
+#   MESH_GPU=l4    → g2-standard-8            (needs NVIDIA_L4 quota)
+#   MESH_GPU=v100  → n1-standard-8 + 1×V100   (default — matches the quota we have)
+#   MESH_GPU=t4|p100 likewise; a100 → a2-highgpu-1g. Override CPU/RAM with MESH_SKU.
+MESH_GPU="${MESH_GPU:-v100}"
+declare -a ACCEL_FLAGS=()
+case "$MESH_GPU" in
+  l4)   SKU="${MESH_SKU:-g2-standard-8}" ;;
+  v100) SKU="${MESH_SKU:-n1-standard-8}"; ACCEL_FLAGS=(--accelerator="type=nvidia-tesla-v100,count=1") ;;
+  t4)   SKU="${MESH_SKU:-n1-standard-8}"; ACCEL_FLAGS=(--accelerator="type=nvidia-tesla-t4,count=1") ;;
+  p100) SKU="${MESH_SKU:-n1-standard-8}"; ACCEL_FLAGS=(--accelerator="type=nvidia-tesla-p100,count=1") ;;
+  a100) SKU="${MESH_SKU:-a2-highgpu-1g}" ;;
+  *)    echo "unknown MESH_GPU=$MESH_GPU (use l4|v100|t4|p100|a100)" >&2; exit 1 ;;
+esac
 
 die() { echo "✗ $*" >&2; exit 1; }
 
@@ -51,15 +66,17 @@ gcloud compute firewall-rules create "$FW" --project "$PROJECT" \
   --source-ranges "${MYIP}/32" --target-tags noetica-proof >/dev/null \
   || die "firewall create failed"
 
-# ── 2. Create the L4 GPU node (driver-ready image + our startup script) ──────
+# ── 2. Create the GPU node (driver-ready image + our startup script) ─────────
 SPOT_FLAGS=(); [ "$SPOT" = "1" ] && SPOT_FLAGS=(--provisioning-model=SPOT --instance-termination-action=DELETE)
+echo "▸ creating $SKU (${MESH_GPU}) in $ZONE"
 gcloud compute instances create "$NAME" --project "$PROJECT" --zone "$ZONE" \
   --machine-type "$SKU" --maintenance-policy TERMINATE \
   --image-family common-gpu-debian-11 --image-project ml-images \
   --boot-disk-size 100GB --tags noetica-proof \
   --metadata mesh-model="$MODEL" \
   --metadata-from-file startup-script="$HERE/cloud-init.sh" \
-  "${SPOT_FLAGS[@]}" >/dev/null || die "instance create failed (L4 quota in $ZONE?)"
+  "${ACCEL_FLAGS[@]}" "${SPOT_FLAGS[@]}" >/dev/null \
+  || die "instance create failed (check ${MESH_GPU^^} quota in $ZONE)"
 
 IP="$(gcloud compute instances describe "$NAME" --zone "$ZONE" --project "$PROJECT" \
   --format='value(networkInterfaces[0].accessConfigs[0].natIP)')"
