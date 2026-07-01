@@ -16067,7 +16067,9 @@ Question: ${question}`
         try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
         const { verifyGroundingNLI, makeLlmEntail } = await import('./lib/research-verify.js')
         const answer  = typeof p['answer']  === 'string' ? p['answer']  : ''
-        const sources = Array.isArray(p['sources']) ? p['sources'] as { text: string }[] : []
+        const sources = Array.isArray(p['sources'])
+          ? (p['sources'] as unknown[]).flatMap((s) => { const t = (s as Record<string, unknown>)['text']; return typeof t === 'string' && t ? [{ text: t }] : [] })
+          : []
         if (!answer || !sources.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'answer and sources required' })); return }
         const { generateOllamaText } = await import('./lib/ollama.js')
         const generate = async (prompt: string) => { try { const r = await generateOllamaText({ model: 'qwen2.5:7b', messages: [{ role: 'user', content: prompt }], temperature: 0 }); return r.content } catch { return 'NEUTRAL' } }
@@ -16075,7 +16077,7 @@ Question: ${question}`
         const result = await verifyGroundingNLI(answer, sources, entail)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify(result))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -16090,7 +16092,9 @@ Question: ${question}`
         try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
         const { verifyGroundingCombo, makeLlmEntail } = await import('./lib/research-verify.js')
         const answer  = typeof p['answer']  === 'string' ? p['answer']  : ''
-        const sources = Array.isArray(p['sources']) ? p['sources'] as { text: string }[] : []
+        const sources = Array.isArray(p['sources'])
+          ? (p['sources'] as unknown[]).flatMap((s) => { const t = (s as Record<string, unknown>)['text']; return typeof t === 'string' && t ? [{ text: t }] : [] })
+          : []
         if (!answer || !sources.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'answer and sources required' })); return }
         const { generateOllamaText } = await import('./lib/ollama.js')
         const generate = async (prompt: string) => { try { const r = await generateOllamaText({ model: 'qwen2.5:7b', messages: [{ role: 'user', content: prompt }], temperature: 0 }); return r.content } catch { return 'NEUTRAL' } }
@@ -16098,7 +16102,7 @@ Question: ${question}`
         const result = await verifyGroundingCombo(answer, sources, { entail })
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify(result))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -16113,17 +16117,21 @@ Question: ${question}`
         try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
         const { verifyInlineBinding } = await import('./lib/grounded-answer.js')
         const { makeLlmEntail } = await import('./lib/research-verify.js')
-        const answer = p['answer'] as import('./lib/grounded-answer.js').GroundedAnswer | undefined
-        const evidenceRaw = p['evidence'] as Record<string, string> | undefined
-        if (!answer || !evidenceRaw) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'answer and evidence required' })); return }
-        const evidence = new Map(Object.entries(evidenceRaw))
+        const answerRaw = p['answer']
+        const answer = answerRaw !== null && typeof answerRaw === 'object' && !Array.isArray(answerRaw)
+          && typeof (answerRaw as Record<string, unknown>)['text'] === 'string'
+          ? answerRaw as import('./lib/grounded-answer.js').GroundedAnswer : null
+        const evidenceObj = p['evidence'] !== null && typeof p['evidence'] === 'object' && !Array.isArray(p['evidence'])
+          ? p['evidence'] as Record<string, unknown> : null
+        if (!answer || !evidenceObj) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'answer and evidence required' })); return }
+        const evidence = new Map(Object.entries(evidenceObj).flatMap(([k, v]) => typeof v === 'string' ? [[k, v] as [string, string]] : []))
         const { generateOllamaText } = await import('./lib/ollama.js')
         const generate = async (prompt: string) => { try { const r = await generateOllamaText({ model: 'qwen2.5:7b', messages: [{ role: 'user', content: prompt }], temperature: 0 }); return r.content } catch { return 'NEUTRAL' } }
         const entail = makeLlmEntail(generate)
         const result = await verifyInlineBinding(answer, evidence, entail)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify(result))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
