@@ -4727,9 +4727,10 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
       emitContent = scrubMarkdownImages(emitContent)
     } catch { /* egress-hygiene is best-effort */ }
     try {
-      const { markAIGenerated, makeCredential, logAIActEvent } = await import('./lib/content-credentials.js')
+      const { markAIGenerated, makeCredential, logAIActEvent, buildC2PAEventPayload } = await import('./lib/content-credentials.js')
       const cred = makeCredential({ model, timestamp: new Date().toISOString() })
       emitContent = markAIGenerated(emitContent, cred)
+      sse(res, 'c2pa_credential', { credential: buildC2PAEventPayload(cred) })
       const { brainHome } = await import('./lib/brain-home.js')
       logAIActEvent({ responseText: fullContent, cred, logsDir: brainHome() })
     } catch { /* C2PA marking is best-effort */ }
