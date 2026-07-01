@@ -10623,8 +10623,20 @@ Question: ${question}`
         const source = typeof p['source'] === 'string' ? p['source'] : 'import'
         if (!text) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'text required' })); return }
         const memories = parseMemoryExport(text, source)
+        const dryRun = p['dry_run'] === true
+        let imported = 0
+        if (!dryRun) {
+          const { ingestDocument } = await import('./lib/doc-store.js')
+          for (const m of memories) {
+            try {
+              const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+              await ingestDocument(`memory/import-${source}-${stamp}-${m.index}.md`, m.text)
+              imported++
+            } catch { /* skip failed imports */ }
+          }
+        }
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ memories, count: memories.length, executionPerformed: false }))
+        res.end(JSON.stringify({ memories, count: memories.length, imported: dryRun ? 0 : imported, executionPerformed: !dryRun }))
       } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
