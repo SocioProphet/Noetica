@@ -1809,7 +1809,7 @@ async function executeTool(
   {
     const c = containmentState()
     if (c.killed) {
-      emitScopedTelemetry({ kind: 'capability', allow: false, provider: 'tool', model: name, scope: 'kill-switch', reason: c.reason ?? 'armed', source: 'containment' })
+      emitScopedTelemetry({ kind: 'capability', allow: false, provider: 'tool', model: name, scope: 'kill-switch', reason: c.reason ?? 'armed', source: 'containment', authorityLevel: 'root' })
       return `Blocked: the agent kill-switch is ARMED${c.reason ? ` (${c.reason})` : ''}. Tool execution is halted until it is disarmed.`
     }
   }
@@ -1817,7 +1817,7 @@ async function executeTool(
   const actionClass = TOOL_ACTION_CLASS[name]
   if (actionClass) {
     const verdict = scopedAuthorizeAction(actionClass)
-    emitScopedTelemetry({ kind: 'capability', allow: verdict.allow, provider: 'tool', model: name, scope: actionClass, reason: verdict.reason, source: verdict.source })
+    emitScopedTelemetry({ kind: 'capability', allow: verdict.allow, provider: 'tool', model: name, scope: actionClass, reason: verdict.reason, source: verdict.source, authorityLevel: verdict.authorityLevel, broadlySafe: verdict.broadlySafe })
     if (!verdict.allow) {
       return `Blocked by scope-d engagement policy: ${verdict.reason}. This action (${name} → ${actionClass}) is not authorized under the active policy.`
     }

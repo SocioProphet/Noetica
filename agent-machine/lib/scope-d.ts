@@ -140,10 +140,67 @@ export type ActionClass =
   | 'write' | 'deployment' | 'destructive_action'
   | 'credential_access' | 'memory_write' | 'identity_write'
 
+/**
+ * Which level of the principal hierarchy authorized (or denied) this action.
+ * Maps the OpenAI/Anthropic Model Spec chain-of-command onto Noetica's governance stack:
+ *   root      → kill-switch / hardcoded exclusions — cannot be overridden by any principal
+ *   system    → scope-d EngagementPolicy (platform-level operator control)
+ *   developer → operator config / system prompt context (no scope-d policy configured)
+ *   user      → user instruction overrides within operator-set bounds
+ *   guideline → assistant defaults (read-only / synthetic_event — no policy needed)
+ */
+export type AuthorityLevel = 'root' | 'system' | 'developer' | 'user' | 'guideline'
+
+/**
+ * Result of the five-point broadly-safe pre-dispatch check.
+ * Each flag is true when the check PASSES (safe to proceed on that dimension).
+ * A false flag is advisory — it stamps the receipt for audit but does not block by default.
+ */
+export interface BroadlySafeResult {
+  reversible: boolean          // action can be undone (no permanent side-effects)
+  minimalFootprint: boolean    // does not accumulate new permissions or capabilities
+  boundedScope: boolean        // affects only the current conversation context, not third parties
+  intentClear: boolean         // operator intent for this action class is unambiguous from policy
+  noUserHarm: boolean          // does not actively harm the user even if operator permitted it
+  all: boolean                 // true only when all five pass
+}
+
 export interface ScopedActionVerdict {
   allow: boolean
   reason: string
   source: 'scope-d' | 'not-configured' | 'fail-closed'
+  authorityLevel: AuthorityLevel
+  broadlySafe: BroadlySafeResult
+}
+
+/**
+ * Five-point broadly-safe check — evaluates an action class against the model-spec
+ * "broadly safe behaviors" prior to dispatch. Advisory only: stamps the receipt but
+ * does not add blocking behavior beyond what authorizeAction already enforces.
+ */
+export function checkBroadlySafe(actionClass: ActionClass): BroadlySafeResult {
+  const isReadOnly = actionClass === 'read' || actionClass === 'synthetic_event' || actionClass === 'dry_run'
+  const isDestructive = actionClass === 'destructive_action'
+  const isNetworkCall = actionClass === 'network_call'
+  const isCredential = actionClass === 'credential_access' || actionClass === 'identity_write'
+  const isDeployment = actionClass === 'deployment'
+
+  const reversible = !isDestructive && !isDeployment
+  const minimalFootprint = !isCredential && !isDeployment
+  const boundedScope = !isNetworkCall && !isDeployment
+  const intentClear = isReadOnly  // non-read actions always carry some ambiguity without operator context
+  const noUserHarm = !isDestructive && !isCredential
+
+  const all = reversible && minimalFootprint && boundedScope && intentClear && noUserHarm
+  return { reversible, minimalFootprint, boundedScope, intentClear, noUserHarm, all }
+}
+
+/** Derive the principal authority level from a scope-d verdict source + action class. */
+function deriveAuthorityLevel(source: 'scope-d' | 'not-configured' | 'fail-closed', actionClass: ActionClass): AuthorityLevel {
+  if (source === 'fail-closed') return 'root'
+  if (source === 'scope-d') return 'system'
+  if (actionClass === 'read' || actionClass === 'synthetic_event') return 'guideline'
+  return 'developer'
 }
 
 /**
@@ -151,35 +208,73 @@ export interface ScopedActionVerdict {
  * against the active EngagementPolicy's approvalRules. Anything beyond gate
  * 'none' has no inline approver in the mesh, so it fails closed. Read-class
  * actions are always permitted. No policy configured → unchanged (allow).
+ *
+ * Every verdict includes an authorityLevel (principal-hierarchy level that made
+ * the decision) and a broadlySafe stamp (five-point model-spec checklist).
  */
 export function authorizeAction(actionClass: ActionClass): ScopedActionVerdict {
   if (actionClass === 'read' || actionClass === 'synthetic_event') {
-    return { allow: true, reason: `${actionClass} — no confinement needed`, source: 'not-configured' }
+    return {
+      allow: true,
+      reason: `${actionClass} — no confinement needed`,
+      source: 'not-configured',
+      authorityLevel: 'guideline',
+      broadlySafe: checkBroadlySafe(actionClass),
+    }
   }
   if (!scopedConfigured()) {
-    return { allow: true, reason: 'scope-d engagement policy not configured', source: 'not-configured' }
+    return {
+      allow: true,
+      reason: 'scope-d engagement policy not configured',
+      source: 'not-configured',
+      authorityLevel: 'developer',
+      broadlySafe: checkBroadlySafe(actionClass),
+    }
   }
   const policy = loadEngagementPolicy()
   if (!policy) {
-    return { allow: false, reason: 'scope-d policy unreadable — action denied (fail-closed)', source: 'fail-closed' }
+    return {
+      allow: false,
+      reason: 'scope-d policy unreadable — action denied (fail-closed)',
+      source: 'fail-closed',
+      authorityLevel: 'root',
+      broadlySafe: checkBroadlySafe(actionClass),
+    }
   }
   if (policy.expiresAt && Date.parse(policy.expiresAt) <= Date.now()) {
-    return { allow: false, reason: `scope-d policy ${policy.policyId} expired — action denied`, source: 'scope-d' }
+    return {
+      allow: false,
+      reason: `scope-d policy ${policy.policyId} expired — action denied`,
+      source: 'scope-d',
+      authorityLevel: 'system',
+      broadlySafe: checkBroadlySafe(actionClass),
+    }
   }
   const gate = policy.approvalRules?.find((r) => r.actionClass === actionClass)?.requiredGate
   if (gate === 'none') {
-    return { allow: true, reason: `scope-d: ${actionClass} authorized (gate none) under ${policy.policyId}`, source: 'scope-d' }
+    return {
+      allow: true,
+      reason: `scope-d: ${actionClass} authorized (gate none) under ${policy.policyId}`,
+      source: 'scope-d',
+      authorityLevel: 'system',
+      broadlySafe: checkBroadlySafe(actionClass),
+    }
   }
+  const src = 'scope-d' as const
   return {
     allow: false,
     reason: `scope-d: ${actionClass} requires gate '${gate ?? 'unspecified'}' (no inline approver) under ${policy.policyId}`,
-    source: 'scope-d',
+    source: src,
+    authorityLevel: deriveAuthorityLevel(src, actionClass),
+    broadlySafe: checkBroadlySafe(actionClass),
   }
 }
 
 /**
  * Emit a scope-d Event-IR audit record for a routing/egress decision.
  * Conforms to config/schemas/event-ir.schema.json. Fire-and-forget; never throws.
+ * Optionally accepts authorityLevel and broadlySafe to stamp the principal-hierarchy
+ * level and model-spec broadly-safe checklist result onto each receipt.
  */
 export function emitScopedTelemetry(event: {
   kind?: 'route' | 'egress' | string
@@ -190,6 +285,8 @@ export function emitScopedTelemetry(event: {
   scope: string
   reason?: string
   source?: string
+  authorityLevel?: AuthorityLevel
+  broadlySafe?: BroadlySafeResult
 }): void {
   // Always write the tamper-evident local audit chain — even when no scope-d policy is configured (#31), so
   // governance evidence exists by default, not only once a policy path is set.
@@ -198,6 +295,7 @@ export function emitScopedTelemetry(event: {
     const payload = {
       provider: event.provider, model: event.model, tier: event.tier,
       scope: event.scope, reason: event.reason, source: event.source, allow: event.allow,
+      authorityLevel: event.authorityLevel,
     }
     const record = {
       schemaVersion: '0.1.0',
@@ -208,6 +306,8 @@ export function emitScopedTelemetry(event: {
       observedAt,
       actor: { actorType: 'agent', id: 'noetica-mesh' },
       safetyClass: event.allow === false ? 'blocked' : 'read_only',
+      authorityLevel: event.authorityLevel ?? 'developer',
+      broadlySafe: event.broadlySafe ?? null,
       provenance: {
         collector: 'noetica-mesh',
         hash: createHash('sha256').update(JSON.stringify(payload)).digest('hex'),
