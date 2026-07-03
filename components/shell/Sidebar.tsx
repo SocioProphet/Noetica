@@ -8,9 +8,11 @@ import type { WorkspaceSession } from '@/lib/session/types'
 import { HelpModal } from '@/components/shell/HelpModal'
 import { UpgradeModal } from '@/components/shell/UpgradeModal'
 import { ChangelogModal } from '@/components/shell/ChangelogModal'
+import { COMMAND_CENTERS, surfacesFor, type CommandCenterId, type NavSurface } from '@/components/shell/commandCenters'
 
 type SidebarProps = {
   activeSurface: ActiveSurface
+  activeCenter: CommandCenterId
   onSurfaceChange: (surface: ActiveSurface) => void
   onOpenSettings: (category?: string) => void
   sessions?: WorkspaceSession[]
@@ -178,6 +180,14 @@ function IconSettings() {
     </svg>
   )
 }
+function IconDot() {
+  // fallback for registry surfaces that don't (yet) have a dedicated glyph
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle cx="8" cy="8" r="3" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  )
+}
 function IconChevronRight({ className }: { className?: string }) {
   return (
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden className={className}>
@@ -339,7 +349,7 @@ function SessionTree({ sessions, activeSessionId, search, onSwitchSession, onRem
 }
 
 export function Sidebar({
-  activeSurface, onSurfaceChange, onOpenSettings,
+  activeSurface, activeCenter, onSurfaceChange, onOpenSettings,
   sessions = [], activeSessionId = null,
   onSwitchSession, onRemoveSession, onNewChat, density = 'comfortable',
 }: SidebarProps) {
@@ -445,10 +455,22 @@ export function Sidebar({
         </div>
       )}
 
-      {/* Navigation */}
+      {/* Command-center header — orients you to the active Tier-1 domain */}
+      {(() => {
+        const center = COMMAND_CENTERS.find((c) => c.id === activeCenter)
+        if (!center) return null
+        return (
+          <div className="px-2 pb-1.5 pt-0.5">
+            <div className="text-[12px] font-semibold text-[var(--color-text-primary)]">{center.label}</div>
+            <div className="text-[10px] leading-tight text-[var(--color-text-tertiary)]">{center.blurb}</div>
+          </div>
+        )
+      })()}
+
+      {/* Navigation — registry-driven: shows the active command center's surfaces */}
       <nav className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-1">
-        {/* Recent sessions — shown when Chat surface is active */}
-        {activeSurface === 'chat' && filteredSessions.length > 0 && (
+        {/* Recent sessions — only in the Workspace center */}
+        {activeCenter === 'workspace' && filteredSessions.length > 0 && (
           <SessionTree
             sessions={filteredSessions}
             activeSessionId={activeSessionId}
@@ -458,103 +480,53 @@ export function Sidebar({
           />
         )}
 
-        {/* Workspace group */}
-        {/* Video (jitsi) folds into Workrooms as a tab. */}
-        {(['chat','library','notes','canvas','cowork','workrooms'] as ActiveSurface[]).map((id) => {
-          const item = surfaceItems.find(s => s.id === id)!
-          const isActive = activeSurface === id
-          return (
-            <button key={id} onClick={() => onSurfaceChange(id)}
-              className={`flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-[11px] transition ${
-                isActive
-                  ? 'bg-[#dbeafe] font-medium text-[var(--color-text-primary)]'
-                  : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-background-primary)] hover:text-[var(--color-text-primary)]'
-              }`}
-            >
-              <span className={`shrink-0 ${isActive ? 'text-[#1d4ed8]' : ''}`}>{item.icon}</span>
-              <span className="truncate">{item.label}</span>
-            </button>
-          )
-        })}
+        {(() => {
+          const rows = surfacesFor(activeCenter).filter((s) => s.tier === 'primary' || s.tier === 'secondary')
+          const primary = rows.filter((s) => s.tier === 'primary')
+          const secondary = rows.filter((s) => s.tier === 'secondary')
 
-        {/* Build group */}
-        <div className={`px-2 ${groupGap} pb-0.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]`}>Build</div>
-        {(['projects','artifacts','code','workspace','docs'] as ActiveSurface[]).map((id) => {
-          const item = surfaceItems.find(s => s.id === id)!
-          const isActive = activeSurface === id
-          return (
-            <button key={id} onClick={() => onSurfaceChange(id)}
-              className={`flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-[11px] transition ${
-                isActive
-                  ? 'bg-[#dbeafe] font-medium text-[var(--color-text-primary)]'
-                  : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-background-primary)] hover:text-[var(--color-text-primary)]'
-              }`}
-            >
-              <span className={`shrink-0 ${isActive ? 'text-[#1d4ed8]' : ''}`}>{item.icon}</span>
-              <span className="truncate">{item.label}</span>
-            </button>
-          )
-        })}
+          const renderRow = (s: NavSurface) => {
+            const item = surfaceItems.find((i) => i.id === s.id)
+            const isActive = activeSurface === s.id
+            // gap surfaces (not yet a real ActiveSurface) render as disabled "soon" rows
+            const disabled = s.gap === true || !item
+            const badge =
+              s.maturity === 'soon' || s.maturity === 'planned' ? 'soon' : s.maturity === 'beta' ? 'beta' : null
+            return (
+              <button
+                key={`${s.center}:${s.id}`}
+                onClick={() => { if (!disabled) onSurfaceChange(s.id as ActiveSurface) }}
+                disabled={disabled}
+                title={disabled ? `${s.label} — coming soon` : undefined}
+                className={`flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-[11px] transition ${
+                  isActive
+                    ? 'bg-[#dbeafe] font-medium text-[var(--color-text-primary)]'
+                    : disabled
+                    ? 'cursor-default text-[var(--color-text-tertiary)] opacity-60'
+                    : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-background-primary)] hover:text-[var(--color-text-primary)]'
+                }`}
+              >
+                <span className={`shrink-0 ${isActive ? 'text-[#1d4ed8]' : ''}`}>{item?.icon ?? <IconDot />}</span>
+                <span className="truncate">{s.label}</span>
+                {badge && (
+                  <span className="ml-auto rounded bg-[var(--color-background-secondary)] px-1 py-px text-[8px] font-medium text-[var(--color-text-tertiary)]">
+                    {badge}
+                  </span>
+                )}
+              </button>
+            )
+          }
 
-        {/* Models & AI group. Studio is now a tabbed workspace (Prompt/RAG/Capabilities/Alignment) —
-            rag/lab/alignment fold in as tabs, so they no longer each claim a nav slot. */}
-        <div className={`px-2 ${groupGap} pb-0.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]`}>Models &amp; AI</div>
-        {(['studio','evaluate','tune'] as ActiveSurface[]).map((id) => {
-          const item = surfaceItems.find(s => s.id === id)!
-          const isActive = activeSurface === id
           return (
-            <button key={id} onClick={() => onSurfaceChange(id)}
-              className={`flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-[11px] transition ${
-                isActive
-                  ? 'bg-[#dbeafe] font-medium text-[var(--color-text-primary)]'
-                  : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-background-primary)] hover:text-[var(--color-text-primary)]'
-              }`}
-            >
-              <span className={`shrink-0 ${isActive ? 'text-[#1d4ed8]' : ''}`}>{item.icon}</span>
-              <span className="truncate">{item.label}</span>
-            </button>
+            <>
+              {primary.map(renderRow)}
+              {secondary.length > 0 && (
+                <div className={`px-2 ${groupGap} pb-0.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]`}>More</div>
+              )}
+              {secondary.map(renderRow)}
+            </>
           )
-        })}
-
-        {/* Operate & Govern group */}
-        <div className={`px-2 ${groupGap} pb-0.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]`}>Operate &amp; Govern</div>
-        {/* Computer Use folds into Operate as a tab — not its own nav slot. */}
-        {(['operate','govern'] as ActiveSurface[]).map((id) => {
-          const item = surfaceItems.find(s => s.id === id)!
-          const isActive = activeSurface === id
-          return (
-            <button key={id} onClick={() => onSurfaceChange(id)}
-              className={`flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-[11px] transition ${
-                isActive
-                  ? 'bg-[#dbeafe] font-medium text-[var(--color-text-primary)]'
-                  : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-background-primary)] hover:text-[var(--color-text-primary)]'
-              }`}
-            >
-              <span className={`shrink-0 ${isActive ? 'text-[#1d4ed8]' : ''}`}>{item.icon}</span>
-              <span className="truncate">{item.label}</span>
-            </button>
-          )
-        })}
-
-        {/* Platform group — Broker/Marketplace/Geo/HolographMe fold into one tabbed Platform destination. */}
-        <div className={`px-2 ${groupGap} pb-0.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]`}>Platform</div>
-        {(['platform'] as ActiveSurface[]).map((id) => {
-          const item = surfaceItems.find(s => s.id === id)!
-          const isActive = activeSurface === id
-          return (
-            <button key={id} onClick={() => onSurfaceChange(id)}
-              className={`flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-[11px] transition ${
-                isActive
-                  ? 'bg-[#dbeafe] font-medium text-[var(--color-text-primary)]'
-                  : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-background-primary)] hover:text-[var(--color-text-primary)]'
-              }`}
-            >
-              <span className={`shrink-0 ${isActive ? 'text-[#1d4ed8]' : ''}`}>{item.icon}</span>
-              <span className="truncate">{item.label}</span>
-              <span className="ml-auto rounded bg-[var(--color-background-secondary)] px-1 py-px text-[8px] font-medium text-[var(--color-text-tertiary)]">soon</span>
-            </button>
-          )
-        })}
+        })()}
       </nav>
 
       {/* Account footer */}
