@@ -83,4 +83,9 @@ export class AgentMemory {
   consolidate(namespace: TrustNamespace): Promise<DreamReport> {
     return autoDream(this.storeFor(namespace).store)
   }
+
+  /** does a named artifact/topic exist in this namespace? (gate check for orchestration handoffs) */
+  async has(namespace: TrustNamespace, name: string): Promise<boolean> {
+    return (await this.storeFor(namespace).store.readTopic(name)) !== null
+  }
 }
