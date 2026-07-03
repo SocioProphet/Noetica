@@ -191,11 +191,14 @@ async function main() {
   // per-question JSONL for board-analysis.py (exact-McNemar on the two arms' discordant pairs)
   const outDir = process.env['FMATH_OUT'] || path.join(os.tmpdir())
   const jsonl = path.join(outDir, `frontier-math-verdicts-${SEED}.jsonl`)
-  const byId = new Map<string, Record<string, boolean>>()
+  // board-analysis.py's contract: one row per question with <arm>_ok booleans + a subject, so
+  // `board-analysis.py --compare opcompute baseline` runs the exact-McNemar test unchanged.
+  const subjectById = new Map(bank.map((p) => [String(p.id), String(p.subject || p.level || 'all')]))
+  const byId = new Map<string, Record<string, boolean | string>>()
   for (const v of verdicts) {
     const k = String(v.id)
-    if (!byId.has(k)) byId.set(k, {})
-    byId.get(k)![v.arm] = v.match
+    if (!byId.has(k)) byId.set(k, { subject: subjectById.get(k) || 'all' })
+    byId.get(k)![`${v.arm}_ok`] = v.match
   }
   fs.writeFileSync(jsonl, [...byId.entries()].map(([id, arms]) => JSON.stringify({ id, ...arms })).join('\n') + '\n')
   console.log(`# per-question verdicts → ${jsonl}`)
