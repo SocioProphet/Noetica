@@ -7770,6 +7770,22 @@ Question: ${question}`
     return
   }
 
+  // GET /api/labs/catalog — Apple-aligned model catalog (on-device ~3B base + per-lab LoRA adapters + server tier).
+  if (req.method === 'GET' && url.pathname === '/api/labs/catalog') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { modelCatalog } = await import('./lib/model-catalog.js')
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(modelCatalog()))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: (e instanceof Error ? e.message : 'labs_failed').replace(/[\r\n]/g, ' ') }))
+      }
+    })()
+    return
+  }
+
   // GET /api/devspace/list — the trust-namespace DevSpaces (Nocalhost BaseSpace/MeshSpace model) + live status.
   if (req.method === 'GET' && url.pathname === '/api/devspace/list') {
     setCORSHeaders(res)

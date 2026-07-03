@@ -109,6 +109,14 @@ function IconGraph() {
     </svg>
   )
 }
+function IconLabs() {
+  // flask — the tuning labs
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path d="M6.5 2v4L3.2 12.3a1 1 0 0 0 .88 1.5h7.84a1 1 0 0 0 .88-1.5L9.5 6V2M5.5 2h5M4.6 9.5h6.8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
 function IconServices() {
   // stacked boxes — running DevSpaces/services
   return (
@@ -275,6 +283,7 @@ const surfaceItems: SurfaceItem[] = [
   { id: 'services',    label: 'Services',    icon: <IconServices />,   items: ['DevSpaces', 'BaseSpace', 'MeshSpace'] },
   { id: 'workspace',   label: 'Project Files',icon: <IconFiles />,      items: ['Project files', 'Scaffolds', 'Build output'] },
   { id: 'evaluate',    label: 'Evaluate',    icon: <IconEvaluate />,   items: ['Task benchmarks', 'Model families', 'Outcome traces'] },
+  { id: 'labs',        label: 'Labs',        icon: <IconLabs />,       items: ['On-device base', 'Lab adapters', 'Server tier'] },
   { id: 'studio',      label: 'Studio',      icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden><path d="M4 4h16v12H4zM8 20h8M12 16v4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/><path d="M7 8h6M7 11h4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>, items: ['Prompt workbench', 'Model compare', 'Vector search'] },
   { id: 'rag',         label: 'RAG Inspector',icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden><circle cx="11" cy="11" r="6" stroke="currentColor" strokeWidth="1.6"/><path d="M20 20l-4-4M9 11h4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/></svg>, items: ['Retrieval debug', 'Chunk scores', 'Citations'] },
   { id: 'lab',         label: 'Capabilities',icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden><path d="M9 3v6l-5 9a2 2 0 002 3h12a2 2 0 002-3l-5-9V3M8 3h8M8 14h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>, items: ['Investigation', 'Reasoning', 'Safety', 'Ontology'] },

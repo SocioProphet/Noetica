@@ -13,6 +13,7 @@ export type ActiveSurface =
   | 'workspace'
   | 'evaluate'
   | 'studio'
+  | 'labs'
   | 'rag'
   | 'lab'
   | 'jitsi'

@@ -150,7 +150,7 @@ export const NAV_SURFACES: NavSurface[] = [
   { id: 'studio',     label: 'Studio',      center: 'ai', tier: 'primary',   maturity: 'live' },
   { id: 'evaluate',   label: 'Evaluate',    center: 'ai', tier: 'primary',   maturity: 'live' },
   { id: 'tune',       label: 'Tune & Train', center: 'ai', tier: 'primary',  maturity: 'live' },
-  { id: 'labs',       label: 'Labs',        center: 'ai', tier: 'primary',   maturity: 'planned', gap: true }, // SociOS modality labs image/video/graph/ts/translation/embedding/nlp/ocr — opt-in collective tuning
+  { id: 'labs',       label: 'Labs',        center: 'ai', tier: 'primary',   maturity: 'beta' }, // SociOS modality labs (Apple-aligned: on-device base + per-lab LoRA adapters + server) — LIVE surface
   { id: 'boards',     label: 'A/B Boards',  center: 'ai', tier: 'primary',   maturity: 'planned', gap: true }, // A/B testing + frontier/MMLU boards
   { id: 'rag',        label: 'RAG Inspector', center: 'ai', tier: 'tab',     maturity: 'live', foldsInto: 'studio' },
   { id: 'lab',        label: 'Capabilities', center: 'ai', tier: 'tab',      maturity: 'live', foldsInto: 'studio' },
