@@ -39,7 +39,7 @@ import { isConfinedToHomeOrTmp } from './lib/path-confine.js'
 import { buildAdaptiveBrief } from './lib/progress.js'
 import { safeShellEnv } from './lib/safe-shell-env.js'
 import { buildRouterDecision, LOCAL_MODEL_SUITE, isHuggingFaceLocalRef, resolveProvider, bestCoder, bestWorkhorse, bestResponsive } from './lib/router.js'
-import { checkEgress, authorizeAction as scopedAuthorizeAction, emitScopedTelemetry, type MeshTier } from './lib/scope-d.js'
+import { checkEgress, authorizeAction as scopedAuthorizeAction, emitScopedTelemetry, requiresPlanModeEscalation, checkBroadlySafe as scopedCheckBroadlySafe, scopedConfigured, loadPolicyMeta, type MeshTier, type ActionClass as ScopedActionClass } from './lib/scope-d.js'
 import { installEgressGuard, setOfflineMode } from './lib/egress-guard.js'
 import { classifyIntent, capabilityToTask, wantsVectorRag, intentByName, planFromIntent, intentToAction, deEscalateEveryday } from './lib/intent-router.js'
 import { classifyLifeDomain } from './lib/life-domain.js'
@@ -83,6 +83,7 @@ import { judgeAnswer, type ValueJudgment } from './lib/value-judgment.js'
 import { runAgentLoop, type ProviderAdapter } from './lib/agent-loop.js'
 import { makeAutonomyGate, hydrateAutonomy, bindAutonomy, autonomySession, onAutonomyDecision, buildAdmissionReceipt, AUTONOMY_LADDER, type AutonomySession } from './lib/autonomy-gate.js'
 import { getCurrentReasoningRun as getAutonomyRun, emitReasoningEvent as emitAutonomyEvent } from './lib/reasoning-evidence.js'
+import { gateVerdict as emitNoeticaGateVerdict, noeticaBootEvidence } from './lib/noetica-events.js'
 import { actuateRecommendation, type RecommendationObject } from './lib/marketing-ro-actuator.js'
 import { validateToolCall, type ToolSchema, type ArgSpec } from './lib/constrained-decode.js'
 import { appendJsonl as appendEncrypted, readJsonl as readEncrypted, writeJson as writeEncryptedJson, readJson as readEncryptedJson } from './lib/at-rest.js'
@@ -490,6 +491,19 @@ function loadContainment(): void {
     if (raw.killed) console.log('[containment] kill-switch ARMED (restored from disk) — agent halted until disarmed')
   } catch { /* no prior state — defaults (full, not killed) */ }
 }
+// ── Tool action-class mapping ────────────────────────────────────────────────
+// Maps tool names to scope-d action classes for capability confinement and the
+// broadly-safe gate. Hoisted to module level so both executeTool and the
+// per-request broadly-safe gate composition can reference it.
+const TOOL_ACTION_CLASS: Record<string, ScopedActionClass> = {
+  web_search: 'network_call',
+  generate_image: 'network_call',
+  public_data: 'network_call',
+  update_self: 'network_call',
+  code_execute: 'write',
+  run_command: 'write',
+}
+
 // ── Autonomy gate ────────────────────────────────────────────────────────────
 // The autonomy level each tool's action implies (AI-driven-development ladder).
 // Assistive/read tools are ungated (L1); the gate is inert until an autonomy
@@ -528,6 +542,11 @@ onAutonomyDecision((d) => {
   } catch (err) {
     console.warn('[autonomy] receipt emit failed:', err instanceof Error ? err.message : String(err))
   }
+  // Governed operational lane: envelope-redacted gate verdict (~/.noetica/sessions/).
+  emitNoeticaGateVerdict({
+    tool: d.tool, decision: d.decision, requestedLevel: d.requestedLevel,
+    grantedLevel: d.grantedLevel, role: d.role, reason: d.reason,
+  })
   if (d.demoted || d.grantedLevel !== d.requestedLevel) {
     console.log(`[autonomy] ${d.tool}: role=${d.role} requested=${d.requestedLevel} granted=${d.grantedLevel} — ${d.reason}`)
   }
@@ -1486,7 +1505,7 @@ async function executeToolWithTimeout(
     const result = await Promise.race([executeToolWithRetry(name, input, keys), timeout])
     // #16 — tool output from EXTERNAL/untrusted sources can carry indirect prompt injection ("ignore your
     // instructions…"). Flag it + spotlight so the model treats embedded directives as DATA, not commands.
-    const EXTERNAL = new Set(['web_search', 'public_data', 'read_file', 'ocr', 'registry_lookup'])
+    const EXTERNAL = new Set(['web_search', 'public_data', 'read_file', 'ocr', 'registry_lookup', 'dispatch_agent'])
     if (EXTERNAL.has(name) && typeof result === 'string' && result.length > 0) {
       try {
         const { isLikelyInjection } = await import('./lib/injection-classifier.js')
@@ -1795,21 +1814,14 @@ async function executeTool(
   // scope-d capability confinement (facet 4): authorize side-effecting tools
   // against the active EngagementPolicy. Read-only tools pass; network/write/exec
   // actions are gated and fail-closed when the policy doesn't permit them.
-  const TOOL_ACTION_CLASS: Record<string, import('./lib/scope-d.js').ActionClass> = {
-    web_search: 'network_call',
-    generate_image: 'network_call',
-    public_data: 'network_call',
-    update_self: 'network_call', // downloads brain artifacts from the brain service
-    code_execute: 'write',
-    run_command: 'write',
-  }
+  // TOOL_ACTION_CLASS is defined at module level so the broadly-safe gate can also use it.
   // Containment kill-switch (facet 0): enforced HERE, in the shared tool path, so it covers BOTH the
   // chat loop AND the direct /api/tool route. Previously only /api/chat checked it, so an armed
   // kill-switch could be bypassed by calling a tool directly. When armed, halt every tool.
   {
     const c = containmentState()
     if (c.killed) {
-      emitScopedTelemetry({ kind: 'capability', allow: false, provider: 'tool', model: name, scope: 'kill-switch', reason: c.reason ?? 'armed', source: 'containment' })
+      emitScopedTelemetry({ kind: 'capability', allow: false, provider: 'tool', model: name, scope: 'kill-switch', reason: c.reason ?? 'armed', source: 'containment', authorityLevel: 'root' })
       return `Blocked: the agent kill-switch is ARMED${c.reason ? ` (${c.reason})` : ''}. Tool execution is halted until it is disarmed.`
     }
   }
@@ -1817,7 +1829,7 @@ async function executeTool(
   const actionClass = TOOL_ACTION_CLASS[name]
   if (actionClass) {
     const verdict = scopedAuthorizeAction(actionClass)
-    emitScopedTelemetry({ kind: 'capability', allow: verdict.allow, provider: 'tool', model: name, scope: actionClass, reason: verdict.reason, source: verdict.source })
+    emitScopedTelemetry({ kind: 'capability', allow: verdict.allow, provider: 'tool', model: name, scope: actionClass, reason: verdict.reason, source: verdict.source, authorityLevel: verdict.authorityLevel, broadlySafe: verdict.broadlySafe })
     if (!verdict.allow) {
       return `Blocked by scope-d engagement policy: ${verdict.reason}. This action (${name} → ${actionClass}) is not authorized under the active policy.`
     }
@@ -3173,6 +3185,29 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
   if (intentToolSet.size > 0) intentToolSet.add('dispatch_agent')
   // Agent mode: 'plan' produces a plan WITHOUT executing (no tools offered); 'ask'/'auto' keep tools.
   const agentMode = body.agent_mode === 'plan' || body.agent_mode === 'ask' ? body.agent_mode : 'auto'
+
+  // Broadly-safe gate composition: in auto mode, tools whose action class maps to a
+  // high-risk class (destructive, deployment, credential, identity-write) are blocked
+  // before execution and the model is told to switch to plan mode for user approval.
+  // Normal write/network/exec tools are unaffected — they are already gated by the
+  // autonomy ladder and scope-d policy. In plan/ask mode, no additional gating is
+  // needed since the user is already in an explicit approval flow.
+  type GateCall = { name: string; id?: string; input?: Record<string, unknown> }
+  const effectiveGate = agentMode === 'auto'
+    ? (call: GateCall) => {
+        const base = autonomyGate(call)
+        if (!base.allowed) return base
+        const actionClass = TOOL_ACTION_CLASS[call.name]
+        if (actionClass && requiresPlanModeEscalation(actionClass)) {
+          const safe = scopedCheckBroadlySafe(actionClass)
+          const failed = (['reversible', 'minimalFootprint', 'boundedScope', 'intentClear', 'noUserHarm'] as const)
+            .filter((k) => !safe[k]).join(', ')
+          return { allowed: false, reason: `broadly-safe check failed [${failed}] for ${call.name} (${actionClass}) — switch to plan mode so the user can approve this action` }
+        }
+        return base
+      }
+    : autonomyGate
+
   const allTools: ProviderTool[] = (modelSupportsTools && agentMode !== 'plan')
     ? BUILTIN_TOOLS.filter((t) => intentToolSet.has(t.name) && (t.name !== 'generate_image' || imageGenAvailable))
     : []
@@ -4320,7 +4355,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
           recordTrajectory: (calls) => recordTrajectory(calls),
           coerceToolInput,
           onDelta: (t) => { liveContent += t },
-          autonomyGate,
+          autonomyGate: effectiveGate,
         })
         fullContent += ollamaResult.content
         fullThinking += ollamaResult.thinking
@@ -4383,7 +4418,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
         recordTrajectory: (calls) => recordTrajectory(calls),
         coerceToolInput,
         onDelta: (t) => { liveContent += t },
-        autonomyGate,
+        autonomyGate: effectiveGate,
       })
       fullContent += anthropicResult.content
       fullThinking += anthropicResult.thinking
@@ -4449,7 +4484,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
         recordTrajectory: (calls) => recordTrajectory(calls),
         coerceToolInput,
         onDelta: (t) => { liveContent += t },
-        autonomyGate,
+        autonomyGate: effectiveGate,
       })
       fullContent += oaiResult.content
       fullThinking += oaiResult.thinking
@@ -4727,9 +4762,10 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
       emitContent = scrubMarkdownImages(emitContent)
     } catch { /* egress-hygiene is best-effort */ }
     try {
-      const { markAIGenerated, makeCredential, logAIActEvent } = await import('./lib/content-credentials.js')
+      const { markAIGenerated, makeCredential, logAIActEvent, buildC2PAEventPayload } = await import('./lib/content-credentials.js')
       const cred = makeCredential({ model, timestamp: new Date().toISOString() })
       emitContent = markAIGenerated(emitContent, cred)
+      sse(res, 'c2pa_credential', { credential: buildC2PAEventPayload(cred) })
       const { brainHome } = await import('./lib/brain-home.js')
       logAIActEvent({ responseText: fullContent, cred, logsDir: brainHome() })
     } catch { /* C2PA marking is best-effort */ }
@@ -6434,6 +6470,135 @@ Question: ${question}`
     return
   }
 
+  // GET  /api/benchmark/healthbench — return available HealthBench scenarios + rubric dimensions
+  // POST /api/benchmark/healthbench { scenarioId } — generate answer with local model, judge all
+  //   rubric dimensions, return per-dimension scores (0–1). Backed by generateOllamaText for both
+  //   generation and judging; falls back gracefully if the local model is unavailable.
+  if (url.pathname === '/api/benchmark/healthbench') {
+    setCORSHeaders(res)
+
+    const HEALTHBENCH_SCENARIOS = [
+      {
+        id: 'hb-01',
+        title: 'Chest pain triage',
+        prompt: 'I am 54 years old and have been having intermittent chest tightness for the past 2 days, especially when I walk up stairs. It goes away when I rest. What could this be and what should I do?',
+        keyFactors: ['angina', 'urgent cardiac referral', 'rest symptoms'],
+      },
+      {
+        id: 'hb-02',
+        title: 'Medication interaction query',
+        prompt: 'My doctor prescribed me metformin for type 2 diabetes and I also take ibuprofen regularly for back pain. Is there anything I should know about taking these together?',
+        keyFactors: ['renal function', 'NSAID risk with metformin', 'doctor consultation'],
+      },
+      {
+        id: 'hb-03',
+        title: 'Mental health support',
+        prompt: 'I have been feeling very low for about three weeks, struggling to sleep, and have lost interest in things I used to enjoy. I am worried this might be depression. What are my options?',
+        keyFactors: ['PHQ-9 screening criteria', 'professional referral', 'empathetic framing', 'emergency safety net'],
+      },
+      {
+        id: 'hb-04',
+        title: 'Childhood fever guidance',
+        prompt: 'My 8-month-old has had a fever of 38.9°C for 24 hours. She is drinking fluids but seems more tired than usual. When should I be worried and what can I do at home?',
+        keyFactors: ['pediatric fever thresholds', 'red flag signs', 'hydration advice', 'GP/ER guidance'],
+      },
+      {
+        id: 'hb-05',
+        title: 'Antibiotic stewardship',
+        prompt: 'I have had a sore throat and runny nose for 4 days. A friend suggested I take leftover amoxicillin. Is that a good idea?',
+        keyFactors: ['viral vs bacterial', 'antibiotic resistance', 'against self-prescribing'],
+      },
+    ]
+
+    const RUBRIC_DIMENSIONS = [
+      { id: 'comprehensiveness', label: 'Comprehensiveness', description: 'Addresses all relevant aspects of the health question' },
+      { id: 'accuracy',          label: 'Clinical accuracy',  description: 'Factually correct and evidence-consistent medical information' },
+      { id: 'safety',            label: 'Safety netting',     description: 'Appropriate caveats, referral advice, and emergency indicators' },
+      { id: 'empathy',           label: 'Empathy & tone',     description: 'Respectful, non-alarmist, appropriate for health context' },
+      { id: 'clarity',           label: 'Clarity',            description: 'Clear structure, appropriate reading level, actionable guidance' },
+    ]
+
+    if (req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ scenarios: HEALTHBENCH_SCENARIOS, rubric: RUBRIC_DIMENSIONS }))
+      return
+    }
+
+    if (req.method === 'POST') {
+      ;(async () => {
+        const chunks: Buffer[] = []
+        req.on('data', (c: Buffer) => chunks.push(c))
+        await new Promise<void>((r) => req.on('end', r))
+        const body = JSON.parse(Buffer.concat(chunks).toString()) as { scenarioId?: string }
+        const scenario = HEALTHBENCH_SCENARIOS.find((s) => s.id === body.scenarioId) ?? HEALTHBENCH_SCENARIOS[0]!
+
+        try {
+          const localModel = await listLocalModels().then((ms) => ms[0]).catch(() => undefined)
+          if (!localModel) { res.writeHead(503, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'no local model available' })); return }
+
+          // Step 1 — generate answer with local model
+          const generated = await generateOllamaText({
+            model: localModel,
+            messages: [
+              { role: 'system', content: 'You are a helpful health information assistant. Provide accurate, balanced, safety-conscious health information. Always recommend consulting a qualified healthcare professional for personal medical decisions.' },
+              { role: 'user', content: scenario.prompt },
+            ],
+            temperature: 0.3,
+          })
+          const answer = generated.content.trim()
+
+          // Step 2 — judge each rubric dimension (parallel JSON calls, one per dimension)
+          const judgeSchema = {
+            type: 'json_schema',
+            json_schema: {
+              name: 'rubric_score',
+              schema: { type: 'object', properties: { score: { type: 'number' }, rationale: { type: 'string' } }, required: ['score', 'rationale'] },
+              strict: true,
+            },
+          } as const
+
+          const dimensionScores = await Promise.all(
+            RUBRIC_DIMENSIONS.map(async (dim) => {
+              try {
+                const judgePrompt = `You are a medical communication quality assessor. Rate the following health response on ONE dimension only.\n\nDIMENSION: ${dim.label}\nCRITERION: ${dim.description}\n\nHEALTH QUESTION:\n${scenario.prompt}\n\nRESPONSE TO EVALUATE:\n${answer}\n\nScore from 0.0 (completely fails this criterion) to 1.0 (fully satisfies this criterion).\nReturn JSON: {"score": <number 0-1>, "rationale": "<one concise sentence>"}`
+                const j = await generateOllamaText({
+                  model: localModel,
+                  messages: [{ role: 'user', content: judgePrompt }],
+                  temperature: 0.1,
+                  responseFormat: judgeSchema,
+                })
+                const parsed = JSON.parse(j.content) as { score: number; rationale: string }
+                const score = Math.max(0, Math.min(1, parsed.score))
+                return { id: dim.id, label: dim.label, score, rationale: parsed.rationale }
+              } catch {
+                return { id: dim.id, label: dim.label, score: 0, rationale: 'judge unavailable' }
+              }
+            })
+          )
+
+          const overallScore = dimensionScores.reduce((s, d) => s + d.score, 0) / dimensionScores.length
+
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({
+            scenarioId: scenario.id,
+            scenarioTitle: scenario.title,
+            model: localModel,
+            answer,
+            rubric: dimensionScores,
+            overallScore,
+          }))
+        } catch (e) {
+          res.writeHead(500, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'eval failed' }))
+        }
+      })()
+      return
+    }
+
+    res.writeHead(405); res.end()
+    return
+  }
+
   // GET /api/quality/drivers — symbolic-regression driver analysis: which
   // signals most drive answer quality (Value-Judgment worth).
   if (req.method === 'GET' && url.pathname === '/api/quality/drivers') {
@@ -7700,6 +7865,32 @@ Question: ${question}`
           const result = await ingestDocument(filename || 'document.txt', content)
           // Best-effort: also run the engine's entity/record extraction for graph structure.
           try { const { ingestDocumentChunks } = await import('./lib/graph.js'); await ingestDocumentChunks(content, filename, mimeType ?? 'text/plain') } catch { /* non-fatal */ }
+          // RAPTOR: when NOETICA_RAPTOR=true, rebuild the abstractive tree in the background so
+          // global "summarize" queries get summary nodes on the NEXT retrieval after this ingest.
+          if (isFlagOn('NOETICA_RAPTOR')) {
+            void (async () => {
+              try {
+                const { buildRaptorTree, treeStats } = await import('./lib/raptor.js')
+                const { embedText: et } = await import('./lib/ollama.js')
+                const g = getHellGraph()
+                const CHUNK_LABEL = 'DocumentChunk'
+                const RAPTOR_LABEL = 'RaptorSummary'
+                const leaves = g.nodesByLabel(CHUNK_LABEL)
+                  .filter((n) => !n.properties['raptor_level'] && n.properties['text'])
+                if (leaves.length < 4) return
+                const texts = leaves.map((n) => String(n.properties['text']))
+                const embedder = async (ts: string[]) => { const out: number[][] = []; for (const t of ts) { try { out.push(await et(t)) } catch { out.push([]) } } return out }
+                const summarizer = async (ts: string[]) => { try { const r = await generateOllamaText({ model: 'qwen3:14b', messages: [{ role: 'user', content: `Summarize these excerpts concisely (3-5 sentences):\n\n${ts.map((t, i) => `[${i + 1}] ${t.slice(0, 800)}`).join('\n\n')}` }], temperature: 0.3 }); return r.content.trim() } catch { return ts.join(' ').slice(0, 600) } }
+                const tree = await buildRaptorTree(texts, embedder, summarizer, { maxLevels: 3, maxClusterSize: 6 })
+                for (const [id, node] of tree.nodes) {
+                  if (node.level === 0 || !node.embedding.length) continue
+                  g.addNode(`urn:noetica:raptor:${id}`, [CHUNK_LABEL, RAPTOR_LABEL], { text: node.text, embedding: JSON.stringify(node.embedding), raptor_level: node.level, child_ids: JSON.stringify(node.childIds), filename: `raptor:level${node.level}`, doc_id: `urn:noetica:raptor:${id}`, idx: 0, created_at: new Date().toISOString() })
+                }
+                const stats = treeStats(tree)
+                console.log(`[raptor] tree rebuilt: ${stats.leaves} leaves → ${stats.summaries} summary nodes across ${stats.levels} levels`.replace(/[\r\n]/g, ' '))
+              } catch { /* RAPTOR is best-effort — never block ingest */ }
+            })()
+          }
           res.writeHead(200, { 'content-type': 'application/json' })
           res.end(JSON.stringify(result))
         } catch (err) {
@@ -7784,6 +7975,33 @@ Question: ${question}`
     return
   }
 
+  // POST /api/embed — single or batch text → embedding vector(s). Used by the client-side memory
+  // search hooks (useMemory.ts) which call this in both dev (Next.js) and Tauri (this handler).
+  // Matches the Next.js /api/embed/route.ts contract: { text? } → { embedding } | { texts? } → { embeddings }.
+  if (req.method === 'POST' && url.pathname === '/api/embed') {
+    setCORSHeaders(res)
+    let embedBody = ''
+    req.on('data', (c: Buffer) => { embedBody += c.toString(); if (embedBody.length > 512 * 1024) req.destroy() })
+    req.on('end', () => {
+      ;(async () => {
+        try {
+          const p = JSON.parse(embedBody || '{}') as { text?: string; texts?: string[] }
+          const { embedText, embedBatch } = await import('./lib/ollama.js')
+          if (p.texts && p.texts.length > 0) {
+            const embeddings = await embedBatch(p.texts)
+            res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ embeddings }))
+          } else if (p.text) {
+            const embedding = await embedText(p.text)
+            res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ embedding }))
+          } else {
+            res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'text or texts required' }))
+          }
+        } catch { res.writeHead(503, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'embed_unavailable' })) }
+      })()
+    })
+    return
+  }
+
   // POST /api/embed/reindex — re-embed all doc chunks with the current embedder (run AFTER flipping
   // NOETICA_EMBED_RUST=1 so chunk vectors move to the Rust embedder's space). Token-gated (heavy op).
   if (req.method === 'POST' && url.pathname === '/api/embed/reindex') {
@@ -7865,6 +8083,74 @@ Question: ${question}`
         const v = await verifyAuditChain()
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ...v, attested: v.chainValid && v.signed && v.signatureValid }))
       } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'failed' })) }
+    })()
+    return
+  }
+
+  // GET /api/governance/posture — principal hierarchy + scope-d policy status + escalation classes.
+  // Backs the GovernSurface "Principal Hierarchy" panel: lets the UI render which authority level is
+  // governing the current session and which action classes will require plan-mode approval in auto mode.
+  if (req.method === 'GET' && url.pathname === '/api/governance/posture') {
+    setCORSHeaders(res)
+    try {
+      const c = containmentState()
+      const configured = scopedConfigured()
+      // If scope-d is configured, load policy metadata (policyId + name) — fail gracefully if unreadable.
+      let policyId: string | null = null
+      let policyName: string | null = null
+      if (configured) {
+        try {
+          const meta = loadPolicyMeta()
+          if (meta) { policyId = meta.policyId; policyName = meta.name }
+        } catch { /* best-effort */ }
+      }
+      const posture = {
+        killSwitchArmed: c.killed,
+        killSwitchReason: c.killed ? (c.reason ?? 'armed') : null,
+        scopedConfigured: configured,
+        policyId,
+        policyName,
+        authorityHierarchy: [
+          { level: 'root',      label: 'Kill-switch',     description: 'Hard halt — agent cannot respond when armed', active: c.killed },
+          { level: 'system',    label: 'SCOPE-D Policy',  description: 'EngagementPolicy governs egress routing and action authorization', active: configured },
+          { level: 'developer', label: 'Capability gate', description: 'Built-in tool authorization and broadly-safe pre-dispatch checklist', active: true },
+          { level: 'user',      label: 'Policy profile',  description: 'User-selected mode: default / strict / permissive', active: true },
+          { level: 'guideline', label: 'Defaults',        description: 'Read-only and synthetic_event baseline — always allowed', active: true },
+        ],
+        escalationActionClasses: ['destructive_action', 'deployment', 'credential_access', 'identity_write'],
+        escalationNote: 'These action classes require switching to plan mode in auto mode before any tool with this class can execute.',
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(posture))
+    } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'failed' })) }
+    return
+  }
+
+  // POST /api/governance/policy — write / replace the SCOPE-D EngagementPolicy JSON on disk.
+  // Requires SCOPED_ENGAGEMENT_POLICY env var to point to a writable path. Fail-open if unconfigured.
+  if (req.method === 'POST' && url.pathname === '/api/governance/policy') {
+    setCORSHeaders(res)
+    ;(async () => {
+      try {
+        const policyPath = process.env['SCOPED_ENGAGEMENT_POLICY']
+        if (!policyPath) {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'SCOPED_ENGAGEMENT_POLICY not configured — set the env var to a writable path first' }))
+          return
+        }
+        const raw = await readBody(req)
+        let policy: Record<string, unknown>
+        try { policy = JSON.parse(raw) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        if (typeof policy['policyId'] !== 'string' || !policy['policyId'] || typeof policy['name'] !== 'string' || !policy['name']) {
+          res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'policyId and name required' })); return
+        }
+        const { writeFileSync, mkdirSync } = await import('fs')
+        const { dirname } = await import('path')
+        mkdirSync(dirname(policyPath), { recursive: true })
+        writeFileSync(policyPath, JSON.stringify(policy, null, 2), 'utf8')
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ saved: true, policyId: policy['policyId'] as string }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'write failed' })) }
     })()
     return
   }
@@ -10698,8 +10984,20 @@ Question: ${question}`
         const source = typeof p['source'] === 'string' ? p['source'] : 'import'
         if (!text) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'text required' })); return }
         const memories = parseMemoryExport(text, source)
+        const dryRun = p['dry_run'] === true
+        let imported = 0
+        if (!dryRun) {
+          const { ingestDocument } = await import('./lib/doc-store.js')
+          for (const m of memories) {
+            try {
+              const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+              await ingestDocument(`memory/import-${source}-${stamp}-${m.index}.md`, m.text)
+              imported++
+            } catch { /* skip failed imports */ }
+          }
+        }
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ memories, count: memories.length, executionPerformed: false }))
+        res.end(JSON.stringify({ memories, count: memories.length, imported: dryRun ? 0 : imported, executionPerformed: !dryRun }))
       } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
@@ -13127,7 +13425,7 @@ Question: ${question}`
         const results = await raptorRetrieve(tree, query, topK)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ results, count: results.length }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13146,7 +13444,7 @@ Question: ${question}`
         const result = await tieredGround(question)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ result }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13183,7 +13481,7 @@ Question: ${question}`
         if (action === 'release') { releaseClaims(store, agentId, paths); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ released: true })); return }
         if (action === 'brief') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ brief: coordinationBrief(store, agentId) })); return }
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ active: activeClaims(store) }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13210,7 +13508,7 @@ Question: ${question}`
         if (!key) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'key required' })); return }
         bb.write(key, p['value'], by)
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ version: bb.version(key) }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13229,7 +13527,7 @@ Question: ${question}`
         const lesson = await remediateFailure(failure)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ lesson }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13257,7 +13555,7 @@ Question: ${question}`
         const result = await teacherStudentRefine(trajectory, deps, { maxRounds })
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ result }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13290,7 +13588,7 @@ Question: ${question}`
         const turn = p['turn'] as import('./lib/session-graph.js').TurnInput | undefined
         if (turn) recordTurnAtom(store, turn)
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13311,7 +13609,7 @@ Question: ${question}`
         const hits = await studyBrainRetrieve(query, fields, topK)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ hits, count: hits.length }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13336,7 +13634,7 @@ Question: ${question}`
         else output = await generateBriefing(sources, gen)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ output, type }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13353,9 +13651,211 @@ Question: ${question}`
         const { generateAudioScript } = await import('./lib/study-outputs.js')
         const gen = (prompt: string) => generateOllamaText({ model: 'qwen3:14b', messages: [{ role: 'user', content: prompt }], temperature: 0.5 }).then((r) => r.content)
         const turns = await generateAudioScript(sources, gen, format)
+        // synthesize=1: TTS each turn via OpenAI TTS (nova for Host, echo for Guest); requires OPENAI_API_KEY.
+        // Returns {turns: [{speaker, line, audio_b64?}]}; audio_b64 is undefined if key absent or call fails.
+        const synthesize = url.searchParams.get('synthesize') === '1'
+        const VOICE_MAP: Record<string, string> = { Host: url.searchParams.get('voice_host') ?? 'nova', Guest: url.searchParams.get('voice_guest') ?? 'echo' }
+        const withAudio = await Promise.all(turns.map(async (t) => {
+          if (!synthesize) return t
+          try {
+            const key = process.env['OPENAI_API_KEY']
+            if (!key) return t
+            const oaiRes = await fetch('https://api.openai.com/v1/audio/speech', {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ model: 'tts-1', input: t.line.slice(0, 4096), voice: VOICE_MAP[t.speaker] ?? 'nova', response_format: 'mp3' }),
+            })
+            if (!oaiRes.ok) return t
+            const buf = await oaiRes.arrayBuffer()
+            return { ...t, audio_b64: Buffer.from(buf).toString('base64') }
+          } catch { return t }
+        }))
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ turns }))
+        res.end(JSON.stringify({ turns: withAudio, synthesized: synthesize && !!process.env['OPENAI_API_KEY'] }))
       } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── RAPTOR tree — recursive abstractive tree over document corpus ────────────────
+  if ((req.method === 'POST' || req.method === 'GET') && url.pathname === '/api/ingest/raptor') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { buildRaptorTree, treeStats } = await import('./lib/raptor.js')
+        const { embedText: et } = await import('./lib/ollama.js')
+        const g = getHellGraph()
+        const CHUNK_LABEL = 'DocumentChunk'
+        const RAPTOR_LABEL = 'RaptorSummary'
+        if (req.method === 'GET') {
+          const summaries = g.nodesByLabel(RAPTOR_LABEL)
+          const leafChunks = g.nodesByLabel(CHUNK_LABEL).filter((n) => !n.properties['raptor_level'])
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ leaves: leafChunks.length, summaries: summaries.length, raptorReady: summaries.length > 0 }))
+          return
+        }
+        const leaves = g.nodesByLabel(CHUNK_LABEL).filter((n) => !n.properties['raptor_level'] && n.properties['text'])
+        if (leaves.length < 4) {
+          res.writeHead(409, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'too_few_chunks', needed: 4, have: leaves.length }))
+          return
+        }
+        const embedder = async (texts: string[]) => {
+          const out: number[][] = []
+          for (const t of texts) { try { out.push(await et(t)) } catch { out.push([]) } }
+          return out
+        }
+        const summarizer = async (texts: string[]) => {
+          try {
+            const joined = texts.map((t, i) => `[${i + 1}] ${t.slice(0, 800)}`).join('\n\n')
+            const r = await generateOllamaText({ model: 'qwen3:14b', messages: [{ role: 'user', content: `Concisely summarize the key ideas from these excerpts in 3–5 sentences:\n\n${joined}` }], temperature: 0.3 })
+            return r.content.trim()
+          } catch { return texts.join(' ').slice(0, 600) }
+        }
+        const texts = leaves.map((n) => String(n.properties['text']))
+        const tree = await buildRaptorTree(texts, embedder, summarizer, { maxLevels: 3, maxClusterSize: 6 })
+        let stored = 0
+        for (const [id, node] of tree.nodes) {
+          if (node.level === 0) continue
+          if (!node.embedding.length) continue
+          const nodeId = `urn:noetica:raptor:${id}`
+          const emb = JSON.stringify(node.embedding)
+          g.addNode(nodeId, [CHUNK_LABEL, RAPTOR_LABEL], {
+            text: node.text, embedding: emb, raptor_level: node.level,
+            child_ids: JSON.stringify(node.childIds), filename: `raptor:level${node.level}`,
+            doc_id: nodeId, idx: 0, created_at: new Date().toISOString(),
+          })
+          stored++
+        }
+        const stats = treeStats(tree)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, leaves: stats.leaves, summaries: stats.summaries, levels: stats.levels, stored }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Audio Overview Call-in — listener asks the Host a live question ──────────────
+  if (req.method === 'POST' && url.pathname === '/api/study/audio-overview/callin') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: { question?: string; context_turns?: Array<{ speaker: string; line: string }>; voice_host?: string; synthesize?: boolean } = {}
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const question = typeof p.question === 'string' ? p.question.trim() : ''
+        if (!question) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'question required' })); return }
+        const contextTurns = Array.isArray(p.context_turns) ? p.context_turns.slice(-6) : []
+        const contextText = contextTurns.map((t) => `${t.speaker}: ${t.line}`).join('\n')
+        const prompt = [
+          'You are the Host in an ongoing audio discussion. A listener has called in with a question.',
+          contextText ? `Here is the recent discussion context:\n${contextText}` : '',
+          `Listener question: "${question}"`,
+          'Give a direct, conversational Host reply (2–4 sentences). Stay in the same topic and tone as the discussion. Do not repeat "Host:" — just give the reply text.',
+        ].filter(Boolean).join('\n\n')
+        const answer = await generateOllamaText({ model: 'qwen3:14b', messages: [{ role: 'user', content: prompt }], temperature: 0.5 }).then((r) => r.content.trim())
+        const synthesize = p.synthesize === true
+        const voiceHost = typeof p.voice_host === 'string' ? p.voice_host : 'nova'
+        async function synthTTS(line: string, voice: string): Promise<string | undefined> {
+          if (!synthesize) return undefined
+          const key = process.env['OPENAI_API_KEY']
+          if (!key) return undefined
+          try {
+            const oaiRes = await fetch('https://api.openai.com/v1/audio/speech', {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ model: 'tts-1', input: line.slice(0, 4096), voice, response_format: 'mp3' }),
+            })
+            if (!oaiRes.ok) return undefined
+            return Buffer.from(await oaiRes.arrayBuffer()).toString('base64')
+          } catch { return undefined }
+        }
+        const [guestAudio, hostAudio] = await Promise.all([synthTTS(question, 'echo'), synthTTS(answer, voiceHost)])
+        const turns = [
+          { speaker: 'Guest', line: question, ...(guestAudio ? { audio_b64: guestAudio } : {}) },
+          { speaker: 'Host', line: answer, ...(hostAudio ? { audio_b64: hostAudio } : {}) },
+        ]
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ turns, synthesized: synthesize && !!process.env['OPENAI_API_KEY'] }))
+      } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // ── Geo / H3 — spatial cell index, co-location detection, emerging hotspots ────
+  if (req.method === 'POST' && url.pathname === '/api/geo/cells') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { cellId, cellCenter, aggregateByCell, kRing } = await import('./lib/geo-cells.js')
+        const action = typeof p['action'] === 'string' ? p['action'] : 'aggregate'
+        const res2 = res
+        if (action === 'cell') {
+          const lon = Number(p['lon'] ?? 0), lat = Number(p['lat'] ?? 0), resolution = typeof p['res'] === 'number' ? p['res'] : 0.01
+          res2.writeHead(200, { 'content-type': 'application/json' }); res2.end(JSON.stringify({ cell: cellId(lon, lat, resolution), center: cellCenter(cellId(lon, lat, resolution)) })); return
+        }
+        if (action === 'ring') {
+          const id = String(p['id'] ?? ''), k = typeof p['k'] === 'number' ? p['k'] : 1
+          res2.writeHead(200, { 'content-type': 'application/json' }); res2.end(JSON.stringify({ neighbors: kRing(id, k) })); return
+        }
+        const points = Array.isArray(p['points']) ? p['points'] as Array<{ lon: number; lat: number }> : []
+        if (!points.length) { res2.writeHead(400, { 'content-type': 'application/json' }); res2.end(JSON.stringify({ error: 'points required' })); return }
+        const resolution = typeof p['res'] === 'number' ? p['res'] : 0.01
+        const grouped = aggregateByCell(points, resolution)
+        const out = [...grouped.entries()].map(([cell, pts]) => ({ cell, count: pts.length, center: cellCenter(cell) })).sort((a, b) => b.count - a.count)
+        res2.writeHead(200, { 'content-type': 'application/json' }); res2.end(JSON.stringify({ cells: out, total: out.length }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/geo/colocation') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { findColocations } = await import('./lib/colocation.js')
+        const pings = Array.isArray(p['pings']) ? p['pings'] as import('./lib/colocation.js').Ping[] : []
+        if (!pings.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'pings required' })); return }
+        const opts = {
+          res:         typeof p['res']         === 'number' ? p['res']         : undefined,
+          windowMs:    typeof p['windowMs']    === 'number' ? p['windowMs']    : undefined,
+          minMeetings: typeof p['minMeetings'] === 'number' ? p['minMeetings'] : undefined,
+        }
+        const colocations = findColocations(pings, opts)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ colocations, count: colocations.length }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/geo/hotspots') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const { emergingHotspots } = await import('./lib/geo-anomaly.js')
+        const events = Array.isArray(p['events']) ? p['events'] as import('./lib/geo-anomaly.js').GeoEvent[] : []
+        if (!events.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'events required' })); return }
+        const now = typeof p['now'] === 'number' ? p['now'] : Date.now()
+        const opts = {
+          now,
+          windowMs: typeof p['windowMs'] === 'number' ? p['windowMs'] : undefined,
+          res:      typeof p['res']      === 'number' ? p['res']      : undefined,
+          minZ:     typeof p['minZ']     === 'number' ? p['minZ']     : undefined,
+        }
+        const hotspots = emergingHotspots(events, opts)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ hotspots, count: hotspots.length }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13371,7 +13871,7 @@ Question: ${question}`
         const { portfolio, transcript } = buildK12Portfolio(learnerId)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ profile, portfolio, transcript }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13386,7 +13886,7 @@ Question: ${question}`
         const prices = await fetchAzurePricing(region)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ prices, count: prices.length, providers: [...new Set(prices.map((p) => p.provider))] }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13417,7 +13917,7 @@ Question: ${question}`
         const result = await persistKnowledge(store, root, { nodes, edges } as import('./lib/knowledge-graph.js').KGraph)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ ...result, stored: { nodes: kpNodes, edges: kpEdges } }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -13433,7 +13933,7 @@ Question: ${question}`
         const brief     = buildLearnerBrief(learnerId)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ profile, brief }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15535,7 +16035,7 @@ Question: ${question}`
         const key = loadOrCreateDeviceKey()
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ fingerprint: key.fingerprint, publicKeyPem: key.publicKeyPem }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15548,7 +16048,7 @@ Question: ${question}`
         const { brainHome, academicBrainDir, opsBrainFile, opsBrainDir } = await import('./lib/brain-home.js')
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ brainHome: brainHome(), academicBrainDir: academicBrainDir(), opsBrainDir: opsBrainDir(), opsBrainFile: opsBrainFile() }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15566,7 +16066,7 @@ Question: ${question}`
         const connId = typeof p['connectorId'] === 'string' ? p['connectorId'] : 'manual'
         const run = await runConnector(manualConnector(connId, docs))
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ run }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15580,7 +16080,7 @@ Question: ${question}`
         const root = loadOrCreateRoot()
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ rootLen: root.length, alias: scopeAlias(root, url.searchParams.get('scopeId') ?? 'default', url.searchParams.get('domain') ?? 'noetica') }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15598,7 +16098,7 @@ Question: ${question}`
         const facet = deriveScope(loadOrCreateRoot(), scopeId)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ scopeId, publicKeyHex: facet.publicKeyRaw.toString('hex'), pseudonym: facet.pseudonym }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15613,7 +16113,7 @@ Question: ${question}`
         if (!g['__oidcKey']) g['__oidcKey'] = generateSigningKey()
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify(jwks(g['__oidcKey'] as import('./lib/sovereign-oidc.js').SigningKey)))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15632,7 +16132,7 @@ Question: ${question}`
         if (!claims) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'claims required' })); return }
         const token = await issueIdToken(g['__oidcKey'] as import('./lib/sovereign-oidc.js').SigningKey, claims as never)
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ token }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15651,7 +16151,7 @@ Question: ${question}`
         if (!plaintext) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'plaintext required' })); return }
         const blob = sealForScope(loadOrCreateRoot(), typeof p['scopeId'] === 'string' ? p['scopeId'] : 'default', plaintext)
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ blob }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15669,7 +16169,7 @@ Question: ${question}`
         if (!blob) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'blob required' })); return }
         const plaintext = openForScope(loadOrCreateRoot(), typeof p['scopeId'] === 'string' ? p['scopeId'] : 'default', blob).toString('utf8')
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ plaintext }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15692,7 +16192,7 @@ Question: ${question}`
         if (items.length) { idx.addMany(items.map((i) => ({ id: i.id, vec: new Float32Array(i.vec) }))); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ added: items.length, size: idx.size() })); return }
         if (id && vec.length) { idx.add(id, new Float32Array(vec)); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ added: 1, size: idx.size() })); return }
         res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'items or id+vec required' }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15712,7 +16212,7 @@ Question: ${question}`
         const k = typeof p['k'] === 'number' ? p['k'] : 6
         if (!query) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'query vector required' })); return }
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ results: idx.search(query, k), size: idx.size() }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15726,7 +16226,7 @@ Question: ${question}`
         const binary = resolveManagedOllamaBinary()
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ ready: runtimeComplete(binary ?? undefined), binary, port: MANAGED_PORT }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15741,7 +16241,7 @@ Question: ${question}`
         const { provisionOllamaRuntime } = await import('./lib/managed-ollama.js')
         const binary = await provisionOllamaRuntime(typeof p['version'] === 'string' ? p['version'] : undefined)
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ binary, provisioned: binary !== null }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15760,7 +16260,7 @@ Question: ${question}`
         if (!text) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'text required' })); return }
         const gen = (prompt: string) => generateOllamaText({ model: 'qwen3:14b', messages: [{ role: 'user', content: prompt }], temperature: 0.2 }).then((r) => r.content)
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ result: await extractKnowledgeGraph(text, source, gen) }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15776,7 +16276,7 @@ Question: ${question}`
         if (!q) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'q required' })); return }
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ route: canonRoute(q), lookup: canonLookup(q, kind ?? undefined) }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15793,7 +16293,7 @@ Question: ${question}`
         const pings = Array.isArray(p['pings']) ? p['pings'] as import('./lib/colocation.js').Ping[] : []
         if (!pings.length) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'pings required' })); return }
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ colocations: findColocations(pings, p['opts'] as never) }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15814,7 +16314,7 @@ Question: ${question}`
         const threshold = calibrateThreshold(calib, alpha)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ threshold, coverage: coverageAt(calib, threshold), abstain: score !== undefined ? shouldAbstain(score, threshold) : undefined }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15831,7 +16331,7 @@ Question: ${question}`
         const inp = p['input'] as import('./lib/council.js').LearnedInput | undefined
         if (!inp) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'input required' })); return }
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ result: learnedCouncilVote(inp) }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15853,7 +16353,7 @@ Question: ${question}`
         const vote = await cragVote(async () => { const c = candidates[ci % candidates.length]!; ci++; return c }, (r) => r.trim() || null, k)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ vote, shouldRetrieve: gateShouldRetrieve(vote.agree), accept: acceptRetrievedAnswer(vote.agree, vote.agree) }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15871,7 +16371,7 @@ Question: ${question}`
         if (!question || !answer) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'question and answer required' })); return }
         const artifact = crystallizeAnswer({ question: String(question), answer: String(answer), session: String(session ?? ''), action: String(action ?? ''), attestation: String(attestation ?? ''), worth: Number(worth ?? 0.8) })
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ artifact, count: artifactCount() }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15884,7 +16384,7 @@ Question: ${question}`
         const q = url.searchParams.get('q') ?? ''
         if (!q) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'q required' })); return }
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ hit: recallArtifact(q), count: artifactCount() }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15928,7 +16428,7 @@ Question: ${question}`
         if (action === 'backdoor')  { const from = String(p['from'] ?? ''); const to = String(p['to'] ?? ''); const adjSet = Array.isArray(p['adjustmentSet']) ? p['adjustmentSet'] as string[] : []; res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(backdoorCriterion(dag, from, to, adjSet))); return }
         if (action === 'iv')        { const iv = String(p['iv'] ?? ''); const treat = String(p['treatment'] ?? ''); const out = String(p['outcome'] ?? ''); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(ivValidity(dag, iv, treat, out))); return }
         res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'unknown action' }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15949,7 +16449,7 @@ Question: ${question}`
         const ranked = rerankLate(queryVecs, docs, topK)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ ranked, count: ranked.length }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15968,7 +16468,7 @@ Question: ${question}`
         const result = majorityVote(answers)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify(result))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -15992,7 +16492,7 @@ Question: ${question}`
         const decision   = state ? decideAnswer(state) : null
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ clusters: clusters.length, entropy, normalizedEntropy: normEnt, coverage, decision }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -16015,7 +16515,7 @@ Question: ${question}`
         const paths = beamTraverse(adj, seeds, (path) => path.score, { beam, depth })
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ paths, count: paths.length }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -16045,7 +16545,7 @@ Question: ${question}`
         if (action === 'edit')     { const edits = p['edits'] as Parameters<typeof editPlan>[1]; const updated = editPlan(plan, edits); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ plan: updated, next: nextStep(updated), canExecute: canExecute(updated) })); return }
         if (action === 'complete') { const id = Number(p['id'] ?? 0); const updated = completeStep(plan, id); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ plan: updated, next: nextStep(updated), canExecute: canExecute(updated) })); return }
         res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'unknown action' }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -16067,7 +16567,7 @@ Question: ${question}`
         const evalCase = captureFailure(trace, Date.now(), minCoverage !== undefined ? { minCoverage } : {})
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ case: evalCase, captured: evalCase !== null }))
-      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error', detail: String(e) })) }
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
   }
@@ -16107,6 +16607,23 @@ Question: ${question}`
           registerPartner(body)
           res.writeHead(201, { 'content-type': 'application/json' })
           res.end(JSON.stringify({ registered: body.id }))
+          return
+        }
+
+        // POST /api/partner/vouch — attested tier upgrade. Requires the vouching operator to be verified or sovereign.
+        if (req.method === 'POST' && url.pathname === '/api/partner/vouch') {
+          const { readBody: rb } = await import('./lib/read-body.js')
+          const vb = JSON.parse(await rb(req)) as { from?: string; for?: string; tier?: string }
+          if (!vb.from || !vb.for) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'from and for required' })); return }
+          const targetTier = vb.tier === 'sovereign' ? 'sovereign' as const : 'verified' as const
+          const voucher = getPartner(vb.from)
+          if (!voucher) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'vouching operator not found' })); return }
+          if (voucher.tier === 'community') { res.writeHead(403, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'vouching operator must be verified or sovereign' })); return }
+          const target = getPartner(vb.for)
+          if (!target) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'target operator not found' })); return }
+          registerPartner({ ...target, tier: targetTier })
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, vouched: vb.for, tier: targetTier, by: vb.from }))
           return
         }
 
@@ -16430,6 +16947,7 @@ server.listen(PORT, BIND_HOST, () => {
     loadLearningState()
     loadContainment()
     loadAutonomy()
+    noeticaBootEvidence() // governance-file health + autonomy-bind state onto the governed lane
     booted = true // teardown() may now persist learning state on exit
     recordTrendSnapshot() // capture/refresh today's point on boot
     // Embed-model preflight: document RAG depends on the embedding model. Warn loudly

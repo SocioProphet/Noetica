@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { amUrl } from '@/lib/tauri/bridge'
 
 /**
  * AlignmentSurface — "does what I just read align with my brain?" Paste a news article / claim; each sentence
@@ -27,7 +28,7 @@ const VERDICT: Record<Claim['verdict'], { label: string; bar: string; chip: stri
 
 const SAMPLE = 'Noetica is a local-first sovereign AI desktop. The graph store is called HellGraph. It runs entirely in the cloud and requires Google Workspace to function.'
 
-export function AlignmentSurface() {
+export function AlignmentSurface({ onNavigateToGovern }: { onNavigateToGovern?: () => void } = {}) {
   const [text, setText] = useState('')
   const [report, setReport] = useState<Report | null>(null)
   const [loading, setLoading] = useState(false)
@@ -37,7 +38,7 @@ export function AlignmentSurface() {
     if (!text.trim()) return
     setLoading(true); setErr(''); setReport(null)
     try {
-      const r = await fetch('/api/cap/align-check', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }) })
+      const r = await fetch(amUrl('/api/cap/align-check'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }) })
       if (!r.ok) throw new Error(`align ${r.status}`)
       setReport(await r.json() as Report)
     } catch (e) { setErr(e instanceof Error ? e.message : 'alignment failed — is the backend running?') }
@@ -49,7 +50,15 @@ export function AlignmentSurface() {
 
   return (
     <div className="flex h-full flex-col overflow-y-auto px-8 py-6">
-      <div className="mb-1 text-lg font-semibold text-[var(--color-text-primary)]">Alignment</div>
+      <div className="mb-1 flex items-center justify-between">
+        <div className="text-lg font-semibold text-[var(--color-text-primary)]">Alignment</div>
+        {onNavigateToGovern && (
+          <button onClick={onNavigateToGovern} className="flex items-center gap-1.5 rounded-full border border-[var(--color-border-secondary)] px-3 py-1 text-[11px] text-[var(--color-text-secondary)] transition hover:border-[#1d4ed8] hover:text-[#1d4ed8]">
+            <span className="h-1.5 w-1.5 rounded-full bg-[#1d4ed8]" />
+            View governance posture
+          </button>
+        )}
+      </div>
       <p className="mb-4 max-w-2xl text-xs text-[var(--color-text-secondary)]">Paste a news article or a set of claims. Each sentence is checked against your brain — ingested documents + chat docs — and labeled <span className="font-medium text-[#16a34a]">corroborated</span>, <span className="font-medium text-[#dc2626]">conflicting</span>, or <span className="font-medium text-[#2563eb]">novel</span>, with the source it agrees or conflicts with.</p>
 
       <textarea

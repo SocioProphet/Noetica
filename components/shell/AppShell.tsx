@@ -51,6 +51,7 @@ import { GovernPanel } from '@/components/panels/GovernPanel'
 import { SettingsModal } from '@/components/settings/SettingsModal'
 import { ProviderSetupModal } from '@/components/shell/ProviderSetupModal'
 import { ModelSetupOverlay } from '@/components/setup/ModelSetupOverlay'
+import { CitizenOnboardingWizard } from '@/components/shell/CitizenOnboardingWizard'
 import { CommandPalette } from '@/components/palette/CommandPalette'
 import { models, visibleModels, providersWithKeys, defaultModelId } from '@/config/models'
 import { initialMessages } from '@/lib/chat/mockConversation'
@@ -83,6 +84,7 @@ import type { ModelConfig } from '@/lib/types/model'
 import type { GovernanceTrace } from '@/lib/types/governance'
 import type { ProviderTool, ToolUseBlock } from '@/lib/providers'
 import { mcpManager } from '@/lib/mcp/client'
+import { amUrl } from '@/lib/tauri/bridge'
 
 const SURFACE_ORDER: ActiveSurface[] = ['chat', 'notes', 'canvas', 'workrooms', 'cowork', 'projects', 'artifacts', 'code', 'evaluate', 'operate', 'computer']
 
@@ -330,9 +332,20 @@ export function AppShell() {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [providerSetupOpen, setProviderSetupOpen] = useState(false)
   const [showSetup, setShowSetup] = useState(false)
+  const [showCitizenOnboarding, setShowCitizenOnboarding] = useState(false)
   const [rawEventLog, setRawEventLog] = useState<Array<{ ts: string; kind: string; payload: unknown }>>([])
   const rawEventLogRef = useRef(rawEventLog)
   rawEventLogRef.current = rawEventLog
+
+  // Citizen first-run onboarding: show once, after the infrastructure setup modals
+  // (provider keys / model download) have had a chance to appear. Triggered by absence
+  // of the `noetica:citizen:onboarded` key — independent of whether the user has a name set.
+  useEffect(() => {
+    if (localStorage.getItem('noetica:citizen:onboarded') === '1') return
+    // Small delay so infrastructure modals (provider/model) appear first if needed
+    const t = setTimeout(() => setShowCitizenOnboarding(true), 800)
+    return () => clearTimeout(t)
+  }, [])
 
   // Show provider setup on first load when no keys configured AND not in local-first mode
   useEffect(() => {
@@ -443,6 +456,7 @@ export function AppShell() {
   }
 
   const voiceReplyRef = useRef(false)
+  const c2paCredRef = useRef<import('@/lib/types/governance').GovernanceTrace['credential']>(undefined)
   // Stable callback reference — must be memoized to avoid recreating `startListening` on every
   // render, which would retrigger the wake-word useEffect and cause a rapid restart loop.
   const handleVoiceTranscript = useCallback((transcript: string) => {
@@ -774,7 +788,7 @@ export function AppShell() {
       autoTitle(content)
       setMessages((cur) => { const next = [...cur, u, a]; updateMessages(next); return next })
       try {
-        const r = await fetch('/api/research/solve', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question: q }) })
+        const r = await fetch(amUrl('/api/research/solve'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question: q }) })
         const j = (await r.json()) as { answer?: string; grounded?: boolean; score?: number; sources?: { n: number; filename: string }[] }
         const pct = Math.round((j.score ?? 0) * 100)
         const badge = j.grounded ? `✅ Grounded (${pct}%)` : `⚠️ Partially grounded (${pct}%) — treat with care`
@@ -1087,6 +1101,7 @@ export function AppShell() {
           },
           {
             onMeta: (governance) => {
+              c2paCredRef.current = undefined
               updateAssistant(assistantId, { governance })
               if (settings.showRawEvents) {
                 setRawEventLog((prev) => [{ ts: new Date().toISOString(), kind: 'meta', payload: governance }, ...prev].slice(0, 80))
@@ -1135,6 +1150,7 @@ export function AppShell() {
                 setRawEventLog((prev) => [{ ts: new Date().toISOString(), kind: 'deliberation', payload: d }, ...prev].slice(0, 80))
               }
             },
+            onC2PACredential: (credential) => { if (credential) c2paCredRef.current = credential },
             // Live todo checklist (the AM streams plan + step events; render them as a checklist).
             onPlan: (plan) => updateAssistant(assistantId, { plan }),
             onStep: (step) => mergePlanStep(assistantId, step),
@@ -1193,6 +1209,7 @@ export function AppShell() {
                   ...(result.grounded !== undefined ? { grounded: result.grounded } : {}),
                   ...(result.decidable !== undefined ? { decidable: result.decidable } : {}),
                   ...(result.replay_class !== undefined ? { replay_class: result.replay_class } : {}),
+                  ...(c2paCredRef.current ? { credential: c2paCredRef.current } : {}),
                 },
                 steering_result: result.steering_applied,
                 // The moat made visible — verification badge + inline citations from the done event.
@@ -1488,6 +1505,14 @@ export function AppShell() {
           }}
         />
       )}
+      {showCitizenOnboarding && !showSetup && !providerSetupOpen && (
+        <CitizenOnboardingWizard
+          onComplete={(name) => {
+            setShowCitizenOnboarding(false)
+            if (name) updateSettings({ userName: name })
+          }}
+        />
+      )}
       <main className="flex h-screen overflow-hidden bg-[var(--color-background-tertiary)] text-[var(--color-text-primary)]">
         {/* Tier 1 — command-center (domain) switcher */}
         <CommandCenterRail activeCenter={activeCenter} onCenterChange={handleCenterChange} />
@@ -1574,9 +1599,10 @@ export function AppShell() {
                 onAtomSelect={(query) => { setActiveSurface('chat'); void handleSend(query, []) }}
                 onOpenSettings={() => openSettings('connections')}
                 onNavigateToOperate={() => setActiveSurface('operate')}
+                onNavigateToGovern={() => setActiveSurface('govern')}
                 onSpeak={speak}
                 onFeedback={(messageId, rating) => {
-                  void fetch('/api/learning/feedback', {
+                  void fetch(amUrl('/api/learning/feedback'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ messageId, rating, sessionId: activeSession?.id }),
@@ -1786,6 +1812,7 @@ type CenterProps = {
   onAtomSelect?: (query: string) => void
   onOpenSettings?: () => void
   onNavigateToOperate?: () => void
+  onNavigateToGovern?: () => void
   onSpeak?: (content: string) => void
   onFeedback?: (messageId: string, rating: 'up' | 'down') => void
   agentMode?: 'auto' | 'plan' | 'ask'
@@ -1794,7 +1821,7 @@ type CenterProps = {
   onPlanReject?: (messageId: string) => void
 }
 
-function CenterWorkspace({ activeSurface, sessionId, messages, isStreaming, workspaceMode, fanoutModelCount, modelId, thinkingBudget, onSend, onFanout, onStop, onRegenerate, onResume, onFork, onEdit, onRecombine, onWorkspaceModeChange, onExtractArtifact, onModelChange, onOpenPalette, mcpTools, systemPrompt, onSystemPromptChange, activeArtifact, onCloseArtifact, onArtifactUpdate, onArtifactDelete, onAtomSelect, onOpenSettings, onNavigateToOperate, onSpeak, onFeedback, agentMode, onSetAgentMode, onPlanApprove, onPlanReject }: CenterProps) {
+function CenterWorkspace({ activeSurface, sessionId, messages, isStreaming, workspaceMode, fanoutModelCount, modelId, thinkingBudget, onSend, onFanout, onStop, onRegenerate, onResume, onFork, onEdit, onRecombine, onWorkspaceModeChange, onExtractArtifact, onModelChange, onOpenPalette, mcpTools, systemPrompt, onSystemPromptChange, activeArtifact, onCloseArtifact, onArtifactUpdate, onArtifactDelete, onAtomSelect, onOpenSettings, onNavigateToOperate, onNavigateToGovern, onSpeak, onFeedback, agentMode, onSetAgentMode, onPlanApprove, onPlanReject }: CenterProps) {
   if (activeSurface === 'notes')        return <NotesSurface />
   if (activeSurface === 'canvas')       return <CanvasSurface />
   if (activeSurface === 'workrooms')    return <TabbedWorkspace tabs={[
@@ -1813,7 +1840,7 @@ function CenterWorkspace({ activeSurface, sessionId, messages, isStreaming, work
     { id: 'studio', label: 'Prompt & Compare', render: () => <StudioSurface /> },
     { id: 'rag', label: 'RAG', render: () => <RagInspectSurface /> },
     { id: 'lab', label: 'Capabilities', render: () => <LabSurface /> },
-    { id: 'alignment', label: 'Alignment', render: () => <AlignmentSurface /> },
+    { id: 'alignment', label: 'Alignment', render: () => <AlignmentSurface onNavigateToGovern={onNavigateToGovern} /> },
   ]} />
   if (activeSurface === 'rag')          return <RagInspectSurface />
   if (activeSurface === 'lab')          return <LabSurface />
@@ -1824,7 +1851,7 @@ function CenterWorkspace({ activeSurface, sessionId, messages, isStreaming, work
     { id: 'holographme', label: 'HolographMe', render: () => <HolographMeSurface /> },
   ]} />
   if (activeSurface === 'broker')       return <CloudBrokerSurface />
-  if (activeSurface === 'alignment')    return <AlignmentSurface />
+  if (activeSurface === 'alignment')    return <AlignmentSurface onNavigateToGovern={onNavigateToGovern} />
   if (activeSurface === 'agents')       return <AgentBuilderSurface />
   if (activeSurface === 'library')      return <LibrarySurface />
   if (activeSurface === 'intelligence') return <IntelligenceSurface />

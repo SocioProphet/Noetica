@@ -129,8 +129,9 @@ interface MeshTrends {
 }
 
 interface LearningStats {
-  skills: { count: number; recent: Array<{ task: string; abstraction: string; steps: string[] }> }
+  skills: { count: number; due: number; recent: Array<{ task: string; abstraction: string; steps: string[] }> }
   evalCases: { count: number; recent: Array<{ input: string; failureMode: string; coverage: number }> }
+  experiences: { count: number }
   replay?: { total: number; fixed: number; stillFailing: number; fixedRate: number; ts: number } | null
 }
 
@@ -169,6 +170,26 @@ function amRunToAuditEvent(r: AgentMachineRun): AuditEvent {
 
 interface AuditAttestation { attested: boolean; entries: number; chainValid: boolean; signed: boolean; signatureValid: boolean; firstBreakAt?: number; fingerprint: string; headHash: string }
 
+interface HierarchyTier { level: string; label: string; description: string; active: boolean }
+interface GovernancePosture {
+  killSwitchArmed: boolean
+  killSwitchReason: string | null
+  scopedConfigured: boolean
+  policyId: string | null
+  policyName: string | null
+  authorityHierarchy: HierarchyTier[]
+  escalationActionClasses: string[]
+  escalationNote: string
+}
+
+const TIER_COLOR: Record<string, { dot: string; chip: string; label: string }> = {
+  root:      { dot: '#dc2626', chip: 'bg-[rgba(220,38,38,0.10)] text-[#dc2626]',   label: 'Root' },
+  system:    { dot: '#7c3aed', chip: 'bg-[rgba(124,58,237,0.10)] text-[#7c3aed]',  label: 'System' },
+  developer: { dot: '#1d4ed8', chip: 'bg-[rgba(29,78,216,0.10)] text-[#1d4ed8]',   label: 'Developer' },
+  user:      { dot: '#0891b2', chip: 'bg-[rgba(8,145,178,0.10)] text-[#0891b2]',   label: 'User' },
+  guideline: { dot: '#16a34a', chip: 'bg-[rgba(22,163,74,0.10)] text-[#16a34a]',   label: 'Guideline' },
+}
+
 export function GovernSurface({ recentTraces = [] }: { recentTraces?: RunTrace[] }) {
   const { settings, update: updateSettings } = useSettings()
   const [policyMode, setPolicyMode]   = useState<PolicyMode>(
@@ -192,6 +213,46 @@ export function GovernSurface({ recentTraces = [] }: { recentTraces?: RunTrace[]
   const [replaying, setReplaying]         = useState(false)
   const [audit, setAudit]                 = useState<AuditAttestation | null>(null)
   const [proposals, setProposals]         = useState<GraphProposal[]>([])
+  const [posture, setPosture]             = useState<GovernancePosture | null>(null)
+
+  // SCOPE-D policy editor
+  const ACTION_CLASSES = ['read','synthetic_event','dry_run','network_call','write','deployment','destructive_action','credential_access','memory_write','identity_write'] as const
+  const GATE_VALUES    = ['none','single_human','human_and_policy','human_and_policy_engine','frost_quorum'] as const
+  const AUTH_MODES     = ['read','write','synthetic_only'] as const
+  const [showPolicyEditor, setShowPolicyEditor] = useState(false)
+  const [pePolicyId,       setPePolicyId]       = useState('')
+  const [peName,           setPeName]           = useState('')
+  const [peTargets,        setPeTargets]        = useState('')
+  const [peModes,          setPeModes]          = useState<string[]>(['read'])
+  const [peRules,          setPeRules]          = useState<{ actionClass: string; requiredGate: string }[]>([{ actionClass: 'network_call', requiredGate: 'none' }])
+  const [peBlocked,        setPeBlocked]        = useState<string[]>([])
+  const [peExpires,        setPeExpires]        = useState('')
+  const [peSaving,         setPeSaving]         = useState(false)
+  const [peSaveMsg,        setPeSaveMsg]        = useState('')
+
+  async function savePolicy() {
+    setPeSaving(true); setPeSaveMsg('')
+    try {
+      const policy = {
+        policyId: pePolicyId.trim(),
+        name: peName.trim(),
+        authorizedTargets: peTargets.split('\n').map((t) => t.trim()).filter(Boolean),
+        authorizedModes: peModes,
+        approvalRules: peRules.filter((r) => r.actionClass),
+        blockedActions: peBlocked,
+        ...(peExpires ? { expiresAt: new Date(peExpires).toISOString() } : {}),
+      }
+      const r = await fetch(amUrl('/api/governance/policy'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(policy),
+      })
+      const d = await r.json() as { saved?: boolean; error?: string }
+      if (!r.ok) throw new Error(d.error ?? `save ${r.status}`)
+      setPeSaveMsg('Policy saved — restart agent-machine to activate.')
+    } catch (e) { setPeSaveMsg(e instanceof Error ? e.message : 'save failed') }
+    finally { setPeSaving(false) }
+  }
 
   const runReplay = () => {
     setReplaying(true)
@@ -243,6 +304,11 @@ export function GovernSurface({ recentTraces = [] }: { recentTraces?: RunTrace[]
     fetch(amUrl('/api/graph/proposals'), { signal: AbortSignal.timeout(3000) })
       .then(r => r.ok ? r.json() : null)
       .then((d: { proposals?: GraphProposal[] } | null) => { if (d?.proposals) setProposals(d.proposals.filter((p) => p.status === 'pending')) })
+      .catch(() => { /* not running — skip */ })
+    // Principal hierarchy + scope-d posture
+    fetch(amUrl('/api/governance/posture'), { signal: AbortSignal.timeout(3000) })
+      .then(r => r.ok ? r.json() : null)
+      .then((d: GovernancePosture | null) => { if (d) setPosture(d) })
       .catch(() => { /* not running — skip */ })
   }, [])
 
@@ -405,8 +471,149 @@ export function GovernSurface({ recentTraces = [] }: { recentTraces?: RunTrace[]
           </div>
         )}
 
+        {/* Principal hierarchy — which authority level governs this session */}
+        {posture && (
+          <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
+            <div className="mb-3 flex items-center justify-between">
+              <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[#1d4ed8]">Principal hierarchy</div>
+              {posture.scopedConfigured && posture.policyId && (
+                <span className="rounded-full bg-[rgba(124,58,237,0.10)] px-2.5 py-0.5 text-[10px] font-semibold text-[#7c3aed]" title={posture.policyName ?? undefined}>{posture.policyId.slice(0, 28)}</span>
+              )}
+              {!posture.scopedConfigured && (
+                <span className="rounded-full border border-[var(--color-border-tertiary)] px-2.5 py-0.5 text-[10px] text-[var(--color-text-tertiary)]">No SCOPE-D policy</span>
+              )}
+            </div>
+            <div className="space-y-2">
+              {posture.authorityHierarchy.map((tier, i) => {
+                const colors = TIER_COLOR[tier.level] ?? TIER_COLOR['guideline']
+                return (
+                  <div key={tier.level} className={`flex items-start gap-3 rounded-xl border p-3 transition ${tier.active ? 'border-[var(--color-border-secondary)]' : 'border-[var(--color-border-tertiary)] opacity-45'}`}>
+                    <div className="flex shrink-0 flex-col items-center pt-0.5">
+                      <div className="h-2.5 w-2.5 rounded-full" style={{ background: tier.active ? colors.dot : 'var(--color-text-tertiary)' }} />
+                      {i < posture.authorityHierarchy.length - 1 && <div className="mt-1 h-5 w-px bg-[var(--color-border-tertiary)]" />}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className={`rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide ${tier.active ? colors.chip : 'bg-[var(--color-background-secondary)] text-[var(--color-text-tertiary)]'}`}>{tier.level}</span>
+                        <span className="text-xs font-medium text-[var(--color-text-primary)]">{tier.label}</span>
+                        {!tier.active && <span className="text-[10px] text-[var(--color-text-tertiary)]">inactive</span>}
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-[var(--color-text-tertiary)]">{tier.description}</div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+            {/* Plan-mode escalation classes */}
+            <div className="mt-3 rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] p-3">
+              <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--color-text-tertiary)]">Requires plan mode in auto</div>
+              <div className="flex flex-wrap gap-1.5">
+                {posture.escalationActionClasses.map((cls) => (
+                  <span key={cls} className="rounded-full border border-[rgba(220,38,38,0.30)] bg-[rgba(220,38,38,0.06)] px-2 py-0.5 font-mono text-[10px] text-[#dc2626]">{cls}</span>
+                ))}
+              </div>
+              <div className="mt-1.5 text-[10px] text-[var(--color-text-tertiary)]">{posture.escalationNote}</div>
+            </div>
+          </div>
+        )}
+
+        {/* SCOPE-D engagement policy editor */}
+        <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
+          <div className="mb-3 flex items-center justify-between">
+            <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[#7c3aed]">Engagement Policy</div>
+            <button onClick={() => setShowPolicyEditor((v) => !v)}
+              className="rounded-full border border-[var(--color-border-tertiary)] px-2.5 py-0.5 text-[10px] text-[var(--color-text-secondary)] hover:bg-[var(--color-background-secondary)] transition">
+              {showPolicyEditor ? 'Hide editor' : 'Edit policy'}
+            </button>
+          </div>
+          <p className="text-[11px] text-[var(--color-text-tertiary)] leading-relaxed">
+            SCOPE-D EngagementPolicy governs agent egress routing, action authorization, and operator approval requirements.
+            {posture?.scopedConfigured ? ` Active: ${posture.policyName ?? posture.policyId ?? 'configured'}.` : ' No policy configured — agent runs without egress gating.'}
+          </p>
+          {showPolicyEditor && (
+            <div className="mt-4 space-y-3">
+              <div className="grid grid-cols-2 gap-2">
+                <label className="block">
+                  <span className="text-[10px] font-medium text-[var(--color-text-secondary)]">Policy ID</span>
+                  <input value={pePolicyId} onChange={(e) => setPePolicyId(e.target.value)} placeholder="my-policy" className="mt-0.5 block w-full rounded-lg border border-[var(--color-border-secondary)] bg-[var(--color-background-secondary)] px-2 py-1.5 text-[11px] text-[var(--color-text-primary)] outline-none focus:border-[#7c3aed]" />
+                </label>
+                <label className="block">
+                  <span className="text-[10px] font-medium text-[var(--color-text-secondary)]">Name</span>
+                  <input value={peName} onChange={(e) => setPeName(e.target.value)} placeholder="My engagement policy" className="mt-0.5 block w-full rounded-lg border border-[var(--color-border-secondary)] bg-[var(--color-background-secondary)] px-2 py-1.5 text-[11px] text-[var(--color-text-primary)] outline-none focus:border-[#7c3aed]" />
+                </label>
+              </div>
+
+              <label className="block">
+                <span className="text-[10px] font-medium text-[var(--color-text-secondary)]">Authorized egress targets <span className="font-normal text-[var(--color-text-tertiary)]">(one host per line; empty = unrestricted)</span></span>
+                <textarea value={peTargets} onChange={(e) => setPeTargets(e.target.value)} rows={3} placeholder={'api.anthropic.com\nbackend.composio.dev'} className="mt-0.5 block w-full resize-none rounded-lg border border-[var(--color-border-secondary)] bg-[var(--color-background-secondary)] px-2 py-1.5 text-[11px] text-[var(--color-text-primary)] outline-none focus:border-[#7c3aed] font-mono" />
+              </label>
+
+              <div>
+                <span className="text-[10px] font-medium text-[var(--color-text-secondary)]">Authorized modes</span>
+                <div className="mt-1 flex gap-3">
+                  {AUTH_MODES.map((m) => (
+                    <label key={m} className="flex items-center gap-1 cursor-pointer">
+                      <input type="checkbox" checked={peModes.includes(m)} onChange={(e) => setPeModes((ms) => e.target.checked ? [...ms, m] : ms.filter((x) => x !== m))} className="h-3 w-3 rounded" />
+                      <span className="text-[11px] text-[var(--color-text-secondary)]">{m}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[10px] font-medium text-[var(--color-text-secondary)]">Approval rules</span>
+                  <button type="button" onClick={() => setPeRules((rs) => [...rs, { actionClass: 'write', requiredGate: 'single_human' }])}
+                    className="text-[10px] text-[#7c3aed] hover:underline">+ Add rule</button>
+                </div>
+                <div className="space-y-1">
+                  {peRules.map((rule, i) => (
+                    <div key={i} className="flex items-center gap-1">
+                      <select value={rule.actionClass} onChange={(e) => setPeRules((rs) => rs.map((r, j) => j === i ? { ...r, actionClass: e.target.value } : r))}
+                        className="flex-1 rounded-lg border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] px-2 py-1 text-[10px] text-[var(--color-text-primary)] outline-none">
+                        {ACTION_CLASSES.map((ac) => <option key={ac} value={ac}>{ac}</option>)}
+                      </select>
+                      <select value={rule.requiredGate} onChange={(e) => setPeRules((rs) => rs.map((r, j) => j === i ? { ...r, requiredGate: e.target.value } : r))}
+                        className="flex-1 rounded-lg border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] px-2 py-1 text-[10px] text-[var(--color-text-primary)] outline-none">
+                        {GATE_VALUES.map((g) => <option key={g} value={g}>{g}</option>)}
+                      </select>
+                      {peRules.length > 1 && <button type="button" onClick={() => setPeRules((rs) => rs.filter((_, j) => j !== i))} className="text-[var(--color-text-tertiary)] hover:text-[#dc2626] px-1 text-xs">×</button>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <span className="text-[10px] font-medium text-[var(--color-text-secondary)]">Blocked actions</span>
+                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                  {ACTION_CLASSES.map((ac) => (
+                    <label key={ac} className="flex items-center gap-1 cursor-pointer">
+                      <input type="checkbox" checked={peBlocked.includes(ac)} onChange={(e) => setPeBlocked((bs) => e.target.checked ? [...bs, ac] : bs.filter((x) => x !== ac))} className="h-3 w-3 rounded" />
+                      <span className="text-[10px] text-[var(--color-text-secondary)] font-mono">{ac}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <label className="block">
+                <span className="text-[10px] font-medium text-[var(--color-text-secondary)]">Expires at <span className="font-normal text-[var(--color-text-tertiary)]">(leave blank = never)</span></span>
+                <input type="datetime-local" value={peExpires} onChange={(e) => setPeExpires(e.target.value)} className="mt-0.5 block rounded-lg border border-[var(--color-border-secondary)] bg-[var(--color-background-secondary)] px-2 py-1.5 text-[11px] text-[var(--color-text-primary)] outline-none focus:border-[#7c3aed]" />
+              </label>
+
+              {peSaveMsg && (
+                <div className={`rounded-lg px-3 py-2 text-[11px] ${peSaveMsg.includes('saved') ? 'border border-[#16a34a]/40 bg-[#16a34a]/5 text-[#16a34a]' : 'border border-[#fecaca] bg-[#fef2f2] text-[#dc2626]'}`}>{peSaveMsg}</div>
+              )}
+              <button type="button" onClick={() => void savePolicy()} disabled={peSaving || !pePolicyId.trim() || !peName.trim()}
+                className="rounded-xl bg-[#7c3aed] px-4 py-2 text-[11px] font-semibold text-white transition hover:bg-[#6d28d9] disabled:opacity-50">
+                {peSaving ? 'Saving…' : 'Save policy to disk'}
+              </button>
+              <p className="text-[10px] text-[var(--color-text-tertiary)]">Requires <code className="font-mono">SCOPED_ENGAGEMENT_POLICY</code> env var pointing to a writable JSON path. Restart agent-machine after saving.</p>
+            </div>
+          )}
+        </div>
+
         {/* Production-learning loop — what the agent has learned from real turns */}
-        {learning && (learning.skills.count > 0 || learning.evalCases.count > 0) && (
+        {learning && (learning.skills.count > 0 || learning.evalCases.count > 0 || (learning.experiences?.count ?? 0) > 0) && (
           <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
             <div className="flex items-center justify-between mb-3">
               <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[#1d4ed8]">Learning loop</div>
@@ -424,14 +631,23 @@ export function GovernSurface({ recentTraces = [] }: { recentTraces?: RunTrace[]
                 <div className="mt-0.5 text-[10px] text-[var(--color-text-tertiary)]">of your captured failures now pass ({Math.round(learning.replay.fixedRate * 100)}%)</div>
               </div>
             )}
-            <div className="grid grid-cols-2 gap-3 mb-3">
+            <div className="grid grid-cols-3 gap-3 mb-3">
               <div className="rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] p-3 text-center">
-                <div className="text-2xl font-semibold text-[#16a34a]">{learning.skills.count}</div>
-                <div className="mt-0.5 text-[10px] text-[var(--color-text-tertiary)]">Skills from successes</div>
+                <div className="flex items-center justify-center gap-1.5">
+                  <span className="text-2xl font-semibold text-[#16a34a]">{learning.skills.count}</span>
+                  {learning.skills.due > 0 && (
+                    <span className="rounded-full bg-[#1d4ed8] px-1.5 text-[9px] font-semibold text-white">{learning.skills.due}</span>
+                  )}
+                </div>
+                <div className="mt-0.5 text-[10px] text-[var(--color-text-tertiary)]">Skills{learning.skills.due > 0 ? ` · ${learning.skills.due} due` : ''}</div>
+              </div>
+              <div className="rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] p-3 text-center">
+                <div className="text-2xl font-semibold text-[#7c3aed]">{learning.experiences?.count ?? 0}</div>
+                <div className="mt-0.5 text-[10px] text-[var(--color-text-tertiary)]">Experiences</div>
               </div>
               <div className="rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] p-3 text-center">
                 <div className="text-2xl font-semibold text-[#d97706]">{learning.evalCases.count}</div>
-                <div className="mt-0.5 text-[10px] text-[var(--color-text-tertiary)]">Failures captured for replay</div>
+                <div className="mt-0.5 text-[10px] text-[var(--color-text-tertiary)]">Failures</div>
               </div>
             </div>
             {learning.skills.recent.length > 0 && (
