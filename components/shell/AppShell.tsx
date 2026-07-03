@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Sidebar } from '@/components/shell/Sidebar'
+import { useResizable } from '@/components/shell/useResizable'
+import { ResizeHandle } from '@/components/shell/ResizeHandle'
 import { Topbar } from '@/components/shell/Topbar'
 import { MessageList } from '@/components/chat/MessageList'
 import { GoalBanner } from '@/components/chat/GoalBanner'
@@ -297,6 +299,9 @@ export function AppShell() {
   const [rightSidebarCollapsed, setRightSidebarCollapsed] = useState(false)
   const [utilityPanel, setUtilityPanel] = useState<UtilityPanelId | null>('graph')
   const [inspectorVisible, setInspectorVisible] = useState(false)
+  // Draggable widths for the two shell panels (persisted; double-click seam to reset).
+  const leftPanel = useResizable({ storageKey: 'noetica.sidebar.width', initial: 224, min: 180, max: 420, side: 'left' })
+  const rightPanel = useResizable({ storageKey: 'noetica.inspector.width', initial: 320, min: 260, max: 640, side: 'right' })
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsCategory, setSettingsCategory] = useState('appearance')
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -1462,17 +1467,20 @@ export function AppShell() {
       )}
       <main className="flex h-screen overflow-hidden bg-[var(--color-background-tertiary)] text-[var(--color-text-primary)]">
         {!sidebarCollapsed && (
-          <Sidebar
-            activeSurface={activeSurface}
-            onSurfaceChange={handleSurfaceChange}
-            onOpenSettings={(cat) => openSettings(cat)}
-            sessions={sessions}
-            activeSessionId={activeSession?.id ?? null}
-            onSwitchSession={handleSwitchSession}
-            onRemoveSession={removeSession}
-            onNewChat={handleNewChat}
-            density={settings.sidebarDensity}
-          />
+          <div className="relative hidden h-full shrink-0 lg:flex" style={{ width: leftPanel.width }}>
+            <Sidebar
+              activeSurface={activeSurface}
+              onSurfaceChange={handleSurfaceChange}
+              onOpenSettings={(cat) => openSettings(cat)}
+              sessions={sessions}
+              activeSessionId={activeSession?.id ?? null}
+              onSwitchSession={handleSwitchSession}
+              onRemoveSession={removeSession}
+              onNewChat={handleNewChat}
+              density={settings.sidebarDensity}
+            />
+            <ResizeHandle resizable={leftPanel} ariaLabel="Resize sidebar" />
+          </div>
         )}
         {sidebarCollapsed && (
           <CollapsedRail
@@ -1506,13 +1514,8 @@ export function AppShell() {
           />
 
           <div className="flex min-h-0 flex-1 overflow-hidden">
-            <div
-              className={`grid min-h-0 flex-1 ${
-                inspectorVisible
-                  ? 'grid-cols-1 lg:grid-cols-[minmax(0,1fr)_280px]'
-                  : 'grid-cols-1'
-              }`}
-            >
+            <div className="flex min-h-0 flex-1 overflow-hidden">
+              <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
               <SurfaceErrorBoundary key={activeSurface} surface={activeSurface}>
               <CenterWorkspace
                 activeSurface={activeSurface}
@@ -1559,8 +1562,11 @@ export function AppShell() {
                 onPlanReject={handlePlanReject}
               />
               </SurfaceErrorBoundary>
+              </div>
               {inspectorVisible && (
-                <div className="relative h-full">
+                <>
+                  <ResizeHandle resizable={rightPanel} ariaLabel="Resize inspector" />
+                <div className="relative hidden h-full shrink-0 overflow-hidden lg:block" style={{ width: rightPanel.width }}>
                   {/* Visible close — the inspector ("Open Observatory" target) was only dismissable via ⌘I. */}
                   <button
                     onClick={() => setInspectorVisible(false)}
@@ -1585,6 +1591,7 @@ export function AppShell() {
                     onMaxTokensChange={setMaxTokens}
                   />
                 </div>
+                </>
               )}
             </div>
           </div>
