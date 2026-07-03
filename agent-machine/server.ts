@@ -7770,6 +7770,25 @@ Question: ${question}`
     return
   }
 
+  // POST /api/search — local (lampstand) + platform (sherlock) search { query, scope: local|platform|all }.
+  if (req.method === 'POST' && url.pathname === '/api/search') {
+    setCORSHeaders(res)
+    let sbody = ''
+    req.on('data', (c: Buffer) => { sbody += c.toString() })
+    req.on('end', () => { void (async () => {
+      try {
+        const { search } = await import('./lib/search-broker.js')
+        const { query, scope } = JSON.parse(sbody || '{}') as { query?: string; scope?: 'local' | 'platform' | 'all' }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(await search(query ?? '', scope ?? 'all')))
+      } catch (e) {
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: (e instanceof Error ? e.message : 'search_failed').replace(/[\r\n]/g, ' ') }))
+      }
+    })() })
+    return
+  }
+
   // GET /api/terminal/status — which operator CLIs (prophet / sourceosctl) are installed.
   // (Namespace is /api/terminal, not /api/operator — the latter is the ONNX model-operator API.)
   if (req.method === 'GET' && url.pathname === '/api/terminal/status') {

@@ -91,6 +91,14 @@ function IconCode() {
     </svg>
   )
 }
+function IconSearchGlass() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle cx="7" cy="7" r="4.5" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M10.5 10.5L14 14" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  )
+}
 function IconGraph() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
@@ -244,6 +252,7 @@ const surfaceItems: SurfaceItem[] = [
   { id: 'chat',        label: 'Workspace',   icon: <IconChat />,       items: ['New conversation', 'Recent threads', 'Pinned'] },
   { id: 'library',     label: 'Library',     icon: <IconLibrary />,    items: ['Collections', 'Documents', 'Entities'] },
   { id: 'kg',          label: 'Knowledge Graph', icon: <IconGraph />,  items: ['Nodes', 'Edges', 'Communities'] },
+  { id: 'search',      label: 'Search',      icon: <IconSearchGlass />, items: ['Local · lampstand', 'Platform · sherlock'] },
   { id: 'notes',       label: 'Notes',       icon: <IconNotes />,      items: ['My notes', 'Shared', 'Archived'] },
   { id: 'canvas',      label: 'Canvas',      icon: <IconCanvas />,     items: ['My documents', 'Shared', 'Archived'] },
   { id: 'cowork',      label: 'Cowork',      icon: <IconCowork />,     items: ['Active sessions', 'Task decomposition', 'Decision log'] },
