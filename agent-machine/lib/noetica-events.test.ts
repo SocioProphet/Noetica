@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, mkdirSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import {
   emitNoeticaEvent, featureOk, featureSad, featureBad, gateVerdict, permissionChanged,
   noeticaBootEvidence, _resetGovernanceCacheForTest,
@@ -32,8 +33,11 @@ function readEvents(): Array<Record<string, any>> {
 function sha16(s: string): string { return createHash('sha256').update(s).digest('hex').slice(0, 16) }
 
 function writeGovernance(rules: unknown): void {
+  writeGovernanceFile('redaction.json', rules)
+}
+function writeGovernanceFile(name: string, body: unknown): void {
   mkdirSync(join(home, 'governance'), { recursive: true })
-  writeFileSync(join(home, 'governance', 'redaction.json'), JSON.stringify(rules))
+  writeFileSync(join(home, 'governance', name), JSON.stringify(body))
 }
 
 test('emits an EventEnvelope-conformant line with tri-state severity', () => {
@@ -144,4 +148,94 @@ test('envelope_hash is canonical (key order independent) and computed post-redac
   const [ev] = readEvents()
   assert.ok(!JSON.stringify(ev).includes('mdheller@gmail.com'))
   assert.match(ev.integrity.envelope_hash, /^sha256:[0-9a-f]{64}$/)
+})
+
+// ─── the moat, as a test: cross-language byte-parity of the v1 envelope_hash ───
+
+test('cross-language hash parity: TS v1 envelope_hash === python canonical_hash', (t) => {
+  // Clean, ASCII-only event with no redactable fields → redaction is identity, isolating the
+  // hash SCHEME. A TS-emitted event must hash byte-for-byte the same as the stdlib emitter
+  // (~/.noetica/bin/noetica_emit.py canonical_hash), or the shared receipt is not portable.
+  const id = emitNoeticaEvent({
+    eventType: 'noetica.run.start', objectId: 'parity',
+    severity: 'ok', kind: 'operation', tier: 'telemetry',
+    extra: { n: 7, flag: true, label: 'plain-ascii', arr: [3, 1, 2] },
+  })
+  assert.notEqual(id, '')
+  const [ev] = readEvents()
+  const stored: string = ev.integrity.envelope_hash
+  assert.match(stored, /^sha256:[0-9a-f]{64}$/)
+  // v1: sha256 over canonical JSON of the event with only integrity.envelope_hash removed.
+  const py = spawnSync('python3', ['-c', [
+    'import sys,json,hashlib',
+    'ev=json.load(sys.stdin)',
+    "ev['integrity'].pop('envelope_hash',None)",
+    "blob=json.dumps(ev,sort_keys=True,separators=(',',':'),ensure_ascii=False)",
+    "print('sha256:'+hashlib.sha256(blob.encode('utf-8')).hexdigest())",
+  ].join('\n')], { input: JSON.stringify(ev), encoding: 'utf8' })
+  if (py.status !== 0) { t.skip(`python3 unavailable (${py.error?.message ?? py.stderr})`); return }
+  assert.equal(py.stdout.trim(), stored, 'TS and python must agree byte-for-byte on the v1 envelope_hash')
+})
+
+// ─── enforcement gauntlet (mirrors noetica_emit.py invariants) ───
+
+test('I2 octet-reversal refused: an IP and its byte-reverse with no derivation link', () => {
+  const id = emitNoeticaEvent({
+    eventType: 'noetica.substrate.probe', objectId: 'net',
+    severity: 'ok', kind: 'operation', tier: 'substrate',
+    extra: { note: 'resolved 34.149.66.154 via PTR 154.66.149.34' },
+  })
+  assert.equal(id, '', 'the violating event is refused (empty id)')
+  const evs = readEvents()
+  const refusal = evs.find((e) => e.eventType === 'noetica.governance.violation')!
+  assert.ok(refusal, 'the refusal is itself an event')
+  assert.equal(refusal.payload.severity, 'bad')
+  assert.equal(refusal.payload.violation, 'two_representations')
+  assert.ok(!evs.some((e) => e.objectId === 'net'), 'the original op is not emitted')
+})
+
+test('I3 undeclared capability refused, fail-closed', () => {
+  writeGovernanceFile('disclosure.json', { default: 'deny', capabilities: { network_egress: { status: 'allow' } } })
+  const id = emitNoeticaEvent({
+    eventType: 'noetica.substrate.act', objectId: 'x',
+    severity: 'ok', kind: 'operation', tier: 'substrate',
+    capabilities: ['exfiltrates_soul'],
+  })
+  assert.equal(id, '')
+  assert.ok(readEvents().some((e) => e.eventType === 'noetica.governance.undisclosed_capability'))
+})
+
+test('I4 unverified actor: observed claim demoted to asserted, loudly (co-emitted receipt)', () => {
+  const id = emitNoeticaEvent({
+    eventType: 'noetica.feature.ok', objectId: 'local_infer',
+    severity: 'ok', kind: 'operation', tier: 'telemetry',
+    actor: { id: 'agent:local-7b', authority: 'unverified' },
+    claims: [{ field: 'temp', value: 42, provenance: 'observed' }],
+  })
+  assert.notEqual(id, '')
+  const evs = readEvents()
+  const main = evs.find((e) => e.objectId === 'local_infer')!
+  assert.equal(main.payload.claims[0].provenance, 'asserted', 'an unverified actor cannot assert observed')
+  assert.equal(main.payload.claims[0].verified, false)
+  assert.ok(evs.some((e) => e.eventType === 'noetica.governance.claim_demoted'), 'the demotion is receipted, not silent')
+})
+
+test('I5 unverified decision-basis refused (the 4.5 TB counter guard)', () => {
+  const id = emitNoeticaEvent({
+    eventType: 'noetica.substrate.report', objectId: 'bytes',
+    severity: 'ok', kind: 'operation', tier: 'substrate',
+    claims: [{ field: 'bytes_total', value: 4571295614478, provenance: 'derived', inputs: ['dl-1'], verified: false, decision_basis: true }],
+  })
+  assert.equal(id, '')
+  assert.ok(readEvents().some((e) => e.payload?.violation === 'unverified_decision_basis'))
+})
+
+test('I6 derived claim without inputs refused', () => {
+  const id = emitNoeticaEvent({
+    eventType: 'noetica.substrate.report', objectId: 'y',
+    severity: 'ok', kind: 'operation', tier: 'telemetry',
+    claims: [{ field: 'x', value: 1, provenance: 'derived' }],
+  })
+  assert.equal(id, '')
+  assert.ok(readEvents().some((e) => e.payload?.violation === 'derived_without_inputs'))
 })

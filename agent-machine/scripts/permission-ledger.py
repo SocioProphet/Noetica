@@ -60,13 +60,17 @@ def now_iso() -> str:
 
 
 def canonical_hash(obj: object) -> str:
+    """Hash scheme v1 (shared with ~/.noetica/bin/noetica_emit.py and lib/noetica-events.ts):
+    sha256 over canonical JSON — sorted keys, compact separators, UTF-8, ensure_ascii=False —
+    of the whole event with only integrity.envelope_hash removed. So integrity.redaction_applied
+    is itself covered by the hash, and a ledger event verifies under `noetica_emit.py validate`."""
     return "sha256:" + hashlib.sha256(
-        json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()
+        json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     ).hexdigest()
 
 
 def emit(event_type: str, object_id: str, payload: dict) -> None:
-    """EventEnvelope-conformant append, matching lib/noetica-events.ts output."""
+    """EventEnvelope-conformant append, matching lib/noetica-events.ts output (scheme v1)."""
     envelope = {
         "eventId": str(uuid.uuid4()),
         "eventType": event_type,
@@ -76,11 +80,13 @@ def emit(event_type: str, object_id: str, payload: dict) -> None:
         "objectId": object_id,
         "payload": payload,
     }
-    body = dict(envelope)
+    # v1: integrity is part of the hashed body (only envelope_hash is excluded from its own
+    # hash). Previously the hash was taken over a pre-integrity copy (scheme v0), which left
+    # redaction_applied uncovered and diverged from the emitter — the post-hash-mutation class.
     envelope["integrity"] = {
         "redaction_applied": True,  # bundle ids are not sensitive per governance/redaction.json
-        "envelope_hash": canonical_hash(body),
     }
+    envelope["integrity"]["envelope_hash"] = canonical_hash(envelope)
     SESSIONS.mkdir(parents=True, exist_ok=True)
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with open(SESSIONS / f"events-{day}.ndjson", "a") as f:
