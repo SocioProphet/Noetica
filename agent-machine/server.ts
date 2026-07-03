@@ -7770,6 +7770,22 @@ Question: ${question}`
     return
   }
 
+  // GET /api/devspace/list — the trust-namespace DevSpaces (Nocalhost BaseSpace/MeshSpace model) + live status.
+  if (req.method === 'GET' && url.pathname === '/api/devspace/list') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { listDevSpaces } = await import('./lib/devspace.js')
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(await listDevSpaces()))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: (e instanceof Error ? e.message : 'devspace_failed').replace(/[\r\n]/g, ' ') }))
+      }
+    })()
+    return
+  }
+
   // POST /api/search — local (lampstand) + platform (sherlock) search { query, scope: local|platform|all }.
   if (req.method === 'POST' && url.pathname === '/api/search') {
     setCORSHeaders(res)
