@@ -91,6 +91,16 @@ function IconCode() {
     </svg>
   )
 }
+function IconDeploy() {
+  // rocket — local PaaS bring-up / rollout
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path d="M8 1.5c2.5 1 4 3.5 4 6.5l-2 2H6l-2-2c0-3 1.5-5.5 4-6.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/>
+      <circle cx="8" cy="6.5" r="1.3" stroke="currentColor" strokeWidth="1.2"/>
+      <path d="M6 10l-1.5 3M10 10l1.5 3M8 10v3.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+    </svg>
+  )
+}
 function IconEvaluate() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
@@ -222,6 +232,7 @@ const surfaceItems: SurfaceItem[] = [
   { id: 'projects',    label: 'Projects',    icon: <IconProjects />,   items: ['Active projects', 'Backlog', 'Sprints'] },
   { id: 'artifacts',   label: 'Artifacts',   icon: <IconArtifacts />,  items: ['Documents', 'Code files', 'Evidence bundles'] },
   { id: 'code',        label: 'Source',      icon: <IconCode />,       items: ['Repositories', 'Gitea Sovereign', 'External forges'] },
+  { id: 'deploy',      label: 'Deploy',      icon: <IconDeploy />,     items: ['Control plane', 'Services', 'Logs'] },
   { id: 'workspace',   label: 'Project Files',icon: <IconFiles />,      items: ['Project files', 'Scaffolds', 'Build output'] },
   { id: 'evaluate',    label: 'Evaluate',    icon: <IconEvaluate />,   items: ['Task benchmarks', 'Model families', 'Outcome traces'] },
   { id: 'studio',      label: 'Studio',      icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden><path d="M4 4h16v12H4zM8 20h8M12 16v4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/><path d="M7 8h6M7 11h4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>, items: ['Prompt workbench', 'Model compare', 'Vector search'] },

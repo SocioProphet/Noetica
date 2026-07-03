@@ -7605,6 +7605,42 @@ Question: ${question}`
     return
   }
 
+  // GET /api/deploy/status — SourceOS Continuum local-PaaS control-plane readiness.
+  if (req.method === 'GET' && url.pathname === '/api/deploy/status') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { deployStatus } = await import('./lib/continuum-deploy.js')
+        const status = await deployStatus()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(status))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: (e instanceof Error ? e.message : 'status_failed').replace(/[\r\n]/g, ' ') }))
+      }
+    })()
+    return
+  }
+
+  // POST /api/deploy/run — run an allow-listed control-plane target (dev-up|dev-down|shim-test). SSE console.
+  if (req.method === 'POST' && url.pathname === '/api/deploy/run') {
+    setCORSHeaders(res)
+    let body = ''
+    req.on('data', (c: Buffer) => { body += c.toString() })
+    req.on('end', () => { void (async () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive' })
+      try {
+        const { runDeploy } = await import('./lib/continuum-deploy.js')
+        const { target } = JSON.parse(body || '{}') as { target?: string }
+        await runDeploy(target ?? '', (event, data) => sse(res, event, data))
+      } catch (e) {
+        sse(res, 'error', { error: (e instanceof Error ? e.message : 'deploy_failed').replace(/[\r\n]/g, ' ') })
+      }
+      res.end()
+    })() })
+    return
+  }
+
   // POST /api/ingest/document — pre-extracted text { content, filename, mimeType? }
   // Embeds + stores semantically-searchable DocumentChunks (real RAG), AND keeps the
   // engine's entity/record ingest for graph structure.
