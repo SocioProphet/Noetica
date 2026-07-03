@@ -8,6 +8,8 @@
  * diagram + the namespace/enclave isolation from the agentic-self architecture.
  */
 
+import { createHash } from 'node:crypto'
+
 export type Sensitivity = 'high' | 'medium' | 'low'
 export type ComputeTier = 'local' | 'edge' | 'cloud'
 export type TrustNamespace = 'self' | 'workspace' | 'collective'
@@ -96,3 +98,33 @@ export function decideIsolation(task: TaskDescriptor): IsolationDecision {
 
 /** The fs-memory-store namespace to scope this task's memory under (Self stays on-device). */
 export function memoryNamespaceFor(d: IsolationDecision): TrustNamespace { return d.namespace }
+
+// ── Conform to the canonical membrane (SocioProphet/slash-topics Membrane_Decision_v0.2) ──
+// This local classifier does NOT own policy authority — it emits a MembraneDecision that the
+// slash-topics/agentplane membrane consumes + enforces (WallGuard does cross-agent admission).
+export type MembraneVerdict = 'ALLOW' | 'DENY' | 'QUARANTINE' | 'REDACT' | 'REQUIRE_SIGNATURE'
+export type MembraneScope = 'user_local' | 'global_platform'
+export interface MembraneDecision {
+  decision: MembraneVerdict
+  audit: { policy_ref: string; ts: string; reasons: string[]; redactions?: string[]; required_signers?: string[] }
+  model_family: 'lsa' | 'lsi' | 'lda'
+  scope: MembraneScope
+  artifacts?: { input_hash?: string; output_hash?: string; receipt_ref?: string }
+}
+
+const POLICY_ID = 'noetica/isolation-policy@0.1.0'
+const sha256 = (s: string) => 'sha256:' + createHash('sha256').update(s).digest('hex')
+
+/** Emit a slash-topics-conformant MembraneDecision from an isolation decision. My 3 trust namespaces
+ * collapse to their 2 scopes (self+workspace → user_local; collective → global_platform). */
+export function toMembraneDecision(d: IsolationDecision, opts: { input?: string; modelFamily?: 'lsa' | 'lsi' | 'lda' } = {}): MembraneDecision {
+  const scope: MembraneScope = d.namespace === 'collective' ? 'global_platform' : 'user_local'
+  const decision: MembraneVerdict = d.conflict ? 'DENY' : 'ALLOW' // QUARANTINE/REDACT/REQUIRE_SIGNATURE owned by the full membrane
+  return {
+    decision,
+    scope,
+    model_family: opts.modelFamily ?? 'lsa',
+    audit: { policy_ref: sha256(`${POLICY_ID}|${d.sensitivity}|${d.namespace}|${d.tier}`), ts: new Date().toISOString(), reasons: d.reason.split('; ').filter(Boolean) },
+    ...(opts.input ? { artifacts: { input_hash: sha256(opts.input) } } : {}),
+  }
+}

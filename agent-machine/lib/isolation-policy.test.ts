@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { classifySensitivity, decideIsolation } from './isolation-policy.js'
+import { classifySensitivity, decideIsolation, toMembraneDecision } from './isolation-policy.js'
 
 test('unknown data fails closed → high / local / no egress', () => {
   const d = decideIsolation({ content: 'some benign text' })
@@ -53,4 +53,21 @@ test('requested lower tier than the ceiling is honored', () => {
   const d = decideIsolation({ labels: ['public'], requestedTier: 'local' })
   assert.equal(d.tier, 'local')
   assert.equal(d.conflict, false)
+})
+
+test('emits a slash-topics-conformant MembraneDecision (denied egress → DENY / user_local)', () => {
+  const m = toMembraneDecision(decideIsolation({ labels: ['secret'], requestedTier: 'cloud' }), { input: 'x' })
+  assert.equal(m.decision, 'DENY')
+  assert.equal(m.scope, 'user_local')
+  assert.ok(['lsa', 'lsi', 'lda'].includes(m.model_family))
+  assert.match(m.audit.policy_ref, /^sha256:[0-9a-f]{64}$/)
+  assert.ok(m.audit.reasons.length > 0)
+  assert.match(m.audit.ts, /\d{4}-\d\d-\d\dT/)
+  assert.match(m.artifacts?.input_hash ?? '', /^sha256:/)
+})
+
+test('public collective data → ALLOW / global_platform', () => {
+  const m = toMembraneDecision(decideIsolation({ labels: ['public'] }))
+  assert.equal(m.decision, 'ALLOW')
+  assert.equal(m.scope, 'global_platform')
 })
