@@ -7565,6 +7565,46 @@ Question: ${question}`
     return
   }
 
+  // POST /api/forge/browse — list a local directory's subfolders (folder picker for "add local repo").
+  if (req.method === 'POST' && url.pathname === '/api/forge/browse') {
+    setCORSHeaders(res)
+    let body = ''
+    req.on('data', (c: Buffer) => { body += c.toString() })
+    req.on('end', () => { void (async () => {
+      try {
+        const { dir } = JSON.parse(body || '{}') as { dir?: string }
+        const { browseLocal } = await import('./lib/forge-local.js')
+        const out = await browseLocal(dir)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(out))
+      } catch (e) {
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: (e instanceof Error ? e.message : 'browse_failed').replace(/[\r\n]/g, ' ') }))
+      }
+    })() })
+    return
+  }
+
+  // POST /api/forge/import-local — take a LOCAL folder, create a Gitea repo, git-push it. SSE progress.
+  // This is the "suck a repo off my desktop into my sovereign forge" seam.
+  if (req.method === 'POST' && url.pathname === '/api/forge/import-local') {
+    setCORSHeaders(res)
+    let body = ''
+    req.on('data', (c: Buffer) => { body += c.toString() })
+    req.on('end', () => { void (async () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive' })
+      try {
+        const { importLocalRepo } = await import('./lib/forge-local.js')
+        const reqBody = JSON.parse(body || '{}') as import('./lib/forge-local.js').LocalImportRequest
+        await importLocalRepo(reqBody, (event, data) => sse(res, event, data))
+      } catch (e) {
+        sse(res, 'error', { error: (e instanceof Error ? e.message : 'import_failed').replace(/[\r\n]/g, ' ') })
+      }
+      res.end()
+    })() })
+    return
+  }
+
   // POST /api/ingest/document — pre-extracted text { content, filename, mimeType? }
   // Embeds + stores semantically-searchable DocumentChunks (real RAG), AND keeps the
   // engine's entity/record ingest for graph structure.

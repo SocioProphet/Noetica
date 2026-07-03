@@ -23,9 +23,10 @@ import type { ActiveSurface } from '@/lib/types/surface'
 
 export type CommandCenterId =
   | 'workspace'   // chat-first collaboration & authoring — the "work"
+  | 'workstation' // Local-first dev — Gitea repos, Porter deploys, local GitOps (THE foundation)
   | 'data'        // Data & DataOps — corpus, canon, ingestion, knowledge graph
   | 'ai'          // AI & Model Ops — studio, eval, tuning, boards, agents
-  | 'cloud'       // Cloud & DevSecOps — infra, broker, deploys, security
+  | 'cloud'       // Cloud & DevSecOps — LATER: off-machine, only after local DevSecOps exists
   | 'analytics'   // Analytics — dashboards, benchmarks, telemetry
   | 'govern'      // Govern — policy, alignment, evidence (cross-cutting)
 
@@ -70,12 +71,13 @@ export interface NavSurface {
 }
 
 export const COMMAND_CENTERS: CommandCenter[] = [
-  { id: 'workspace', label: 'Workspace', blurb: 'Chat, canvas, notes & rooms — where the work happens' },
-  { id: 'data',      label: 'Data',      blurb: 'Corpus, canon, ingestion & the knowledge graph' },
-  { id: 'ai',        label: 'AI · Models', blurb: 'Studio, evaluation, tuning, boards & agents' },
-  { id: 'cloud',     label: 'Cloud · DevSecOps', blurb: 'Infra, broker, deployments & security posture' },
-  { id: 'analytics', label: 'Analytics', blurb: 'Dashboards, benchmarks & telemetry' },
-  { id: 'govern',    label: 'Govern',    blurb: 'Policy, alignment & evidence — across every center' },
+  { id: 'workspace',   label: 'Workspace', blurb: 'Chat, canvas, notes & rooms — where the work happens' },
+  { id: 'workstation', label: 'Workstation', blurb: 'Local-first dev — Gitea repos, Porter deploys, local GitOps' },
+  { id: 'data',        label: 'Data',      blurb: 'Corpus, canon, ingestion & the knowledge graph' },
+  { id: 'ai',          label: 'AI · Models', blurb: 'Studio, evaluation, tuning, boards & agents' },
+  { id: 'cloud',       label: 'Cloud · DevSecOps', blurb: 'Off-machine — comes AFTER local DevSecOps is real' },
+  { id: 'analytics',   label: 'Analytics', blurb: 'Dashboards, benchmarks & telemetry' },
+  { id: 'govern',      label: 'Govern',    blurb: 'Policy, alignment & evidence — across every center' },
 ]
 
 /**
