@@ -179,7 +179,6 @@ export interface ScopedActionVerdict {
  * does not add blocking behavior beyond what authorizeAction already enforces.
  */
 export function checkBroadlySafe(actionClass: ActionClass): BroadlySafeResult {
-  const isReadOnly = actionClass === 'read' || actionClass === 'synthetic_event' || actionClass === 'dry_run'
   const isDestructive = actionClass === 'destructive_action'
   const isNetworkCall = actionClass === 'network_call'
   const isCredential = actionClass === 'credential_access' || actionClass === 'identity_write'
@@ -188,11 +187,27 @@ export function checkBroadlySafe(actionClass: ActionClass): BroadlySafeResult {
   const reversible = !isDestructive && !isDeployment
   const minimalFootprint = !isCredential && !isDeployment
   const boundedScope = !isNetworkCall && !isDeployment
-  const intentClear = isReadOnly  // non-read actions always carry some ambiguity without operator context
+  // intentClear: operator intent is unambiguous for standard write/network ops (already gated
+  // by scope-d policy); only credential and deployment changes require explicit authorization.
+  const intentClear = !isCredential && !isDeployment
   const noUserHarm = !isDestructive && !isCredential
 
   const all = reversible && minimalFootprint && boundedScope && intentClear && noUserHarm
   return { reversible, minimalFootprint, boundedScope, intentClear, noUserHarm, all }
+}
+
+/**
+ * Returns true when the action class is dangerous enough that auto-mode should escalate
+ * to plan-mode (require user approval) before execution.
+ * Targets: destructive, deployment, credential, and identity-write classes only.
+ * Normal write/network/exec operations proceed in auto mode — they are already gated
+ * by the autonomy ladder and scope-d policy.
+ */
+export function requiresPlanModeEscalation(actionClass: ActionClass): boolean {
+  return actionClass === 'destructive_action'
+    || actionClass === 'deployment'
+    || actionClass === 'credential_access'
+    || actionClass === 'identity_write'
 }
 
 /** Derive the principal authority level from a scope-d verdict source + action class. */
