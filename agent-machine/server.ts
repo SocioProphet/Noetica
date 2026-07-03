@@ -7770,6 +7770,42 @@ Question: ${question}`
     return
   }
 
+  // GET /api/terminal/status — which operator CLIs (prophet / sourceosctl) are installed.
+  // (Namespace is /api/terminal, not /api/operator — the latter is the ONNX model-operator API.)
+  if (req.method === 'GET' && url.pathname === '/api/terminal/status') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { operatorStatus } = await import('./lib/operator-cli.js')
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(await operatorStatus()))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: (e instanceof Error ? e.message : 'status_failed').replace(/[\r\n]/g, ' ') }))
+      }
+    })()
+    return
+  }
+
+  // POST /api/terminal/run — run an allow-listed operator command { tool, args[] }. SSE console.
+  if (req.method === 'POST' && url.pathname === '/api/terminal/run') {
+    setCORSHeaders(res)
+    let tbody = ''
+    req.on('data', (c: Buffer) => { tbody += c.toString() })
+    req.on('end', () => { void (async () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive' })
+      try {
+        const { runOperator } = await import('./lib/operator-cli.js')
+        const { tool, args } = JSON.parse(tbody || '{}') as { tool?: string; args?: string[] }
+        await runOperator(tool ?? '', Array.isArray(args) ? args : [], (event, data) => sse(res, event, data))
+      } catch (e) {
+        sse(res, 'error', { error: (e instanceof Error ? e.message : 'terminal_failed').replace(/[\r\n]/g, ' ') })
+      }
+      res.end()
+    })() })
+    return
+  }
+
   // GET /api/deploy/status — SourceOS Continuum local-PaaS control-plane readiness.
   if (req.method === 'GET' && url.pathname === '/api/deploy/status') {
     setCORSHeaders(res)

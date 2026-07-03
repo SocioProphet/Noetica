@@ -101,6 +101,14 @@ function IconGraph() {
     </svg>
   )
 }
+function IconTerminal() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M4 6l2.5 2L4 10M8 10h4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
 function IconDeploy() {
   // rocket — local PaaS bring-up / rollout
   return (
@@ -244,6 +252,7 @@ const surfaceItems: SurfaceItem[] = [
   { id: 'artifacts',   label: 'Artifacts',   icon: <IconArtifacts />,  items: ['Documents', 'Code files', 'Evidence bundles'] },
   { id: 'code',        label: 'Source',      icon: <IconCode />,       items: ['Repositories', 'Gitea Sovereign', 'External forges'] },
   { id: 'deploy',      label: 'Deploy',      icon: <IconDeploy />,     items: ['Control plane', 'Services', 'Logs'] },
+  { id: 'terminal',    label: 'Terminal',    icon: <IconTerminal />,   items: ['prophet', 'sourceosctl'] },
   { id: 'workspace',   label: 'Project Files',icon: <IconFiles />,      items: ['Project files', 'Scaffolds', 'Build output'] },
   { id: 'evaluate',    label: 'Evaluate',    icon: <IconEvaluate />,   items: ['Task benchmarks', 'Model families', 'Outcome traces'] },
   { id: 'studio',      label: 'Studio',      icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden><path d="M4 4h16v12H4zM8 20h8M12 16v4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/><path d="M7 8h6M7 11h4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>, items: ['Prompt workbench', 'Model compare', 'Vector search'] },

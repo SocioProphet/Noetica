@@ -133,7 +133,7 @@ export const NAV_SURFACES: NavSurface[] = [
   { id: 'deploy',     label: 'Deploy',      center: 'workstation', tier: 'primary',   maturity: 'beta' }, // sourceos-continuum / Porter local PaaS (kind/k3s) — LIVE surface
   { id: 'services',   label: 'Services',    center: 'workstation', tier: 'primary',   maturity: 'planned', gap: true }, // running local apps/pods
   { id: 'pipelines',  label: 'Pipelines',   center: 'workstation', tier: 'secondary', maturity: 'planned', gap: true }, // local GitOps (PR-driven)
-  { id: 'terminal',   label: 'Terminal',    center: 'workstation', tier: 'secondary', maturity: 'planned', gap: true }, // prophet-cli / sourceosctl operator surface
+  { id: 'terminal',   label: 'Terminal',    center: 'workstation', tier: 'secondary', maturity: 'beta' }, // prophet-cli / sourceosctl operator console — LIVE surface
 
   // ── Data & DataOps — search (local lampstand vs platform sherlock), enrichment, graph ──
   { id: 'library',    label: 'Library',     center: 'data', tier: 'primary',   maturity: 'live' },

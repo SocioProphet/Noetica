@@ -18,6 +18,7 @@ import { WorkroomsSurface } from '@/components/surfaces/WorkroomsSurface'
 import { CoworkSurface } from '@/components/surfaces/CoworkSurface'
 import { CodeSurface } from '@/components/surfaces/CodeSurface'
 import { DeploySurface } from '@/components/surfaces/DeploySurface'
+import { TerminalSurface } from '@/components/surfaces/TerminalSurface'
 import { KnowledgeGraphSurface } from '@/components/surfaces/KnowledgeGraphSurface'
 import { WorkspaceSurface } from '@/components/surfaces/WorkspaceSurface'
 import { EvaluateSurface } from '@/components/surfaces/EvaluateSurface'
@@ -98,6 +99,7 @@ const surfaceToWorkspaceMode: Record<ActiveSurface, WorkspaceMode> = {
   artifacts:    'Chat',
   code:         'Code',
   deploy:       'Code',
+  terminal:     'Code',
   workspace:    'Code',
   evaluate:     'Benchmark',
   studio:       'Chat',
@@ -1833,6 +1835,7 @@ function CenterWorkspace({ activeSurface, sessionId, messages, isStreaming, work
   if (activeSurface === 'artifacts')    return <ArtifactsSurface />
   if (activeSurface === 'code')         return <CodeSurface onOpenSettings={onOpenSettings} onNavigateToOperate={onNavigateToOperate} />
   if (activeSurface === 'deploy')       return <DeploySurface />
+  if (activeSurface === 'terminal')     return <TerminalSurface />
   if (activeSurface === 'kg')           return <KnowledgeGraphSurface />
   if (activeSurface === 'workspace')    return <WorkspaceSurface />
   if (activeSurface === 'evaluate')     return <EvaluateSurface thinkingBudget={thinkingBudget} />

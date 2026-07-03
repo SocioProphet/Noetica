@@ -8,6 +8,7 @@ export type ActiveSurface =
   | 'artifacts'
   | 'code'
   | 'deploy'
+  | 'terminal'
   | 'workspace'
   | 'evaluate'
   | 'studio'
