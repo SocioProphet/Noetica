@@ -21,6 +21,34 @@ import type { ActiveSurface } from '@/lib/types/surface'
  * plus the core Workspace and cross-cutting Govern.
  */
 
+/**
+ * INFRA ALIGNMENT — the Workstation → Scale-Up → Cloud tiers bind to canonical
+ * SocioProphet repos (the "truth hierarchy") and CONSUME the scale-up wrapper's
+ * capability rather than reinventing cluster provisioning. Conform, don't fork.
+ * Ref: github.com/SocioProphet/hyperswarm-agent-composable-cluster-scaleup
+ */
+export const INFRA_LINKAGES = {
+  integration_target: 'SocioProphet/prophet-platform',
+  workspace_governance: 'SocioProphet/sociosphere',
+  protocol_canonical: 'SocioProphet/tritrpc',
+  storage_standards: 'SocioProphet/socioprophet-standards-storage',
+  ontology_canonical: 'SocioProphet/ontogenesis',
+} as const
+
+/**
+ * The cluster scale-up capability the Cloud center's Scale-Up surface binds to.
+ * Mirrors capd/hyperswarm.cluster-scaleup.capd.json — pinned (not vendored),
+ * reproducible, supply-chain-forward. Local Porter (kind/k3s, n=1) is what this
+ * wrapper scales up; they compose, we don't duplicate the provisioning logic.
+ */
+export const SCALEUP_CAPABILITY = {
+  id: 'caps.infra.cluster-scaleup.hyperswarm@0.1.0',
+  kind: 'infra.wrapper',
+  repo: 'SocioProphet/hyperswarm-agent-composable-cluster-scaleup',
+  upstreams: ['kubespray@v2.29.1', 'krew@v0.4.5', 'fybrik@v1.3.3'],
+  policy: 'pin-not-vendor',
+} as const
+
 export type CommandCenterId =
   | 'workspace'   // chat-first collaboration & authoring — the "work"
   | 'workstation' // Local-first dev — Gitea repos, Porter deploys, local GitOps (THE foundation)
@@ -100,34 +128,44 @@ export const NAV_SURFACES: NavSurface[] = [
   { id: 'docs',       label: 'Documents',   center: 'workspace', tier: 'secondary', maturity: 'beta' }, // ? office suite — could be Data
   { id: 'projects',   label: 'Projects',    center: 'workspace', tier: 'secondary', maturity: 'live' }, // ? PM — could be its own Build center
 
-  // ── Data & DataOps ─────────────────────────────────────────────────────
+  // ── Workstation — local-first dev, OS layer (Gitea → continuum PaaS → prophet-cli → scale-up) ──
+  { id: 'code',       label: 'Source',      center: 'workstation', tier: 'primary',   maturity: 'live' }, // Gitea Sovereign + local repos; language intel via synapseiq (tree-sitter/LSP)
+  { id: 'deploy',     label: 'Deploy',      center: 'workstation', tier: 'primary',   maturity: 'planned', gap: true }, // sourceos-continuum / Porter local PaaS (kind/k3s)
+  { id: 'services',   label: 'Services',    center: 'workstation', tier: 'primary',   maturity: 'planned', gap: true }, // running local apps/pods
+  { id: 'pipelines',  label: 'Pipelines',   center: 'workstation', tier: 'secondary', maturity: 'planned', gap: true }, // local GitOps (PR-driven)
+  { id: 'terminal',   label: 'Terminal',    center: 'workstation', tier: 'secondary', maturity: 'planned', gap: true }, // prophet-cli / sourceosctl operator surface
+
+  // ── Data & DataOps — search (local lampstand vs platform sherlock), enrichment, graph ──
   { id: 'library',    label: 'Library',     center: 'data', tier: 'primary',   maturity: 'live' },
   { id: 'artifacts',  label: 'Artifacts',   center: 'data', tier: 'primary',   maturity: 'live' },
   { id: 'workspace',  label: 'Project Files', center: 'data', tier: 'secondary', maturity: 'live' },
-  { id: 'code',       label: 'Source',      center: 'data', tier: 'secondary', maturity: 'live' }, // ? repos — could be Cloud/DevSecOps
-  { id: 'ingest',     label: 'Ingestion',   center: 'data', tier: 'primary',   maturity: 'planned', gap: true },
-  { id: 'connectors', label: 'Connectors',  center: 'data', tier: 'primary',   maturity: 'planned', gap: true },
-  { id: 'kg',         label: 'Knowledge Graph', center: 'data', tier: 'primary', maturity: 'planned', gap: true },
-  { id: 'canon',      label: 'Canon · Corpus',  center: 'data', tier: 'primary', maturity: 'planned', gap: true },
+  { id: 'search',     label: 'Search',      center: 'data', tier: 'primary',   maturity: 'planned', gap: true }, // local=lampstand (desktop index) · platform=sherlock-search (evidence)
+  { id: 'kg',         label: 'Knowledge Graph', center: 'data', tier: 'primary', maturity: 'planned', gap: true }, // hellgraph (on-device + as-a-service)
+  { id: 'enrich',     label: 'Enrichment',  center: 'data', tier: 'primary',   maturity: 'planned', gap: true }, // synapseiq semantic-enrichment fabric
+  { id: 'canon',      label: 'Canon · Corpus',  center: 'data', tier: 'secondary', maturity: 'planned', gap: true },
+  { id: 'ingest',     label: 'Ingestion',   center: 'data', tier: 'secondary', maturity: 'planned', gap: true },
+  { id: 'connectors', label: 'Connectors',  center: 'data', tier: 'secondary', maturity: 'planned', gap: true },
 
-  // ── AI & Model Ops ─────────────────────────────────────────────────────
+  // ── AI & Model Ops = SociOS opt-in COLLECTIVE-INTELLIGENCE tuning layer (tune/update/A-B) ──
   { id: 'studio',     label: 'Studio',      center: 'ai', tier: 'primary',   maturity: 'live' },
   { id: 'evaluate',   label: 'Evaluate',    center: 'ai', tier: 'primary',   maturity: 'live' },
+  { id: 'tune',       label: 'Tune & Train', center: 'ai', tier: 'primary',  maturity: 'live' },
+  { id: 'labs',       label: 'Labs',        center: 'ai', tier: 'primary',   maturity: 'planned', gap: true }, // SociOS modality labs image/video/graph/ts/translation/embedding/nlp/ocr — opt-in collective tuning
+  { id: 'boards',     label: 'A/B Boards',  center: 'ai', tier: 'primary',   maturity: 'planned', gap: true }, // A/B testing + frontier/MMLU boards
   { id: 'rag',        label: 'RAG Inspector', center: 'ai', tier: 'tab',     maturity: 'live', foldsInto: 'studio' },
   { id: 'lab',        label: 'Capabilities', center: 'ai', tier: 'tab',      maturity: 'live', foldsInto: 'studio' },
-  { id: 'tune',       label: 'Tune & Train', center: 'ai', tier: 'primary',  maturity: 'live' },
   { id: 'agents',     label: 'Agents',      center: 'ai', tier: 'secondary', maturity: 'beta' },
-  { id: 'boards',     label: 'Boards',      center: 'ai', tier: 'primary',   maturity: 'planned', gap: true }, // frontier/MMLU boards
-  { id: 'registry',   label: 'Model Registry', center: 'ai', tier: 'secondary', maturity: 'planned', gap: true },
+  { id: 'registry',   label: 'Model Registry', center: 'ai', tier: 'secondary', maturity: 'planned', gap: true }, // lattice-forge RuntimeAssets
 
-  // ── Cloud & DevSecOps ──────────────────────────────────────────────────
+  // ── Cloud · DevSecOps — Scale-Up → off-machine (only AFTER local DevSecOps) ──
+  { id: 'cluster',    label: 'Scale-Up',     center: 'cloud', tier: 'primary',   maturity: 'planned', gap: true }, // caps.infra.cluster-scaleup.hyperswarm (pinned)
+  { id: 'security',   label: 'Security',     center: 'cloud', tier: 'primary',   maturity: 'planned', gap: true }, // DevSecOps posture — GATES the jump to cloud
+  { id: 'deploys',    label: 'Deployments',  center: 'cloud', tier: 'primary',   maturity: 'planned', gap: true }, // cloud-tier CI/CD, GKE/ArgoCD
   { id: 'broker',     label: 'Cloud Broker', center: 'cloud', tier: 'primary',   maturity: 'live' },
-  { id: 'platform',   label: 'Platform',     center: 'cloud', tier: 'primary',   maturity: 'soon' },
-  { id: 'marketplace', label: 'Marketplace', center: 'cloud', tier: 'secondary', maturity: 'soon' },
-  { id: 'operate',    label: 'Operate',      center: 'cloud', tier: 'primary',   maturity: 'live' },
+  { id: 'operate',    label: 'Operate',      center: 'cloud', tier: 'secondary', maturity: 'live' },
   { id: 'computer',   label: 'Computer Use', center: 'cloud', tier: 'tab',       maturity: 'beta', foldsInto: 'operate' },
-  { id: 'deploys',    label: 'Deployments',  center: 'cloud', tier: 'primary',   maturity: 'planned', gap: true }, // CI/CD, GKE/ArgoCD
-  { id: 'security',   label: 'Security',     center: 'cloud', tier: 'primary',   maturity: 'planned', gap: true }, // DevSecOps posture, global-devsecops-intelligence
+  { id: 'platform',   label: 'Platform',     center: 'cloud', tier: 'secondary', maturity: 'soon' },
+  { id: 'marketplace', label: 'Marketplace', center: 'cloud', tier: 'secondary', maturity: 'soon' },
   { id: 'secrets',    label: 'Secrets',      center: 'cloud', tier: 'secondary', maturity: 'planned', gap: true },
 
   // ── Analytics ──────────────────────────────────────────────────────────
