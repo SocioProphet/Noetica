@@ -404,6 +404,8 @@ async function runAction(name: string, params: Record<string, unknown>): Promise
 // PROPOSALS (inferred:true, dreamed:true), never canonical — surfaced for review, not asserted as truth. Pairs
 // with the learning loop (eval-capture + procedural-memory): consolidate what's known, not just capture it.
 let _lastDreamAt = 0
+// Runtime Best-of-N toggle — seeded from env var, flippable at runtime via POST /api/settings
+let _bonEnabled = process.env['BEST_OF_N'] === 'true'
 let _latestDreamingSession: { sessionId: string; triggeredAt: string; proposals: Array<{ from: string; to: string; via: string[]; support: number }>; seeds: number } | null = null
 async function runDreaming(opts: { seeds?: number; length?: number; walksPerSeed?: number; integrate?: boolean; maxIntegrate?: number } = {}): Promise<{ seeds: number; nodes: number; proposed: number; integrated: number; top: Array<{ from: string; to: string; via: string[]; support: number }> }> {
   const g = getGraph()
@@ -4270,7 +4272,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
       // lib/best-of-n.ts and pick the grounding-strongest one. Only runs when: not yet deliberated,
       // allTools is empty (tool turns have their own loop), and calibrated confidence is low (<0.6).
       // Falls back to the existing single-sample path when the env var is unset.
-      if (!deliberated && process.env['BEST_OF_N'] === 'true' && allTools.length === 0) {
+      if (!deliberated && _bonEnabled && allTools.length === 0) {
         try {
           const isLowConfidence = calibConfidence === undefined || calibConfidence < 0.6
           if (isLowConfidence) {
@@ -5891,6 +5893,50 @@ const server = http.createServer((req, res) => {
           res.end(JSON.stringify({ error: 'invalid identity payload' }))
         }
       })
+      return
+    }
+  }
+
+  // GET /api/identity/pseudonym — device-anchored did:key pseudonym for the sovereign identity lane
+  if (req.method === 'GET' && url.pathname === '/api/identity/pseudonym') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const { loadOrCreateRoot, deriveScope } = await import('./lib/sovereign-id.js')
+        const root  = loadOrCreateRoot()
+        const facet = deriveScope(root, 'noetica-default')
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ pseudonym: facet.pseudonym }))
+      } catch {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: 'identity_unavailable' }))
+      }
+    })()
+    return
+  }
+
+  // GET/POST /api/settings — runtime mesh settings (e.g. Best-of-N toggle)
+  if (url.pathname === '/api/settings') {
+    setCORSHeaders(res)
+    if (req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ bonEnabled: _bonEnabled }))
+      return
+    }
+    if (req.method === 'POST') {
+      void (async () => {
+        try {
+          const body = await readBody(req)
+          let p: Record<string, unknown>
+          try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+          if (typeof p['bonEnabled'] === 'boolean') _bonEnabled = p['bonEnabled'] as boolean
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ bonEnabled: _bonEnabled }))
+        } catch {
+          res.writeHead(500, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'internal_error' }))
+        }
+      })()
       return
     }
   }
@@ -15827,6 +15873,52 @@ Question: ${question}`
           res.end(JSON.stringify({ card, executionPerformed: false }))
         }
       } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
+    })()
+    return
+  }
+
+  // GET /api/learning/srs/due — skills whose SRS card is due for review
+  if (req.method === 'GET' && url.pathname === '/api/learning/srs/due') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        type SkillWithCard = import('./lib/procedural-memory.js').Skill & { card: import('./lib/srs.js').Card }
+        const all = loadSkills() as Array<SkillWithCard>
+        const now = Date.now()
+        const due = all.filter((s) => s.card && s.card.due <= now).slice(0, 15)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ due, total: all.length }))
+      } catch {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: 'internal_error' }))
+      }
+    })()
+    return
+  }
+
+  // POST /api/learning/srs/review { id, grade } — grade a skill card, re-append updated record
+  if (req.method === 'POST' && url.pathname === '/api/learning/srs/review') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const body = await readBody(req)
+        let p: Record<string, unknown>
+        try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
+        const id    = typeof p['id']    === 'string' ? p['id']    : null
+        const grade = typeof p['grade'] === 'number' ? p['grade'] as 0|1|2|3 : null
+        if (!id || grade == null) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'id and grade required' })); return }
+        type SkillWithCard = import('./lib/procedural-memory.js').Skill & { id?: string; card?: import('./lib/srs.js').Card }
+        const skills = loadSkills() as Array<SkillWithCard>
+        const target = skills.find((s) => s.id === id || s.task === id)
+        if (!target || !target.card) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'skill_not_found' })); return }
+        const updated = srsReview(target.card, grade, Date.now())
+        appendEncrypted(skillsPath(), { ...target, card: updated })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ card: updated, executionPerformed: false }))
+      } catch {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: 'internal_error' }))
+      }
     })()
     return
   }
