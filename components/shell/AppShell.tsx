@@ -18,6 +18,7 @@ import { WorkroomsSurface } from '@/components/surfaces/WorkroomsSurface'
 import { CoworkSurface } from '@/components/surfaces/CoworkSurface'
 import { CodeSurface } from '@/components/surfaces/CodeSurface'
 import { DeploySurface } from '@/components/surfaces/DeploySurface'
+import { KnowledgeGraphSurface } from '@/components/surfaces/KnowledgeGraphSurface'
 import { WorkspaceSurface } from '@/components/surfaces/WorkspaceSurface'
 import { EvaluateSurface } from '@/components/surfaces/EvaluateSurface'
 import { StudioSurface } from '@/components/surfaces/StudioSurface'
@@ -114,6 +115,7 @@ const surfaceToWorkspaceMode: Record<ActiveSurface, WorkspaceMode> = {
   agents:       'Chat',
   calendar:     'Chat',
   library:      'Chat',
+  kg:           'Chat',
   intelligence: 'Chat',
   portfolio:    'Chat',
   platform:     'Chat',
@@ -1804,6 +1806,7 @@ function CenterWorkspace({ activeSurface, sessionId, messages, isStreaming, work
   if (activeSurface === 'artifacts')    return <ArtifactsSurface />
   if (activeSurface === 'code')         return <CodeSurface onOpenSettings={onOpenSettings} onNavigateToOperate={onNavigateToOperate} />
   if (activeSurface === 'deploy')       return <DeploySurface />
+  if (activeSurface === 'kg')           return <KnowledgeGraphSurface />
   if (activeSurface === 'workspace')    return <WorkspaceSurface />
   if (activeSurface === 'evaluate')     return <EvaluateSurface thinkingBudget={thinkingBudget} />
   if (activeSurface === 'studio')       return <TabbedWorkspace tabs={[

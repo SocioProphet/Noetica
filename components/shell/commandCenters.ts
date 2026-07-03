@@ -140,7 +140,7 @@ export const NAV_SURFACES: NavSurface[] = [
   { id: 'artifacts',  label: 'Artifacts',   center: 'data', tier: 'primary',   maturity: 'live' },
   { id: 'workspace',  label: 'Project Files', center: 'data', tier: 'secondary', maturity: 'live' },
   { id: 'search',     label: 'Search',      center: 'data', tier: 'primary',   maturity: 'planned', gap: true }, // local=lampstand (desktop index) · platform=sherlock-search (evidence)
-  { id: 'kg',         label: 'Knowledge Graph', center: 'data', tier: 'primary', maturity: 'planned', gap: true }, // hellgraph (on-device + as-a-service)
+  { id: 'kg',         label: 'Knowledge Graph', center: 'data', tier: 'primary', maturity: 'beta' }, // hellgraph (on-device + as-a-service) — LIVE full-screen graph
   { id: 'enrich',     label: 'Enrichment',  center: 'data', tier: 'primary',   maturity: 'planned', gap: true }, // synapseiq semantic-enrichment fabric
   { id: 'canon',      label: 'Canon · Corpus',  center: 'data', tier: 'secondary', maturity: 'planned', gap: true },
   { id: 'ingest',     label: 'Ingestion',   center: 'data', tier: 'secondary', maturity: 'planned', gap: true },

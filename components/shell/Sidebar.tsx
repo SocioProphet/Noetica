@@ -91,6 +91,16 @@ function IconCode() {
     </svg>
   )
 }
+function IconGraph() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle cx="3.5" cy="4" r="1.8" stroke="currentColor" strokeWidth="1.3"/>
+      <circle cx="12.5" cy="4" r="1.8" stroke="currentColor" strokeWidth="1.3"/>
+      <circle cx="8" cy="12" r="1.8" stroke="currentColor" strokeWidth="1.3"/>
+      <path d="M4.8 5.3 7 10.4M11.2 5.3 9 10.4M5 4h6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+    </svg>
+  )
+}
 function IconDeploy() {
   // rocket — local PaaS bring-up / rollout
   return (
@@ -225,6 +235,7 @@ function IconLibrary() {
 const surfaceItems: SurfaceItem[] = [
   { id: 'chat',        label: 'Workspace',   icon: <IconChat />,       items: ['New conversation', 'Recent threads', 'Pinned'] },
   { id: 'library',     label: 'Library',     icon: <IconLibrary />,    items: ['Collections', 'Documents', 'Entities'] },
+  { id: 'kg',          label: 'Knowledge Graph', icon: <IconGraph />,  items: ['Nodes', 'Edges', 'Communities'] },
   { id: 'notes',       label: 'Notes',       icon: <IconNotes />,      items: ['My notes', 'Shared', 'Archived'] },
   { id: 'canvas',      label: 'Canvas',      icon: <IconCanvas />,     items: ['My documents', 'Shared', 'Archived'] },
   { id: 'cowork',      label: 'Cowork',      icon: <IconCowork />,     items: ['Active sessions', 'Task decomposition', 'Decision log'] },
