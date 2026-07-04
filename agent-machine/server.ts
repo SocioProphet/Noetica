@@ -1409,6 +1409,7 @@ const FEATURE_FLAGS: Array<{ env: string; status: 'default-on' | 'opt-in' | 'exp
   { env: 'NOETICA_CONCEPT_LOOKUP',     status: 'default-on',   desc: 'Clean "what is X" answers from the external-KG concept layer (Wikipedia+WSD) — local, instant, grounded, no generation' },
   { env: 'NOETICA_FABRIC',             status: 'default-on',   desc: 'Context fabric on the atomspace — STI-gated live brief shared across voice/chat/agents' },
   { env: 'NOETICA_LOGIC_FIRST',        status: 'default-on',   desc: 'Compute the answer by logic first (recall→extract); generate only the undecidable remainder' },
+  { env: 'NOETICA_DEMO_MODE',          status: 'opt-in',       desc: 'Public unauthenticated demo: blocks run_command/write_file/edit_file/scaffold_app and restricts dispatch_agent to read-only/research roles, regardless of what the caller requests' },
 ]
 
 /**
@@ -1853,9 +1854,22 @@ async function executeTool(
     }
   }
 
+  // Public-demo denylist (facet: NOETICA_DEMO_MODE). Enforced HERE, at the single choke
+  // point every execution path funnels through (the /api/chat loop, the direct /api/tool
+  // route, and dispatch_agent sub-agents via runSubAgent/executeToolWithTimeout) — not in
+  // whatever offers tools to the model, since a client can smuggle a tool definition
+  // straight into the request body's tools[] array and bypass any upstream tool-menu filter.
+  const DEMO_BLOCKED_TOOLS = new Set(['run_command', 'write_file', 'edit_file', 'scaffold_app'])
+  if (isFlagOn('NOETICA_DEMO_MODE') && DEMO_BLOCKED_TOOLS.has(name)) {
+    return `Blocked: '${name}' is disabled in the public demo.`
+  }
+
   switch (name) {
     case 'dispatch_agent': {
       const role = String(input['role'] ?? 'general')
+      if (isFlagOn('NOETICA_DEMO_MODE') && !['researcher', 'analyst', 'planner'].includes(role)) {
+        return `Blocked: role '${role}' is disabled in the public demo. Available roles: researcher, analyst, planner.`
+      }
       const task = String(input['task'] ?? '').trim()
       if (!task) return 'dispatch_agent: a task is required.'
       const context = String(input['context'] ?? '')
@@ -4884,18 +4898,35 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
 
 const MAX_REQUEST_BYTES = 32 * 1024 * 1024 // 32 MB — generous for base64 image/doc attachments, blocks OOM
 
-// Token-bucket rate limiter, per route-class. Tuned for a single local operator: generous for normal use,
-// tight enough to blunt a runaway/abusive local page driving inference cost or agent fan-out.
+// Token-bucket rate limiter, per route-class × per-IP. Tuned for a single local operator: generous
+// for normal use, tight enough to blunt a runaway/abusive local page driving inference cost or agent
+// fan-out. Per-IP (not just per-class) matters once this runs somewhere network-reachable (see
+// NOETICA_DEMO_MODE) — a global-only bucket lets one abusive caller starve everyone else sharing it.
 const _rlBuckets = new Map<string, { tokens: number; last: number }>()
 const RL_LIMITS: Record<string, { burst: number; perMin: number }> = {
   chat: { burst: 30, perMin: 120 }, tool: { burst: 60, perMin: 240 }, cap: { burst: 60, perMin: 300 },
   oauth: { burst: 10, perMin: 30 }, ingest: { burst: 6, perMin: 20 },
 }
-function rateLimited(cls: string): boolean {
+// x-forwarded-for's first entry is the original client behind a proxy/ingress; fall back to the raw
+// socket for a direct connection. Not spoof-proof against an untrusted proxy, but this deployment's
+// ingress is the only thing allowed to set that header from outside.
+function clientIp(req: http.IncomingMessage): string {
+  const xff = req.headers['x-forwarded-for']
+  const first = Array.isArray(xff) ? xff[0] : xff?.split(',')[0]?.trim()
+  return first || req.socket.remoteAddress || 'unknown'
+}
+function rateLimited(cls: string, ip: string): boolean {
   const cfg = RL_LIMITS[cls]; if (!cfg) return false
   const now = Date.now()
-  let b = _rlBuckets.get(cls); if (!b) { b = { tokens: cfg.burst, last: now }; _rlBuckets.set(cls, b) }
+  const key = `${cls}:${ip}`
+  let b = _rlBuckets.get(key); if (!b) { b = { tokens: cfg.burst, last: now }; _rlBuckets.set(key, b) }
   b.tokens = Math.min(cfg.burst, b.tokens + ((now - b.last) / 60_000) * cfg.perMin); b.last = now
+  // Sweep stale per-IP buckets so this map can't grow unbounded under public traffic — cheap, amortized
+  // over calls rather than a separate timer. A bucket idle for 10x its own window is fully refilled
+  // anyway, so dropping it loses no rate-limit state, just memory.
+  if (_rlBuckets.size > 5000 && Math.random() < 0.01) {
+    for (const [k, v] of _rlBuckets) { if (now - v.last > 10 * 60_000) _rlBuckets.delete(k) }
+  }
   if (b.tokens < 1) return true
   b.tokens -= 1; return false
 }
@@ -4956,7 +4987,7 @@ const server = http.createServer((req, res) => {
     const p = url.pathname
     const cls = p === '/api/chat' ? 'chat' : p === '/api/tool' ? 'tool' : p.startsWith('/api/cap/') ? 'cap'
       : p.startsWith('/api/oauth/') ? 'oauth' : p === '/api/repo/ingest' ? 'ingest' : null
-    if (cls && rateLimited(cls)) { res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '5' }); res.end(JSON.stringify({ error: 'rate_limited', class: cls })); return }
+    if (cls && rateLimited(cls, clientIp(req))) { res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '5' }); res.end(JSON.stringify({ error: 'rate_limited', class: cls })); return }
   }
 
   // Capability API surface (wave-2/3 libs) — one mount for all /api/cap/* routes.
@@ -6022,6 +6053,12 @@ const server = http.createServer((req, res) => {
       // Origin / loopback) passes. This is the same guard the mutating /api/cap routes use.
       const origin = req.headers['origin']
       if (typeof origin === 'string' && /^https?:\/\//i.test(origin) && !/^https?:\/\/(127\.0\.0\.1|localhost)(:|$|\/)/i.test(origin)) { res.writeHead(403, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'cross_origin_blocked' })); return }
+      // The Origin guard above only rejects a REAL cross-site Origin — a request with no
+      // Origin header at all (any plain curl/bot; every browser always sends one) sails
+      // through unchecked. requireApiToken() is a no-op when NOETICA_API_TOKEN is unset
+      // (the local-first default), so this stays a no-op for the desktop app but becomes
+      // real auth once a token is configured, as it must be for any networked deployment.
+      if (!requireApiToken(req, res)) return
       if (!String(req.headers['content-type'] ?? '').includes('application/json')) { res.writeHead(415, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'json_content_type_required' })); return }
       let body = ''
       req.on('data', (c: Buffer) => { body += c.toString() })
@@ -6054,6 +6091,8 @@ const server = http.createServer((req, res) => {
       // to bind or clear the agent's autonomy by fetch()-ing localhost.
       const origin = req.headers['origin']
       if (typeof origin === 'string' && /^https?:\/\//i.test(origin) && !/^https?:\/\/(127\.0\.0\.1|localhost)(:|$|\/)/i.test(origin)) { res.writeHead(403, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'cross_origin_blocked' })); return }
+      // Same no-Origin-header bypass as /api/containment — see the comment there.
+      if (!requireApiToken(req, res)) return
       if (!String(req.headers['content-type'] ?? '').includes('application/json')) { res.writeHead(415, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'json_content_type_required' })); return }
       let body = ''
       req.on('data', (c: Buffer) => { body += c.toString() })
@@ -8194,6 +8233,24 @@ Question: ${question}`
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ saved: true, policyId: policy['policyId'] as string }))
       } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'write failed' })) }
+    })()
+    return
+  }
+
+  // POST /api/content-credentials/verify — EU AI Act Art.50 external verification endpoint.
+  // Accepts { text: string, credentials?: object }. Returns whether the text carries a Noetica C2PA marker.
+  if (req.method === 'POST' && url.pathname === '/api/content-credentials/verify') {
+    setCORSHeaders(res)
+    ;(async () => {
+      try {
+        const raw = await readBody(req)
+        const { text } = JSON.parse(raw || '{}') as { text?: string; credentials?: unknown }
+        if (typeof text !== 'string') { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'text required' })); return }
+        const isAiGenerated = text.includes('c2pa:ai-generated')
+        const confidence = isAiGenerated ? 0.95 : 0.0
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ isAiGenerated, confidence, provider: 'noetica', timestamp: new Date().toISOString() }))
+      } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'failed' })) }
     })()
     return
   }
