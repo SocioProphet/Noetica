@@ -4907,13 +4907,20 @@ const RL_LIMITS: Record<string, { burst: number; perMin: number }> = {
   chat: { burst: 30, perMin: 120 }, tool: { burst: 60, perMin: 240 }, cap: { burst: 60, perMin: 300 },
   oauth: { burst: 10, perMin: 30 }, ingest: { burst: 6, perMin: 20 },
 }
-// x-forwarded-for's first entry is the original client behind a proxy/ingress; fall back to the raw
-// socket for a direct connection. Not spoof-proof against an untrusted proxy, but this deployment's
-// ingress is the only thing allowed to set that header from outside.
+// x-real-ip is set by nginx-ingress to $remote_addr — the actual TCP peer, which the client
+// cannot inject (nginx OVERWRITES it, never merges a client-supplied value). Deliberately NOT
+// trusting x-forwarded-for at all here: nginx APPENDS to it rather than replacing it, so
+// "X-Forwarded-For: fake" from the client arrives as "fake, <real ip>" once nginx adds its
+// hop — correctly picking "the real one" out of that chain requires knowing the exact trusted
+// hop count, and a single-entry spoofed header is indistinguishable from a genuine one-hop
+// chain without that. Confirmed by testing directly against the exposed port: both a
+// first-entry read AND a last-entry read let a caller defeat per-IP rate limiting by
+// controlling the header's content. x-real-ip has no such ambiguity, so it's the only signal
+// trusted. Falls back to the raw socket for a direct connection (local dev, no ingress in front).
 function clientIp(req: http.IncomingMessage): string {
-  const xff = req.headers['x-forwarded-for']
-  const first = Array.isArray(xff) ? xff[0] : xff?.split(',')[0]?.trim()
-  return first || req.socket.remoteAddress || 'unknown'
+  const realIp = req.headers['x-real-ip']
+  const ip = typeof realIp === 'string' ? realIp.trim() : Array.isArray(realIp) ? realIp[0]?.trim() : undefined
+  return ip || req.socket.remoteAddress || 'unknown'
 }
 function rateLimited(cls: string, ip: string): boolean {
   const cfg = RL_LIMITS[cls]; if (!cfg) return false
