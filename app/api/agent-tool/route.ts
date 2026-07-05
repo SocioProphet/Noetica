@@ -9,20 +9,31 @@ export const runtime = 'nodejs'
 // supplied absolute path or `..` escape would otherwise let it read/write ANY
 // file on the machine (js/path-injection). Confine every tool path to the
 // user's home tree and reject anything that resolves outside it.
-const ROOT = path.resolve(os.homedir())
+const ROOT = fs.realpathSync(os.homedir())
 
 function resolvePath(p: string): string {
   if (!p) return ''
   const requested = p.startsWith('~/') ? path.join(ROOT, p.slice(2)) : p
   const resolved = path.resolve(ROOT, requested)
-  // Containment via path.relative: if the resolved target is outside ROOT the
-  // relative path steps up (`..`) or is absolute. This is the barrier CodeQL
-  // recognizes for js/path-injection.
-  const rel = path.relative(ROOT, resolved)
-  if (rel !== '' && (rel.startsWith('..' + path.sep) || rel === '..' || path.isAbsolute(rel))) {
+  // Resolve symlinks on the nearest existing ancestor so a link *inside* ROOT
+  // can't redirect the operation outside it — a purely lexical resolve misses
+  // that. Then require the real target to stay within ROOT; a `path.relative`
+  // that starts with '..' is the containment barrier CodeQL recognizes for
+  // js/path-injection.
+  let ancestor = resolved
+  while (!fs.existsSync(ancestor)) {
+    const parent = path.dirname(ancestor)
+    if (parent === ancestor) break
+    ancestor = parent
+  }
+  const real = fs.existsSync(ancestor)
+    ? path.join(fs.realpathSync(ancestor), path.relative(ancestor, resolved))
+    : resolved
+  const rel = path.relative(ROOT, real)
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
     throw new Error('path escapes the permitted root')
   }
-  return resolved
+  return real
 }
 
 export async function POST(request: Request) {
