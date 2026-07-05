@@ -15,23 +15,25 @@ function resolvePath(p: string): string {
   if (!p) return ''
   const requested = p.startsWith('~/') ? path.join(ROOT, p.slice(2)) : p
   const resolved = path.resolve(ROOT, requested)
-  // Resolve symlinks on the nearest existing ancestor so a link *inside* ROOT
-  // can't redirect the operation outside it — a purely lexical resolve misses
-  // that. Then require the real target to stay within ROOT; a `path.relative`
-  // that starts with '..' is the containment barrier CodeQL recognizes for
-  // js/path-injection.
-  let ancestor = resolved
-  while (!fs.existsSync(ancestor)) {
-    const parent = path.dirname(ancestor)
-    if (parent === ancestor) break
-    ancestor = parent
-  }
-  const real = fs.existsSync(ancestor)
-    ? path.join(fs.realpathSync(ancestor), path.relative(ancestor, resolved))
-    : resolved
-  const rel = path.relative(ROOT, real)
+  // Lexical containment barrier FIRST — before ANY filesystem access — so nothing
+  // touches an unvalidated user path. A `path.relative(...)` that starts with '..'
+  // (or is absolute) is the containment barrier CodeQL recognizes for js/path-injection.
+  const rel = path.relative(ROOT, resolved)
   if (rel.startsWith('..') || path.isAbsolute(rel)) {
     throw new Error('path escapes the permitted root')
+  }
+  // `resolved` is now confined to ROOT. Symlink hardening: if it already exists,
+  // resolve symlinks and re-check the real target is still inside ROOT (a symlink
+  // inside ROOT could otherwise redirect the op outside it — a lexical resolve
+  // misses that). New paths (e.g. a file being created) keep the validated value.
+  let real = resolved
+  if (fs.existsSync(resolved)) {
+    const realResolved = fs.realpathSync(resolved)
+    const realRel = path.relative(ROOT, realResolved)
+    if (realRel.startsWith('..') || path.isAbsolute(realRel)) {
+      throw new Error('path escapes the permitted root')
+    }
+    real = realResolved
   }
   return real
 }
