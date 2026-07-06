@@ -654,9 +654,12 @@ async function proxyToAgentMachine(url: string, body: ChatRequest, signal: Abort
   try { target = new URL(url) } catch {
     return NextResponse.json({ error: 'agent_machine_endpoint must be a localhost URL' }, { status: 400 })
   }
-  const host = target.hostname.toLowerCase()
-  if ((target.protocol !== 'http:' && target.protocol !== 'https:') ||
-      !(host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]')) {
+  // Guard on target.hostname DIRECTLY (URL already lowercases the host) so the loopback
+  // allowlist is a barrier CodeQL's request-forgery recognizer ties to the fetch(target) below.
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+    return NextResponse.json({ error: 'agent_machine_endpoint must be a localhost URL' }, { status: 400 })
+  }
+  if (target.hostname !== 'localhost' && target.hostname !== '127.0.0.1' && target.hostname !== '::1' && target.hostname !== '[::1]') {
     return NextResponse.json({ error: 'agent_machine_endpoint must be a localhost URL' }, { status: 400 })
   }
   // Strip agent_machine_endpoint from the forwarded body to prevent infinite recursion
