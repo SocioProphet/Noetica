@@ -205,8 +205,11 @@ export function selectSurface(allNodes: GNode[], allEdges: GEdge[], opts: { view
         .sort((a, b) => (degree.get(b.id) ?? 0) - (degree.get(a.id) ?? 0) || Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0))
         .slice(0, limit)
     }
-  } else if (rootMatch) {
-    const roots = (root && byId.has(root) ? [byId.get(root)!] : labeled.filter((n) => rootMatch(n.labels[0] ?? '')))
+  } else if (typeof rootMatch === 'function') {
+    // typeof-function guard at the call site (not just the truthy check) is the barrier
+    // CodeQL recognizes for js/unvalidated-dynamic-method-call.
+    const match = rootMatch
+    const roots = (root && byId.has(root) ? [byId.get(root)!] : labeled.filter((n) => match(n.labels[0] ?? '')))
       .sort((a, b) => (degree.get(b.id) ?? 0) - (degree.get(a.id) ?? 0))
     const seen = new Set<string>()
     const queue: string[] = []
