@@ -29,7 +29,11 @@ export function rulesUsed(proof: ProofNode): string[] {
 
 /** Human-readable indented proof. */
 export function explainProof(proof: ProofNode, depth = 0): string {
-  const pad = '  '.repeat(Math.min(Math.max(depth, 0), 64))
+  const d = Math.min(Math.max(depth, 0), 64)
+  const pad = '  '.repeat(d)
   const head = proof.rule ? `${proof.fact}  ⟵ ${proof.rule}` : `${proof.fact}  (base fact)`
+  // Bound the recursion too (not just the indent) so a deeply-nested proof tree can't
+  // exhaust the stack (js/resource-exhaustion).
+  if (depth >= 64) return `${pad}${head}  …(truncated)`
   return [pad + head, ...proof.children.map((c) => explainProof(c, depth + 1))].join('\n')
 }
