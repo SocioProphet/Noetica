@@ -147,10 +147,14 @@ const VIEW_ROOTS: Record<string, (label: string) => boolean> = {
 // the ecosystem (repos / models / providers / tools) — what "Sociosphere" should mean,
 // not the memory-chunk soup of the document/chat lenses.
 const CATEGORY_VIEWS: Record<string, string> = { knowledge: 'learning' }   // tech is now a CodeModule root-lens (VIEW_ROOTS), not an embedding cluster
+// Allowlist of accepted view names — validating the user-supplied `view` against this
+// fixed set before it indexes CATEGORY_VIEWS/VIEW_ROOTS is the barrier CodeQL recognizes
+// for js/unvalidated-dynamic-method-call.
+const ALLOWED_VIEWS = new Set(['all', 'tech', 'domain', 'document', 'memory', 'chat', 'knowledge'])
 
 export function selectSurface(allNodes: GNode[], allEdges: GEdge[], opts: { view?: string; limit?: number; root?: string } = {}): SurfaceResult {
   const limit = Math.min(120, Math.max(10, opts.limit ?? 34))
-  const view = opts.view ?? 'all'
+  const view = opts.view && ALLOWED_VIEWS.has(opts.view) ? opts.view : 'all'
   const root = opts.root ?? ''
 
   const degree = new Map<string, number>()
