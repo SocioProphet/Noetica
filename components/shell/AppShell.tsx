@@ -94,7 +94,9 @@ import type { ProviderTool, ToolUseBlock } from '@/lib/providers'
 import { mcpManager } from '@/lib/mcp/client'
 import { amUrl } from '@/lib/tauri/bridge'
 
-const SURFACE_ORDER: ActiveSurface[] = ['chat', 'notes', 'canvas', 'workrooms', 'cowork', 'projects', 'artifacts', 'code', 'evaluate', 'operate', 'computer']
+// ⌘1–⌘9 surface shortcuts. Order MUST match the Command Palette / Help modal
+// shortcut list so the advertised keys actually land on the right surface.
+const SURFACE_ORDER: ActiveSurface[] = ['chat', 'notes', 'workrooms', 'cowork', 'projects', 'artifacts', 'code', 'evaluate', 'operate']
 
 const surfaceToWorkspaceMode: Record<ActiveSurface, WorkspaceMode> = {
   chat:         'Chat',
