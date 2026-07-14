@@ -28,7 +28,7 @@ export async function grantProjectRoot(path: string): Promise<void> {
  */
 export async function pickProjectRoot(): Promise<string | null> {
   if (!isTauri()) return null
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line
   const dlg: any = await import(/* webpackIgnore: true */ '@tauri-apps/plugin-dialog' as string)
   const picked: string | string[] | null = await dlg.open({
     directory: true,
