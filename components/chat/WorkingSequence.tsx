@@ -32,7 +32,8 @@ export function WorkingSequence({ size = 34 }: { size?: number }) {
     ctx.lineJoin = 'round'
     ctx.lineCap = 'round'
 
-    const color = getComputedStyle(canvas).color || '#888'
+    const color = getComputedStyle(canvas).color || '#888'      // lines stay monochrome (the text color)
+    const BEADS = ['#6c9ef0', '#eb9ec6', '#9aa1ab']             // the points: a quiet blue · pink · grey rhythm
     const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
 
     const cx = size / 2
@@ -81,10 +82,10 @@ export function WorkingSequence({ size = 34 }: { size?: number }) {
         if (morph > 0 && n >= 3) edge(n - 1, 0, 1 - morph)     // old closing edge fades out
       }
 
-      ctx.fillStyle = color
       for (let i = 0; i < count; i++) {
         const isNew = morph > 0 && i === n
         const a = at(ang[i]!)
+        ctx.fillStyle = BEADS[i % BEADS.length]!             // beads cycle blue · pink · grey
         ctx.globalAlpha = (isNew ? morph : 1) * g
         ctx.beginPath(); ctx.arc(a[0], a[1], isNew ? dotR * morph : dotR, 0, TAU); ctx.fill()
       }
@@ -108,11 +109,11 @@ export function WorkingSequence({ size = 34 }: { size?: number }) {
         }
         ctx.stroke()
       }
-      // a point at each of the T outer lobes — keeps the "points" motif and makes the twist countable
-      ctx.fillStyle = color
+      // a bead at each of the T outer lobes — keeps the "points" motif and makes the twist countable
       for (let j = 0; j < T; j++) {
         const th = (j / T) * TAU
         const rad = R + weave
+        ctx.fillStyle = BEADS[j % BEADS.length]!            // beads cycle blue · pink · grey
         ctx.beginPath()
         ctx.arc(cx + rad * Math.cos(th + base), cy + rad * Math.sin(th + base), dotR, 0, TAU)
         ctx.fill()
