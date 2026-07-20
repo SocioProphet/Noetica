@@ -178,6 +178,7 @@ export const NAV_SURFACES: NavSurface[] = [
 
   // ── Govern (cross-cutting) ─────────────────────────────────────────────
   { id: 'govern',     label: 'Govern',      center: 'govern', tier: 'primary', maturity: 'live' },
+  { id: 'runs',       label: 'Background tasks', center: 'govern', tier: 'secondary', maturity: 'live' }, // RunsSurface — recent async agent runs from the governance ring; the ⋮ quick-access target
   { id: 'alignment',  label: 'Alignment',   center: 'govern', tier: 'primary', maturity: 'beta' },
   { id: 'holographme', label: 'HolographMe', center: 'govern', tier: 'secondary', maturity: 'beta' },
 ]

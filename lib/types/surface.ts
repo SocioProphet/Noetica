@@ -36,3 +36,4 @@ export type ActiveSurface =
   | 'intelligence'
   | 'portfolio'
   | 'platform'
+  | 'runs'

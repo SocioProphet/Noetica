@@ -303,6 +303,7 @@ const surfaceItems: SurfaceItem[] = [
   { id: 'docs',        label: 'Documents',   icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden><path d="M6 2h8l4 4v16H6z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/><path d="M14 2v4h4M8 12h8M8 16h6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>, items: ['Docs', 'Sheets', 'Slides'] },
   { id: 'tune',        label: 'Tune & Train',icon: <IconTune />,       items: ['Comparative runs', 'Preference pairs', 'DPO export'] },
   { id: 'govern',      label: 'Govern',      icon: <IconGovern />,     items: ['Policy trace', 'Memory scope', 'Evidence export'] },
+  { id: 'runs',        label: 'Background tasks', icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden><circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.6"/><path d="M12 7v5l3 2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/></svg>, items: ['Chat turns', 'Sub-agents', 'Tool calls'] },
   { id: 'operate',     label: 'Operate',     icon: <IconOperate />,    items: ['Graph health', 'Time service', 'Event ledger'] },
   { id: 'computer',    label: 'Computer Use',icon: <IconComputerUse />, items: ['Screenshot', 'Actions', 'History'] },
   { id: 'holographme', label: 'HolographMe', icon: <IconHolograph />,  items: [] },
@@ -475,7 +476,7 @@ export function Sidebar({
                     <svg key="a" width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden><path d="M7 1.5l4.5 2.6v5.8L7 12.5 2.5 9.9V4.1L7 1.5z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/><path d="M2.6 4.2L7 6.8l4.4-2.6M7 6.8v5.6" stroke="currentColor" strokeWidth="1.1"/></svg>],
                   ['docs', 'Files',
                     <svg key="f" width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden><path d="M3 1.5h5L11 4.5V12H3V1.5z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/><path d="M8 1.5V4.5h3" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/></svg>],
-                  ['operate', 'Background tasks',
+                  ['runs', 'Background tasks',
                     <svg key="t" width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden><circle cx="7" cy="7" r="5.2" stroke="currentColor" strokeWidth="1.2"/><path d="M7 4v3l2 1.3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/></svg>],
                 ] as const).map(([surface, label, icon]) => (
                   <button

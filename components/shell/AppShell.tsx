@@ -40,6 +40,7 @@ import { CalendarSurface } from '@/components/surfaces/CalendarSurface'
 import { JitsiSurface } from '@/components/surfaces/JitsiSurface'
 import { OfficeViewer } from '@/components/surfaces/OfficeViewer'
 import { GovernSurface } from '@/components/surfaces/GovernSurface'
+import { RunsSurface } from '@/components/surfaces/RunsSurface'
 import { ProjectsSurface } from '@/components/surfaces/ProjectsSurface'
 import { ArtifactsSurface } from '@/components/surfaces/ArtifactsSurface'
 import { ArtifactPane } from '@/components/artifacts/ArtifactPane'
@@ -121,6 +122,7 @@ const surfaceToWorkspaceMode: Record<ActiveSurface, WorkspaceMode> = {
   docs:         'Chat',
   operate:      'Chat',
   govern:       'Chat',
+  runs:         'Chat',
   tune:         'Chat',
   holographme:  'Chat',
   geo:          'Chat',
@@ -2008,6 +2010,7 @@ function CenterWorkspace({ activeSurface, sessionId, activeProjectTitle, project
       .map((m) => ({ messageId: m.id, content: m.content.slice(0, 80), governance: m.governance! }))
     return <GovernSurface recentTraces={traces} />
   }
+  if (activeSurface === 'runs')         return <RunsSurface />
   if (activeSurface === 'tune')         return <TuneSurface thinkingBudget={thinkingBudget} />
   if (activeSurface === 'computer')     return <ComputerUseSurface />
   if (activeSurface === 'holographme')  return <HolographMeSurface />
