@@ -711,9 +711,9 @@ async function verifyArm(question: string, choices: string[], pools: Chunk[][]):
 // systematically penalized every context-bearing arm. One cheap retry with a letter-only
 // instruction converts a parse failure back into an answer; true abstains still return ''.
 async function askLetter(prompt: string): Promise<string> {
-  const first = await askLetter(prompt)
+  const first = extractLetter(await ask(prompt))
   if (first) return first
-  return await askLetter(prompt + '\n\nIMPORTANT: reply with ONLY the single letter of your answer (A, B, C, or D) — no reasoning, no other text.')
+  return extractLetter(await ask(prompt + '\n\nIMPORTANT: reply with ONLY the single letter of your answer (A, B, C, or D) — no reasoning, no other text.'))
 }
 
 function extractLetter(raw: string): string {
