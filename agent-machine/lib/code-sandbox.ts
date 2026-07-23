@@ -165,10 +165,12 @@ export function sandboxExecPrefix(): string[] | null {
 /** Wrap [cmd, ...args] with the credential-confinement sandbox when available. */
 function withSandbox(cmd: string, args: string[]): { cmd: string; args: string[] } {
   const prefix = sandboxExecPrefix();
-  if (!prefix && process.env['NOETICA_ALLOW_UNSANDBOXED'] !== '1') {
-    // FAIL CLOSED: an unknown/unsandboxed platform (e.g. Windows today) is not evidence of a
-    // safe platform. The tester reasonably assumes the agent is sandboxed — make the downgrade
-    // an explicit operator decision, not a silent fallthrough.
+  const platformHasSandboxStory = process.platform === 'darwin' || process.platform === 'linux'
+  if (!prefix && !platformHasSandboxStory && process.env['NOETICA_ALLOW_UNSANDBOXED'] !== '1') {
+    // FAIL CLOSED on platforms with NO sandbox story (Windows today, unknowns): the tester
+    // reasonably assumes the agent is sandboxed — make the downgrade an explicit operator
+    // decision, not a silent fallthrough. darwin uses seatbelt; linux keeps its established
+    // restricted-env execution path (container isolation happens at the runtime tier).
     throw new Error('code execution disabled: no sandbox tier on this platform (set NOETICA_ALLOW_UNSANDBOXED=1 to accept bare-host execution)');
   }
   return prefix ? { cmd: prefix[0]!, args: [...prefix.slice(1), cmd, ...args] } : { cmd, args };
