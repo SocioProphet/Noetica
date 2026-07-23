@@ -641,7 +641,7 @@ async function askVote(prompt: string, k: number): Promise<{ letter: string; agr
   // Cloud answerer is temperature-free (deterministic-ish): K identical samples cannot vote.
   // Collapse to a single call — choice-shuffle ensembles still vary the PROMPT, so they survive.
   if (ANSWERER === 'cloud') k = 1
-  if (k <= 1) return { letter: extractLetter(await ask(prompt)), agree: 1 }
+  if (k <= 1) return { letter: await askLetter(prompt), agree: 1 }
   // The voting kernel now lives in lib/crag-gate.ts (cragVote) so the bench exercises the SAME code production
   // uses — same Adaptive-SC early-stop + agreement metric. CISC weighting and the temp-0 empty-fallback are
   // wired in via the sampler/options closures, preserving the original behavior exactly.
@@ -704,6 +704,18 @@ async function verifyArm(question: string, choices: string[], pools: Chunk[][]):
   let best = 0; for (let i = 1; i < scores.length; i++) if (scores[i]! > scores[best]!) best = i
   return { letter: LETTERS[best]!, scores }
 }
+// askLetter — extraction with a strict-format retry. The ST026 abstention forensics: with a
+// large injected context the model reasons longer, blows the MAXTOK budget before emitting
+// "FINAL: X", and the un-parseable reply was silently scored as a wrong answer ('?'). Baseline
+// (short prompt) never abstained — 0/117 vs 13/49 on brain regressions — so this artifact
+// systematically penalized every context-bearing arm. One cheap retry with a letter-only
+// instruction converts a parse failure back into an answer; true abstains still return ''.
+async function askLetter(prompt: string): Promise<string> {
+  const first = await askLetter(prompt)
+  if (first) return first
+  return await askLetter(prompt + '\n\nIMPORTANT: reply with ONLY the single letter of your answer (A, B, C, or D) — no reasoning, no other text.')
+}
+
 function extractLetter(raw: string): string {
   // Thinking models (qwen3/r1) emit <think>…</think> before the answer. Strip closed blocks,
   // and if max_tokens truncated mid-think (unclosed <think>), drop everything after it → '' (a
@@ -932,6 +944,40 @@ const KTYPE_PY = path.join(__dirname, 'knowledge_type.py')
 interface KType { types: string[]; solver: string }
 /** Classify each question's knowledge type (one python call) so the CHAMPION arm understands the
  *  problem BEFORE approaching: compute the computational, verify the conceptual, retrieve the factual. */
+// ktypeLLM — frontier-labeled knowledge-type routing (MMLU_KTYPE=llm). The regex v0 under-fires
+// badly: on the ST026 miss review it caught only 14/49 compute-typed questions (missed coin-toss,
+// counting, doubling, rationalize — all phrased without trigger words), and the router built on it
+// couldn't beat baseline. gate/champion/groundgate/learned all consult this classification, so a
+// better classifier upgrades the PROVEN arms in place. Cached to disk by question hash — one cloud
+// call per uncached batch, pennies per subject. Falls back to the regex on any failure.
+const KTYPE_CACHE = path.join(HOME, '.noetica', 'ktype-llm-cache.json')
+async function ktypeLLM(qs: Q[]): Promise<KType[] | null> {
+  try {
+    const crypto = await import('node:crypto')
+    const keyOf = (q: Q) => crypto.createHash('sha1').update(q.question).digest('hex').slice(0, 16)
+    let cache: Record<string, KType> = {}
+    try { cache = JSON.parse(fs.readFileSync(KTYPE_CACHE, 'utf8')) } catch { /* first run */ }
+    const missing = qs.filter((q) => !cache[keyOf(q)])
+    if (missing.length > 0) {
+      const listing = missing.map((q, i) => `${i}: ${q.question.slice(0, 400)}`).join('\n')
+      const raw = await askCloud(
+        `Classify each exam question by the SOLVER that decides it:\n` +
+        `- compute: performing an arithmetic/algebraic calculation or symbolic derivation produces the answer (even if no word like "calculate" appears — counting, probability arithmetic, growth/doubling, simplification, unit-digit, rate problems are all compute)\n` +
+        `- retrieve: a specific factual/definitional lookup decides it\n` +
+        `- reason: multi-step conceptual reasoning with neither a calculation nor a single lookup\n\n` +
+        `Questions:\n${listing}\n\nOutput ONLY one line per question: <index>: <solver>`)
+      for (const line of raw.split('\n')) {
+        const m = /^\s*(\d+)\s*:\s*(compute|retrieve|reason)/i.exec(line)
+        if (m) { const q = missing[Number(m[1])]; if (q) cache[keyOf(q)] = { types: [m[2]!.toLowerCase()], solver: m[2]!.toLowerCase() } }
+      }
+      fs.writeFileSync(KTYPE_CACHE, JSON.stringify(cache), { mode: 0o600 })
+    }
+    const out = qs.map((q) => cache[keyOf(q)])
+    if (out.some((x) => !x)) return null   // incomplete labeling → let the caller fall back
+    return out as KType[]
+  } catch { return null }
+}
+
 function ktypeBatch(qs: Q[]): KType[] {
   const res: KType[] = qs.map(() => ({ types: ['BasicFacts'], solver: 'retrieve' }))
   if (!qs.length) return res
@@ -995,6 +1041,7 @@ async function main() {
     if (done.size) console.log(`# RESUMED — ${done.size} questions already in the checkpoint; skipping them`)
   }
   let scored = done.size
+  const abstains: Record<string, number> = {}   // arm → '?' count: parse failures are VISIBLE, never silently 'wrong'
   const grandTotal = subjects.reduce((a, s) => a + (PER > 0 ? Math.min(PER, mmlu[s]!.length) : mmlu[s]!.length), 0)
   const writeStatus = (subject: string): void => {
     if (!STATUS) return
@@ -1024,7 +1071,10 @@ async function main() {
     const computeCtx: string[] = (wantCompute && COMPUTE_GROUND) ? await Promise.all(sample.map((q) => goldContext(q, pools, ncard))) : []
     const comp: CompRes[] = wantCompute ? computeBatch(sample, computeCtx) : []
     // knowledge-type per question (the 'understand first' step) — used by the champion router
-    const kt: KType[] = (ARMS.includes('champion') || ARMS.includes('gate') || ARMS.includes('groundgate') || ARMS.includes('learned')) ? ktypeBatch(sample) : []
+    const wantKt = ARMS.includes('champion') || ARMS.includes('gate') || ARMS.includes('groundgate') || ARMS.includes('learned')
+    const kt: KType[] = wantKt
+      ? (process.env['MMLU_KTYPE'] === 'llm' ? (await ktypeLLM(sample)) ?? ktypeBatch(sample) : ktypeBatch(sample))
+      : []
     const af: CompRes[] = ARMS.includes('autoform') ? await autoformBatch(sample) : []   // LLM-formalize → sympy-execute → vote
     const kgbertCtx: string[] = ARMS.includes('ground_kgbert') ? kgbertGroundBatch(sample) : []   // KG-BERT entity-kNN grounding
 
@@ -1088,10 +1138,10 @@ async function main() {
       const ANSWER_RULE = '\n\nReason in ONE short sentence, then output exactly one final line: "FINAL: X" (X = A, B, C, or D).'
       const brainPrompt = `Relevant MIT course notes (use only what helps; ignore noise and fragments):\n\n${context}\n\nExam question:\n${base}${ANSWER_RULE}`
       let brainLetter: string | undefined // memoize so brain + route don't double-ask the model
-      const askBrain = async (): Promise<string> => (brainLetter ??= extractLetter(await ask(brainPrompt)))
+      const askBrain = async (): Promise<string> => (brainLetter ??= await askLetter(brainPrompt))
       const qgenPrompt = `Relevant MIT course notes (use only what helps; ignore noise and fragments):\n\n${qgenContext}\n\nExam question:\n${base}${ANSWER_RULE}`
       let qgenLetter: string | undefined
-      const askQgen = async (): Promise<string> => (qgenLetter ??= extractLetter(await ask(qgenPrompt)))
+      const askQgen = async (): Promise<string> => (qgenLetter ??= await askLetter(qgenPrompt))
       const ci = comp[i]
       const marks: string[] = []
       const results: Array<{ arm: string; ok: boolean; attempted: boolean }> = []
@@ -1108,7 +1158,7 @@ async function main() {
           const wide = await retrieveMulti(q.question, q.choices, pools, PER_SHOT, RERANK_N, [], slugHints)
           const top = await rerankLLM(q.question, q.choices, wide, SHOT_K)
           const ctx = top.map((h, n) => `[${n + 1}] ${h.text.slice(0, 500)}`).join('\n\n')
-          letter = extractLetter(await ask(`Relevant MIT course notes (use only what helps; ignore noise and fragments):\n\n${ctx}\n\nExam question:\n${base}${ANSWER_RULE}`)); mode = `rerank:${top.length}`
+          letter = await askLetter(`Relevant MIT course notes (use only what helps; ignore noise and fragments):\n\n${ctx}\n\nExam question:\n${base}${ANSWER_RULE}`); mode = `rerank:${top.length}`
         } else if (arm === 'inline') {            // Phase 0.4: inline evidence binding — model cites which chunk it's grounding on
           // Forces explicit {letter, reasoning, cited:[{id,span}]} output so faithfulness is measurable per-answer,
           // not just post-hoc over the whole run. Feeds Metric 2 (inline fidelity) in provenance_eval.py.
@@ -1127,10 +1177,10 @@ async function main() {
           row['inline_grounded_rate'] = Number(stats.grounded_rate.toFixed(3))
         } else if (arm === 'ground') {            // CANON GROUNDING: the question's entities → glossary defs + related equations/models + prereq decomposition + bridges
           const g = canonGround(`${q.question} ${q.choices.join(' ')}`)
-          letter = extractLetter(await ask(`${g ? g + '\n\n' : ''}Exam question:\n${base}${ANSWER_RULE}`)); mode = g ? 'ground' : 'no-canon'
+          letter = await askLetter(`${g ? g + '\n\n' : ''}Exam question:\n${base}${ANSWER_RULE}`); mode = g ? 'ground' : 'no-canon'
         } else if (arm === 'ground_kgbert') {     // KG-BERT GROUNDING: structurally-nearest concepts (entity-vector kNN) — the decorrelated retriever
           const g = kgbertCtx[i] ?? ''
-          letter = extractLetter(await ask(`${g ? g + '\n\n' : ''}Exam question:\n${base}${ANSWER_RULE}`)); mode = g ? 'kgbert' : 'no-kgbert'
+          letter = await askLetter(`${g ? g + '\n\n' : ''}Exam question:\n${base}${ANSWER_RULE}`); mode = g ? 'kgbert' : 'no-kgbert'
         } else if (arm === 'cohere') {            // Choice-Coherence Elimination. EMITS the RAW per-choice feature
           // matrix (cohesion, uniqueness, set-incl) into the row — NOT just the argmax pick — so the transcript is
           // training data for the n-furcated combiner (no aggregation that loses the points). The letter is still
@@ -1192,14 +1242,14 @@ async function main() {
             if (def === undefined) { def = (await fetchConceptDef(t, field))?.definition ?? null; defsCache.set(key, def) }
             if (def) defs.push(`- ${t}: ${def}`)
           }
-          if (defs.length) { letter = extractLetter(await ask(`Relevant definitions:\n${defs.join('\n')}\n\n${base}${ANSWER_RULE}`)); mode = `defs:${defs.length}/${terms.length}` }
-          else { letter = extractLetter(await ask(`${base}${ANSWER_RULE}`)); mode = 'defs:miss' }   // no clean def → closed-book (never worse than baseline for lack of grounding)
+          if (defs.length) { letter = await askLetter(`Relevant definitions:\n${defs.join('\n')}\n\n${base}${ANSWER_RULE}`); mode = `defs:${defs.length}/${terms.length}` }
+          else { letter = await askLetter(`${base}${ANSWER_RULE}`); mode = 'defs:miss' }   // no clean def → closed-book (never worse than baseline for lack of grounding)
         } else if (arm === 'notecard') {          // OPEN-BOOK exam: answer with the domain's curated FORMULA SHEET
           // What a student actually brings into the test — the canonical equations for the field, all in context
           // (not top-k retrieved, not noisy prose). Only useful post-v4 (the formulas have to be in the brain).
           const card = loadNotecard(fields)
-          if (card) { letter = extractLetter(await ask(`Exam formula sheet — these are the canonical formulas you may use:\n${card}\n\n${base}${ANSWER_RULE}`)); mode = `notecard:${fields.join('+')}` }
-          else { letter = extractLetter(await ask(`${base}${ANSWER_RULE}`)); mode = 'notecard:none' }   // not mined yet → closed-book
+          if (card) { letter = await askLetter(`Exam formula sheet — these are the canonical formulas you may use:\n${card}\n\n${base}${ANSWER_RULE}`); mode = `notecard:${fields.join('+')}` }
+          else { letter = await askLetter(`${base}${ANSWER_RULE}`); mode = 'notecard:none' }   // not mined yet → closed-book
         } else if (arm === 'hop') {               // HippoRAG ITERATIVE query-graph expansion (#14): uncertain → graph-hop → re-retrieve
           // Each hop: answer with the current context (SC vote = confidence); if uncertain, build a local
           // concept graph from those chunks and PPR-expand on the query → the associatively-bridged concepts
@@ -1355,7 +1405,7 @@ async function main() {
             let manipLetter: string | undefined
             if (process.env['MMLU_MANIP'] !== '0') {   // manipulation-layer voter (Self-Discover): compose a plan, then execute
               const sdPlan = await ask(`Name the 2-3 reasoning steps that best fit this problem (governing principle / sub-steps / eliminate options / compute / recall definition). Short numbered plan only.\n\n${q.question}`)
-              manipLetter = extractLetter(await ask(`Execute this plan:\n${sdPlan}\n\n${base}${ANSWER_RULE}`))
+              manipLetter = await askLetter(`Execute this plan:\n${sdPlan}\n\n${base}${ANSWER_RULE}`)
             }
             const sc = await askVote(`${base}${ANSWER_RULE}`, SC_K)   // diverse reasoning vote (no retrieval noise)
             row['sc_agree'] = Number(sc.agree.toFixed(2))
@@ -1394,7 +1444,7 @@ async function main() {
             const order = Array.from({ length: n }, (_, j) => (j + m) % n)   // rotation m: each choice visits each position across the ensemble
             const shuffled = order.map((oi) => q.choices[oi]!)
             const pr = `${q.question}\n\n${shuffled.map((c, j) => `${LETTERS[j]}. ${c}`).join('\n')}${ANSWER_RULE}`
-            const p = LETTERS.indexOf(extractLetter(await ask(pr)))
+            const p = LETTERS.indexOf(await askLetter(pr))
             if (p >= 0 && p < n) { const orig = order[p]!; votes.set(orig, (votes.get(orig) ?? 0) + 1) }
           }
           let best = -1, bn = -1
@@ -1402,26 +1452,26 @@ async function main() {
           letter = best >= 0 ? LETTERS[best]! : ''; mode = `medprompt×${M}`
         } else if (arm === 'l2m') {               // Least-to-Most (Google): decompose into sub-questions, solve in order
           const sub = await ask(`Break this exam question into 2–3 simpler sub-questions whose answers build to the solution. List them only, no answers.\n\n${q.question}`)
-          letter = extractLetter(await ask(`Work through these sub-questions first, then the main question:\n${sub}\n\n${base}${ANSWER_RULE}`))
+          letter = await askLetter(`Work through these sub-questions first, then the main question:\n${sub}\n\n${base}${ANSWER_RULE}`)
           mode = 'l2m'
         } else if (arm === 'selfdiscover') {      // Self-Discover (DeepMind): compose a reasoning structure, then follow it
           const plan = await ask(`Pick the 2–3 reasoning steps that best fit this problem (from: identify the governing principle/law, break into sub-steps, eliminate wrong options, compute/derive, recall the definition). Output a short numbered plan.\n\n${q.question}`)
-          letter = extractLetter(await ask(`Execute this reasoning plan:\n${plan}\n\nOn:\n${base}${ANSWER_RULE}`))
+          letter = await askLetter(`Execute this reasoning plan:\n${plan}\n\nOn:\n${base}${ANSWER_RULE}`)
           mode = 'selfdiscover'
         } else if (arm === 'tot') {               // Tree-of-Thoughts (Princeton/DeepMind): propose approaches, self-evaluate, solve with the best
           const appr = await ask(`List 3 distinct approaches to solve this question, one short line each.\n\n${q.question}`)
-          letter = extractLetter(await ask(`Candidate approaches:\n${appr}\n\nPick the single most promising approach (one line on why), then carry it out on:\n${base}${ANSWER_RULE}`))
+          letter = await askLetter(`Candidate approaches:\n${appr}\n\nPick the single most promising approach (one line on why), then carry it out on:\n${base}${ANSWER_RULE}`)
           mode = 'tot'
         } else if (arm === 'reflect') {           // process-supervision-lite (OpenAI PRM): self-verify the reasoning, revise a flawed step
           const first = await ask(`${base}${ANSWER_RULE}`)
-          letter = extractLetter(await ask(`A student proposed this solution:\n${first}\n\nQuestion:\n${base}\n\nCheck each reasoning step for an error. If any step is wrong, correct it and give the right answer; otherwise confirm.${ANSWER_RULE}`))
+          letter = await askLetter(`A student proposed this solution:\n${first}\n\nQuestion:\n${base}\n\nCheck each reasoning step for an error. If any step is wrong, correct it and give the right answer; otherwise confirm.${ANSWER_RULE}`)
           mode = 'reflect'
         } else if (arm === 'cloud_baseline') {    // ST026: cloud-scale model, closed book — IDENTICAL prompt to baseline
           letter = extractLetter(await askCloud(`${base}${ANSWER_RULE}`)); mode = CLOUD_MODEL
         } else if (arm === 'cloud_brain') {        // ST026: cloud-scale model + the SAME brain retrieval context as `brain`
           letter = extractLetter(await askCloud(brainPrompt)); mode = CLOUD_MODEL
         } else {                                  // baseline (closed book)
-          letter = extractLetter(await ask(`${base}${ANSWER_RULE}`))
+          letter = await askLetter(`${base}${ANSWER_RULE}`)
         }
         } catch (e) { letter = ''; mode = `ERR:${String((e as Error)?.message ?? e).slice(0, 50)}`; attempted = false }   // arm abstains on failure; the run goes on
         const ok = letter === gold
@@ -1508,6 +1558,7 @@ async function main() {
             r.row['gate_typical'] = g.typical
           }
         } catch { /* gate is best-effort; never block the checkpoint */ }
+        for (const a of ARMS) if (r.row[`${a}_pred`] === '?') (abstains[a] = (abstains[a] ?? 0) + 1)
         fs.appendFileSync(TRANSCRIPT, JSON.stringify(r.row) + '\n')   // durable per-question checkpoint
         scored++
         console.log(`  ${String(r.i + 1).padStart(3)}. ${r.marks.join('  ')}  /${r.gold}`)
@@ -1540,6 +1591,8 @@ async function main() {
     totDelta = `  ${d >= 0 ? '+' : ''}${d.toFixed(1)}`
   }
   console.log(`  ${'── OVERALL'.padEnd(26)}${totLine}${totDelta}`)
+  const abLine = ARMS.filter((a) => abstains[a]).map((a) => `${a}=${abstains[a]}`).join(' ')
+  if (abLine) console.log(`  ⚠ abstentions (unparseable / no answer, scored wrong): ${abLine}`)
   if (totals['compute']) {
     const cv = totals['compute']!
     console.log(`  ${'   ↳ compute'.padEnd(26)}  fired on ${cv.a}/${cv.n} (${pct(cv.a, cv.n)}%) · accuracy-on-fired ${pct(cv.c, cv.a)}%  (the verified-compute moat; rest abstain${ARMS.includes('route') ? ' → routed to brain' : ''})`)
