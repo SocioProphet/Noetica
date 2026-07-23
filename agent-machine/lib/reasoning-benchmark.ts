@@ -46,6 +46,9 @@ export interface BenchmarkResult {
   /** optional extras (additionalProperties allowed by the schema) */
   perSubject?: number
   k?: number
+  /** per-domain tallies: subject → arm → {c,n}. Each becomes a signed assertion, so the
+   *  receipt carries the FULL per-domain breakdown, not just board-level totals. */
+  domains?: Record<string, Record<string, { c: number; n: number }>>
 }
 
 export interface ReasoningBenchmark {
@@ -100,6 +103,21 @@ export function emitReasoningBenchmark(result: BenchmarkResult): ReasoningBenchm
         ...(t.a != null ? { fired: t.a } : {}),
       }
     })
+    // Per-domain assertions — one per (subject, arm). "Receipts by each domain."
+    for (const [subject, armTallies] of Object.entries(result.domains ?? {})) {
+      for (const [arm, t] of Object.entries(armTallies)) {
+        assertions.push({
+          name: `domain:${subject}:${arm}`,
+          passed: t.n > 0,
+          summary: `${subject} / ${arm} — ${t.c}/${t.n} correct (${pct(t.c, t.n)}%)`,
+          arm,
+          correct: t.c,
+          attempted: t.n,
+          accuracy: pct(t.c, t.n),
+          subject,
+        } as (typeof assertions)[number] & { subject: string })
+      }
+    }
     const passed = assertions.length > 0 && assertions.every((a) => a.passed)
 
     const benchHex = hex()

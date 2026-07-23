@@ -132,7 +132,8 @@ export const EMBED_MODEL = process.env['NOETICA_EMBED_MODEL'] ?? 'nomic-embed-te
 let _embedDownUntil = 0
 const EMBED_COOLDOWN_MS = Number(process.env['NOETICA_EMBED_COOLDOWN_MS'] || 15_000)
 
-export async function embedText(text: string): Promise<number[]> {
+let _dimMismatchWarned = false
+export async function embedText(text: string, opts?: { dims?: number }): Promise<number[]> {
   if (_embedDownUntil && Date.now() < _embedDownUntil) return []   // breaker open → lexical, skip the re-probe
   // CONSOLIDATION (opt-in): route embeds to our own Rust sidecar instead of Ollama, so Ollama is freed for
   // GENERATION ONLY — this is the foundational fix for the embed↔generate contention that wedged the runner.
@@ -143,7 +144,18 @@ export async function embedText(text: string): Promise<number[]> {
     try {
       const { embedBatchLocal } = await import('./embed-runtime.js')
       const out = await embedBatchLocal([text.slice(0, 8000)])
-      if (out && out[0] && out[0].length) { _embedDownUntil = 0; return out[0] }
+      if (out && out[0] && out[0].length) {
+        // Dimension contract (the ST026 silent-failure fix): when the caller declares the
+        // vector space it needs (its corpus dims), a sidecar answer in a DIFFERENT space is
+        // useless — cosine against those chunks is garbage, and dimension guards downstream
+        // discard every hit, which looks exactly like "retrieval found nothing". Fall
+        // through to Ollama (whose model matches the corpus) instead of returning it.
+        if (!opts?.dims || out[0].length === opts.dims) { _embedDownUntil = 0; return out[0] }
+        if (!_dimMismatchWarned) {
+          _dimMismatchWarned = true
+          console.warn(`[ollama] embedText: sidecar embeds ${out[0].length}-dim but caller needs ${opts.dims}-dim (corpus space) — using Ollama ${EMBED_MODEL} for these embeds. Reindex the corpus to switch spaces.`)
+        }
+      }
     } catch { /* sidecar unavailable → fall through to Ollama */ }
   }
   // Same primary→fallback resilience as chat: at ingest time the active base may

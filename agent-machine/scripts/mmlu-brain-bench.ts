@@ -310,10 +310,16 @@ function topK(qVec: number[], pools: Chunk[][], k: number): Chunk[] {
 // embedCached — brain, qgen, champion and verify all re-embed the SAME per-choice queries.
 // Memoize so each distinct query embeds once per run (cuts ollama calls ~half).
 const _embCache = new Map<string, Promise<number[]>>()
+// Set once pools load: the corpus's vector space. embedText treats it as a contract —
+// an embedder answering in a different space (e.g. the 384-dim Rust sidecar vs a 768-dim
+// nomic corpus) is rejected and the Ollama corpus-matched model is used instead. This is
+// the fix for the ST026 silent failure where every retrieval came back empty.
+let CORPUS_DIMS = 0
+let _emptyRetrievalStreak = 0
 function embedCached(text: string): Promise<number[]> {
   const k = text.slice(0, 240)
   let p = _embCache.get(k)
-  if (!p) { p = embedText(text); _embCache.set(k, p) }
+  if (!p) { p = embedText(text, CORPUS_DIMS ? { dims: CORPUS_DIMS } : undefined); _embCache.set(k, p) }
   return p
 }
 
@@ -986,6 +992,7 @@ async function main() {
   for (const subject of subjects) {
     const fields = SUBJECT_FIELDS[subject]!.filter(fieldReady)
     const pools = fields.map(loadField)
+    if (!CORPUS_DIMS) CORPUS_DIMS = pools.flat().find((c) => c.vec.length)?.vec.length ?? 0
     const widerPools = (ARMS.includes('elim') || ARMS.includes('fiftyfifty'))
       ? [...new Set(fields.flatMap((f) => FIELD_ADJ[f] ?? []).filter((f) => !fields.includes(f) && fieldReady(f)))].map(loadField)
       : []
@@ -1031,6 +1038,17 @@ async function main() {
         context = hits.map((h, n) => `[${n + 1}] ${h.text.slice(0, 500)}`).join('\n\n')
         row['sources'] = hits.map((h) => `${h.slug}:${h.material}`)
         row['brain_conf'] = Number((hits[0]?.score ?? 0).toFixed(3))   // retrieval confidence (top cosine) — the council's grounding signal
+        // VALIDITY GATE (ST026 lesson): a brain arm that retrieves nothing is not "degraded",
+        // it is a DIFFERENT experiment silently mislabeled. 8 consecutive empty retrievals with
+        // 100k+ chunks loaded means the embedder is broken (down, wrong port, or wrong vector
+        // space) — abort loudly instead of completing a brainless board with a green exit code.
+        _emptyRetrievalStreak = hits.length === 0 ? _emptyRetrievalStreak + 1 : 0
+        if (_emptyRetrievalStreak >= 8 && process.env['MMLU_ALLOW_EMPTY_RETRIEVAL'] !== '1') {
+          throw new Error(
+            `retrieval returned 0 sources for ${_emptyRetrievalStreak} consecutive questions — the brain arm would run BLIND. ` +
+            `Check the embedder (OLLAMA_HOST reachable? NOETICA_EMBED_RUST vector space vs corpus dims=${CORPUS_DIMS}?) ` +
+            `or set MMLU_ALLOW_EMPTY_RETRIEVAL=1 to knowingly run lexical-only.`)
+        }
       }
 
       // queryGen arm: identical retriever + model, but with HyDE + step-back query shots added.
@@ -1515,6 +1533,9 @@ async function main() {
   try {
     const bm = emitReasoningBenchmark({
       totals, arms: ARMS, subjects, model: MODEL, seed: SEED, perSubject: PER, k: K,
+      // full per-domain breakdown, signed into the receipt as domain:{subject}:{arm} assertions
+      domains: Object.fromEntries(subjects.map((s2) => [s2,
+        Object.fromEntries(ARMS.map((a) => [a, { c: tally[a]![s2]!.c, n: tally[a]![s2]!.n }]))])),
     })
     if (bm) console.log(`# reasoning-benchmark: ${bm.id} (runRef ${bm.runRef})`)
   } catch (e) {
