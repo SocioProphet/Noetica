@@ -1049,6 +1049,13 @@ async function main() {
         const hits = await retrieveMulti(q.question, q.choices, pools, PER_SHOT, SHOT_K, [], slugHints)
         context = hits.map((h, n) => `[${n + 1}] ${h.text.slice(0, 500)}`).join('\n\n')
         row['sources'] = hits.map((h) => `${h.slug}:${h.material}`)
+        // CONTEXT CAPTURE (the missing evidence): store the ACTUAL chunk text fed to the model,
+        // per question, so a misses review can show exactly what context produced a wrong answer —
+        // and whether retrieval was question-PRECISE or merely subject-TOPICAL. Gated on
+        // MMLU_CAPTURE_CTX=1 (default on for the review runs) to keep transcripts small otherwise.
+        if (process.env['MMLU_CAPTURE_CTX'] !== '0') {
+          row['brain_ctx'] = hits.map((h) => ({ slug: h.slug, material: h.material, score: Number((h.score ?? 0).toFixed(3)), text: h.text.slice(0, 600) }))
+        }
         row['brain_conf'] = Number((hits[0]?.score ?? 0).toFixed(3))   // retrieval confidence (top cosine) — the council's grounding signal
         // VALIDITY GATE (ST026 lesson): a brain arm that retrieves nothing is not "degraded",
         // it is a DIFFERENT experiment silently mislabeled. 8 consecutive empty retrievals with
