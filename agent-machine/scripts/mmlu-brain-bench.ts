@@ -63,6 +63,12 @@ const API_BASE = (process.env['MMLU_API_BASE'] || BASE).replace(/\/$/, '')
 const API_KEY = process.env['MMLU_API_KEY'] || ''
 const AUTH: Record<string, string> = API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {}
 const MODEL = process.env['MMLU_MODEL'] || 'llama3.2:3b'
+// MMLU_ANSWERER=cloud — the 3-layer complementarity board: every arm keeps its OWN retrieval /
+// gating / deterministic-compute machinery, but the ANSWER model (and every LLM sub-call: query
+// gen, rerank, verdicts, formalization) is the cloud frontier model instead of the local one.
+// Answers the question "what does each harness layer add ON TOP OF a frontier model", where the
+// local boards answer "what does each layer add to a small sovereign model".
+const ANSWERER = process.env['MMLU_ANSWERER'] || 'local'
 const PER = Number(process.env['MMLU_PER_SUBJECT'] ?? 5)
 const K = Number(process.env['MMLU_K'] || 4)
 const SHOT_K = Number(process.env['MMLU_SHOT_K'] || 8)      // chunks injected after multi-shot union
@@ -545,6 +551,9 @@ const MAXTOK = Number(process.env['MMLU_MAX_TOKENS'] || 220)
 // false ✗? abstain. Only a genuinely-empty reply after ASK_RETRIES tries is a real abstain.
 const ASK_RETRIES = Number(process.env['MMLU_ASK_RETRIES'] || 2)
 async function ask(prompt: string, temperature = 0): Promise<string> {
+  // cloud answerer: one funnel, so EVERY arm's LLM sub-call rides the frontier model.
+  // (temperature is dropped — current Claude models reject it; determinism noted in board output.)
+  if (ANSWERER === 'cloud') return askCloud(prompt)
   const tries = Math.max(1, ASK_RETRIES)
   for (let attempt = 0; attempt < tries; attempt++) {
     try {
@@ -577,7 +586,7 @@ async function ask(prompt: string, temperature = 0): Promise<string> {
 // ADAPTIVE thinking — flag it in the board notes if MMLU_CLOUD_MODEL is swapped to Sonnet.
 const CLOUD_MODEL = process.env['MMLU_CLOUD_MODEL'] || 'claude-opus-4-8'
 const CLOUD_URL = (process.env['ANTHROPIC_BASE_URL'] || 'https://api.anthropic.com').replace(/\/$/, '')
-if (ARMS.some((a) => a.startsWith('cloud_')) && !process.env['ANTHROPIC_API_KEY'] && !process.env['ANTHROPIC_AUTH_TOKEN']) {
+if ((ARMS.some((a) => a.startsWith('cloud_')) || ANSWERER === 'cloud') && !process.env['ANTHROPIC_API_KEY'] && !process.env['ANTHROPIC_AUTH_TOKEN']) {
   console.error('cloud_* arms requested but neither ANTHROPIC_API_KEY nor ANTHROPIC_AUTH_TOKEN is set — refusing to run a board that would silently abstain every cloud answer')
   process.exit(1)
 }
@@ -629,6 +638,9 @@ function extractConf(raw: string): number {
   return Math.min(1, Math.max(0.1, c || 0.6))
 }
 async function askVote(prompt: string, k: number): Promise<{ letter: string; agree: number }> {
+  // Cloud answerer is temperature-free (deterministic-ish): K identical samples cannot vote.
+  // Collapse to a single call — choice-shuffle ensembles still vary the PROMPT, so they survive.
+  if (ANSWERER === 'cloud') k = 1
   if (k <= 1) return { letter: extractLetter(await ask(prompt)), agree: 1 }
   // The voting kernel now lives in lib/crag-gate.ts (cragVote) so the bench exercises the SAME code production
   // uses — same Adaptive-SC early-stop + agreement metric. CISC weighting and the temp-0 empty-fallback are
@@ -1498,7 +1510,8 @@ async function main() {
   }
 
   // ── summary ──
-  console.log(`\n# ════════ results (model ${MODEL}) ════════`)
+  const MODEL_LABEL = ANSWERER === 'cloud' ? `${CLOUD_MODEL} (cloud answerer)` : MODEL
+  console.log(`\n# ════════ results (model ${MODEL_LABEL}) ════════`)
   const header = `  ${'subject'.padEnd(26)}` + ARMS.map((a) => a.padStart(10)).join('') + (ARMS.length === 2 ? '     Δ' : '')
   console.log(header)
   const totals: Record<string, { c: number; n: number; a: number }> = {}
@@ -1532,7 +1545,7 @@ async function main() {
   // Best-effort — a benchmark-emit failure must NOT break the board.
   try {
     const bm = emitReasoningBenchmark({
-      totals, arms: ARMS, subjects, model: MODEL, seed: SEED, perSubject: PER, k: K,
+      totals, arms: ARMS, subjects, model: MODEL_LABEL, seed: SEED, perSubject: PER, k: K,
       // full per-domain breakdown, signed into the receipt as domain:{subject}:{arm} assertions
       domains: Object.fromEntries(subjects.map((s2) => [s2,
         Object.fromEntries(ARMS.map((a) => [a, { c: tally[a]![s2]!.c, n: tally[a]![s2]!.n }]))])),
