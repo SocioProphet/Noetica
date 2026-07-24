@@ -23,6 +23,8 @@ type InputAreaProps = {
   // Projects context (single source of truth = AppShell). Uploads bind to the project's KB collection, or to
   // this chat's collection when scope='chat'; the scope selector labels the active project.
   activeProjectTitle?: string
+  /** #7: docs in the active project's collection — drives the honest grounding indicator. */
+  projectDocCount?: number
   projectCollection?: string
   chatCollection?: string
   // All projects + the active one, so the scope picker can list them and switch
@@ -104,7 +106,7 @@ export function InputArea({
   mcpTools = [],
   modelId, onModelChange, thinkingBudget, onOpenPalette,
   systemPrompt = '', onSystemPromptChange,
-  activeProjectTitle, projectCollection, chatCollection,
+  activeProjectTitle, projectDocCount = 0, projectCollection, chatCollection,
   projects = [], activeProjectId, onSelectProject,
 }: InputAreaProps) {
   const [content, setContent] = useState('')
@@ -384,6 +386,24 @@ export function InputArea({
                 Stop listening
               </button>
             ) : null}
+          </div>
+        )}
+
+        {/* Project grounding (Gus #7): make it explicit what the project scope does — and never
+            let it silently fall back to memory when the project has no documents. */}
+        {retrievalScope === 'project' && activeProjectTitle && (
+          <div className="flex items-center gap-1.5 px-3.5 pt-2.5 text-[11px]">
+            {projectDocCount > 0 ? (
+              <span className="flex items-center gap-1.5 text-[var(--color-text-tertiary)]">
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M4 2h5l3 3v9H4V2Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/><path d="M9 2v3h3" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/></svg>
+                Grounded in <span className="font-medium text-[var(--color-text-secondary)]">{activeProjectTitle}</span> — {projectDocCount} document{projectDocCount > 1 ? 's' : ''}
+              </span>
+            ) : (
+              <span className="flex items-center gap-1.5 text-[#b45309]">
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M8 1.5 15 14H1L8 1.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/><path d="M8 6.5v3.5M8 12h.01" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>
+                <span><span className="font-medium">{activeProjectTitle}</span> has no documents yet — answers use memory, not project files. Add documents to ground them.</span>
+              </span>
+            )}
           </div>
         )}
 

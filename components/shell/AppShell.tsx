@@ -1881,6 +1881,7 @@ export function AppShell() {
                 activeSurface={activeSurface}
                 sessionId={activeSession?.id}
                 activeProjectTitle={activeProject?.title}
+                projectDocCount={activeProject?.fileAttachments?.length ?? 0}
                 projectCollection={activeProject ? projectCollectionId(activeProject.id) : undefined}
                 chatCollection={activeSession ? chatCollectionId(activeSession.id) : undefined}
                 projects={projects.map((p) => ({ id: p.id, title: p.title }))}
@@ -2131,6 +2132,7 @@ type CenterProps = {
   thinkingBudget: number | undefined
   onSend: (content: string, attachments: PendingAttachment[], mcpTools?: string[], scope?: { retrievalScope: RetrievalScope; web: boolean }) => Promise<void>
   activeProjectTitle?: string
+  projectDocCount?: number
   projectCollection?: string
   chatCollection?: string
   projects?: Array<{ id: string; title: string }>
@@ -2174,7 +2176,7 @@ type CenterProps = {
   onStopSpeaking?: () => void
 }
 
-function CenterWorkspace({ activeSurface, sessionId, activeProjectTitle, projectCollection, chatCollection, projects, activeProjectId, onSelectProject, messages, isStreaming, workspaceMode, fanoutModelCount, modelId, thinkingBudget, onSend, onFanout, onStop, onRegenerate, onResume, onFork, onEdit, onRecombine, onWorkspaceModeChange, onExtractArtifact, onModelChange, onOpenPalette, mcpTools, systemPrompt, onSystemPromptChange, activeArtifact, onCloseArtifact, onArtifactUpdate, onArtifactDelete, onAtomSelect, onOpenSettings, onNavigateToOperate, onNavigateToGovern, onSpeak, speakingMessageId, onFeedback, agentMode, onSetAgentMode, onPlanApprove, onPlanReject, onInspect, onStartDictation, onStopDictation, dictating, speaking, onStopSpeaking }: CenterProps) {
+function CenterWorkspace({ activeSurface, sessionId, activeProjectTitle, projectDocCount, projectCollection, chatCollection, projects, activeProjectId, onSelectProject, messages, isStreaming, workspaceMode, fanoutModelCount, modelId, thinkingBudget, onSend, onFanout, onStop, onRegenerate, onResume, onFork, onEdit, onRecombine, onWorkspaceModeChange, onExtractArtifact, onModelChange, onOpenPalette, mcpTools, systemPrompt, onSystemPromptChange, activeArtifact, onCloseArtifact, onArtifactUpdate, onArtifactDelete, onAtomSelect, onOpenSettings, onNavigateToOperate, onNavigateToGovern, onSpeak, speakingMessageId, onFeedback, agentMode, onSetAgentMode, onPlanApprove, onPlanReject, onInspect, onStartDictation, onStopDictation, dictating, speaking, onStopSpeaking }: CenterProps) {
   if (activeSurface === 'notes')        return <NotesSurface />
   if (activeSurface === 'canvas')       return <CanvasSurface />
   if (activeSurface === 'workrooms')    return <TabbedWorkspace tabs={[
@@ -2279,6 +2281,7 @@ function CenterWorkspace({ activeSurface, sessionId, activeProjectTitle, project
           systemPrompt={systemPrompt}
           onSystemPromptChange={onSystemPromptChange}
           activeProjectTitle={activeProjectTitle}
+          projectDocCount={projectDocCount}
           projectCollection={projectCollection}
           projects={projects}
           activeProjectId={activeProjectId}
