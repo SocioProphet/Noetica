@@ -46,6 +46,7 @@ export const defaultSettings: NoeticaSettings = {
 
   wakeWordEnabled: false,
   voiceLanguage: 'en-US',
+  speakResponses: false,
   ttsProvider: 'openai',
   ttsVoice: 'nova',
   macVoice: 'Ava',

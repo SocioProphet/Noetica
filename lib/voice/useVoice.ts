@@ -89,7 +89,17 @@ export function useVoice(onTranscript: (text: string) => void) {
             const res = await fetch(`${amBase}/api/stt`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ audio_b64: String(reader.result), language: (settings.voiceLanguage ?? 'en-US').slice(0, 2) }), signal: AbortSignal.timeout(90_000) })
             const j = (await res.json()) as { text?: string; error?: string }
             if (j.text?.trim()) { setError(null); onTranscript(j.text.trim()) }
-            else if (j.error) { console.warn('[voice] stt error:', j.error); setError('Couldn\u2019t transcribe that — please try again.') }
+            else if (j.error) {
+              console.warn('[voice] stt error:', j.error)
+              // Surface the ACTIONABLE reason (missing on-device engine) instead of a generic
+              // failure — the backend already knows whisper isn't installed; don't swallow it.
+              const e = j.error.toLowerCase()
+              if (e.includes('whisper') || e.includes('not installed') || e.includes('not found') || e.includes('no such')) {
+                setError('Voice transcription needs the on-device speech engine (whisper), which isn\u2019t set up yet \u2014 open Settings \u2192 Voice to install it.')
+              } else {
+                setError('Couldn\u2019t transcribe that \u2014 please try again.')
+              }
+            }
             else setError('Heard nothing — try again, closer to the mic.')
           } catch {
             // fetch threw → the voice backend isn't reachable. Make that explicit

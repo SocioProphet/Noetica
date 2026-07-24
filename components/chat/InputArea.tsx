@@ -79,6 +79,19 @@ function AttachmentChip({ attachment, onRemove }: { attachment: PendingAttachmen
   )
 }
 
+// Gus #4: composer dropdowns open UPWARD inside an overflow:hidden shell, so on a small window
+// a hardcoded max-height overruns the top edge and clips the top of the list. This measures the
+// trigger's viewport position on open and caps the menu to the space actually above it.
+function useMenuMaxHeight(open: boolean, triggerRef: React.RefObject<HTMLButtonElement | null>): number | undefined {
+  const [maxH, setMaxH] = useState<number | undefined>(undefined)
+  useEffect(() => {
+    if (!open || !triggerRef.current) { setMaxH(undefined); return }
+    const rect = triggerRef.current.getBoundingClientRect()
+    setMaxH(Math.max(140, Math.floor(rect.top - 16)))   // space above the trigger, minus a margin
+  }, [open, triggerRef])
+  return maxH
+}
+
 export function InputArea({
   onSend, onFanout, onStop,
   onStartDictation, onStopDictation, dictating = false,
@@ -96,6 +109,7 @@ export function InputArea({
   const [fanoutActive, setFanoutActive] = useState(false)
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
   const [attachError, setAttachError] = useState('')
+  const [attaching, setAttaching] = useState<string[]>([])   // Gus #8: files being read/queued, shown instantly
   const [dragOver, setDragOver] = useState(false)
   const [ingestedDocs, setIngestedDocs] = useState<Array<{
     filename: string; chunks: number; entities: number; preview: string[]
@@ -114,6 +128,12 @@ export function InputArea({
   const [secretWarning, setSecretWarning] = useState<{ kinds: string[] } | null>(null)
   const [showScopePicker, setShowScopePicker] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const scopeBtnRef = useRef<HTMLButtonElement>(null)
+  const modeBtnRef = useRef<HTMLButtonElement>(null)
+  const modelBtnRef = useRef<HTMLButtonElement>(null)
+  const scopeMenuMaxH = useMenuMaxHeight(showScopePicker, scopeBtnRef)
+  const modeMenuMaxH = useMenuMaxHeight(showModePicker, modeBtnRef)
+  const modelMenuMaxH = useMenuMaxHeight(showModelPicker, modelBtnRef)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const { settings, update } = useSettings()
   // Which collection new uploads land in: the current chat (when scoped to 'chat') or the active project's KB.
@@ -180,6 +200,7 @@ export function InputArea({
       if (res.ok || res.status === 202) setQueueVersion((v) => v + 1)
       else { const e = await res.json().catch(() => ({})) as { error?: string }; setAttachError(`Couldn't queue ${file.name}: ${e.error ?? res.status}`) }
     } catch (e) { setAttachError(`Couldn't queue ${file.name}: ${e instanceof Error ? e.message : 'failed'}`) }
+    finally { setAttaching((prev) => prev.filter((n) => n !== file.name)) }
   }
 
   async function postIngest(path: string, payload: unknown, filename: string): Promise<boolean> {
@@ -210,13 +231,19 @@ export function InputArea({
     const isIngestible = (f: File) => TEXT_TYPES.has(f.type) || TEXT_EXTS.test(f.name) || DOC_EXTS.test(f.name) || ARCHIVE_EXTS.test(f.name)
     const ingestFiles = fileArr.filter(isIngestible)
     const attachFiles = fileArr.filter((f) => !isIngestible(f))
-    ingestFiles.forEach((f) => { void ingestQueued(f) })
+    setAttaching((prev) => [...prev, ...fileArr.map((f) => f.name)])   // instant feedback (Gus #8)
+    ingestFiles.forEach((f) => { void ingestQueued(f) })   // each clears its own name when queued
     if (attachFiles.length > 0) {
       const remaining = MAX_ATTACHMENTS - attachments.length
-      if (remaining <= 0) { setAttachError(`Max ${MAX_ATTACHMENTS} attachments`); return }
-      const { ok, errors } = await readFilesAsAttachments(attachFiles.slice(0, remaining))
-      setAttachments((prev) => [...prev, ...ok])
-      if (errors.length > 0) setAttachError(errors.join('; '))
+      const picked = attachFiles.slice(0, remaining)
+      if (remaining <= 0) { setAttachError(`Max ${MAX_ATTACHMENTS} attachments`); setAttaching((prev) => prev.filter((n) => !attachFiles.some((f) => f.name === n))); return }
+      try {
+        const { ok, errors } = await readFilesAsAttachments(picked)
+        setAttachments((prev) => [...prev, ...ok])
+        if (errors.length > 0) setAttachError(errors.join('; '))
+      } finally {
+        setAttaching((prev) => prev.filter((n) => !attachFiles.some((f) => f.name === n)))
+      }
     }
   }
 
@@ -358,6 +385,13 @@ export function InputArea({
         {/* Attachment chips */}
         {attachments.length > 0 && (
           <div className="flex flex-wrap gap-1.5 px-3 pt-2.5">
+            {attaching.map((name, i) => (
+              <div key={`attaching-${i}`} className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] px-2 py-1 text-xs opacity-70">
+                <span className="inline-block h-3 w-3 animate-spin rounded-full border-[1.5px] border-[var(--color-text-tertiary)] border-t-transparent" aria-hidden />
+                <span className="max-w-[120px] truncate text-[var(--color-text-secondary)]">{name}</span>
+                <span className="text-[var(--color-text-tertiary)]">reading…</span>
+              </div>
+            ))}
             {attachments.map((a) => (
               <AttachmentChip key={a.clientId} attachment={a} onRemove={() => removeAttachment(a.clientId)} />
             ))}
@@ -512,7 +546,7 @@ export function InputArea({
           <div className="relative">
             <button
               type="button"
-              onClick={() => setShowScopePicker((v) => !v)}
+              ref={scopeBtnRef} onClick={() => setShowScopePicker((v) => !v)}
               title="Knowledge scope — which documents this chat can read"
               style={{ border: 'none', background: 'none', outline: 'none' }}
               className={`flex h-7 items-center gap-1 rounded-md px-1.5 text-[11px] font-medium transition ${retrievalScope === 'everything' ? 'text-[var(--color-attention)]' : 'text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]'}`}
@@ -524,7 +558,7 @@ export function InputArea({
               <svg width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden><path d="M1.5 3l2 2 2-2" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round"/></svg>
             </button>
             {showScopePicker && (
-              <div className="absolute bottom-10 right-0 z-50 max-h-80 w-60 overflow-y-auto rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] py-1 shadow-lg">
+              <div style={{ maxHeight: scopeMenuMaxH }} className="absolute bottom-10 right-0 z-50 w-60 overflow-y-auto rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] py-1 shadow-lg">
                 {/* This chat only */}
                 <button
                   type="button"
@@ -571,7 +605,7 @@ export function InputArea({
           <div className="relative">
             <button
               type="button"
-              onClick={() => setShowModePicker((v) => !v)}
+              ref={modeBtnRef} onClick={() => setShowModePicker((v) => !v)}
               title="Agent mode — how autonomously it acts"
               className={`flex h-7 items-center gap-1 rounded-md border-0 bg-transparent px-1.5 text-[11px] font-medium capitalize outline-none transition ${settings.agentMode === 'plan' ? 'text-[var(--color-attention)]' : settings.agentMode === 'ask' ? 'text-[#0891b2]' : 'text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]'}`}
             >
@@ -579,7 +613,7 @@ export function InputArea({
               <svg width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden><path d="M1.5 3l2 2 2-2" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round"/></svg>
             </button>
             {showModePicker && (
-              <div className="absolute bottom-10 right-0 z-50 w-48 rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] py-1 shadow-lg">
+              <div style={{ maxHeight: modeMenuMaxH }} className="absolute bottom-10 right-0 z-50 w-48 overflow-y-auto rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] py-1 shadow-lg">
                 {([['auto', 'Acts autonomously'], ['plan', 'Plans only — no actions'], ['ask', 'Confirms before acting']] as const).map(([m, desc]) => (
                   <button
                     key={m}
@@ -667,7 +701,7 @@ export function InputArea({
             <div className="relative">
               <button
                 type="button"
-                onClick={() => setShowModelPicker((v) => !v)}
+                ref={modelBtnRef} onClick={() => setShowModelPicker((v) => !v)}
                 className="flex h-7 items-center gap-0.5 border-0 bg-transparent px-1.5 text-[11px] font-normal text-[var(--color-text-tertiary)] outline-none transition hover:text-[var(--color-text-secondary)]"
               >
                 {modelShortName}
@@ -679,7 +713,7 @@ export function InputArea({
                 </svg>
               </button>
               {showModelPicker && (
-                <div className="absolute bottom-10 right-0 z-50 w-52 rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] py-1 shadow-lg">
+                <div style={{ maxHeight: modelMenuMaxH }} className="absolute bottom-10 right-0 z-50 w-52 overflow-y-auto rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] py-1 shadow-lg">
                   {modelList.map((m) => (
                     <button key={m.id} type="button"
                       onClick={() => { onModelChange(m.id); setShowModelPicker(false) }}

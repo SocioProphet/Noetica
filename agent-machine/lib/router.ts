@@ -254,8 +254,16 @@ export function buildRouterDecision(opts: {
         ? { ...baseRoute, localModel: bestResponsive(availableModels, baseRoute.localModel) }
         : baseRoute
 
-  // Vision: route to LLaVA when images are present
-  if (!explicitModelId && hasImages && ollamaAvailable) {
+  // Vision: route to a VLM when images are present.
+  // Gus #3: even with an EXPLICIT model, auto-switch a local TEXT model to a VLM rather than
+  // sending an image to a model that can't see it (and then tells the user to install a VLM that
+  // is already there). But respect a deliberate vision choice: cloud models (Claude/GPT/Gemini)
+  // see images themselves, and an explicitly-picked local VLM is already correct — don't override
+  // either of those.
+  const CLOUD_MODEL_RE = /^(claude|gpt|o1|o3|gemini|mistral|deepseek|grok|command|sonar)/i
+  const VLM_RE = /(llava|vision|qwen2\.5vl|minicpm-v|moondream|-vl\b|vl:)/i
+  const explicitCanSeeImages = !!explicitModelId && (CLOUD_MODEL_RE.test(explicitModelId) || VLM_RE.test(explicitModelId))
+  if (hasImages && ollamaAvailable && !explicitCanSeeImages) {
     // Prefer a stronger modern VLM if present, else fall back to LLaVA. First installed wins.
     const VISION_PREFS = ['qwen2.5vl:7b', 'qwen2.5vl', 'llama3.2-vision', 'minicpm-v', 'moondream', 'llava:13b', 'llava:7b', 'llava']
     const visionModel = VISION_PREFS.find((m) => isModelAvailable(m, availableModels)) ?? null
@@ -270,7 +278,9 @@ export function buildRouterDecision(opts: {
         fallbackRoute: 'llava:7b',
         specialistAgents: ['vision-agent'],
         policyDecision: 'allow',
-        rationale: `Vision request — routing to ${visionModel} for image understanding.`,
+        rationale: explicitModelId
+          ? `Switched to ${visionModel}: the selected model (${explicitModelId}) can\u2019t process images.`
+          : `Vision request \u2014 routing to ${visionModel} for image understanding.`,
         evidenceRef: `evidence:${requestId}`,
         auditRef: `audit:${requestId}`,
         controls: FULL_CONTROLS,

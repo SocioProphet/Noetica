@@ -528,7 +528,9 @@ export function AppShell() {
     }
     // Live conversation → route to the metachat lane (side-transcript, doesn't touch the chat).
     if (isLiveRef.current) { liveTurnRef.current(transcript); return }
-    voiceReplyRef.current = true
+    // Gus #2: only auto-speak the reply if the user opted into it — using voice as INPUT
+    // shouldn't silently force audio OUTPUT.
+    voiceReplyRef.current = settings.speakResponses === true
     setActiveSurface('chat')
     void handleSendRaw(transcript, [], messages)
   // eslint-disable-next-line react-hooks/exhaustive-deps
