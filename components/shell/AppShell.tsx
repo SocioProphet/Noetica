@@ -1932,6 +1932,8 @@ export function AppShell() {
                 onStartDictation={startDictation}
                 onStopDictation={stopListening}
                 dictating={isDictating}
+                speaking={!!speakingId}
+                onStopSpeaking={stopSpeaking}
               />
               </SurfaceErrorBoundary>
               </div>
@@ -2168,9 +2170,11 @@ type CenterProps = {
   onStartDictation?: () => void
   onStopDictation?: () => void
   dictating?: boolean
+  speaking?: boolean
+  onStopSpeaking?: () => void
 }
 
-function CenterWorkspace({ activeSurface, sessionId, activeProjectTitle, projectCollection, chatCollection, projects, activeProjectId, onSelectProject, messages, isStreaming, workspaceMode, fanoutModelCount, modelId, thinkingBudget, onSend, onFanout, onStop, onRegenerate, onResume, onFork, onEdit, onRecombine, onWorkspaceModeChange, onExtractArtifact, onModelChange, onOpenPalette, mcpTools, systemPrompt, onSystemPromptChange, activeArtifact, onCloseArtifact, onArtifactUpdate, onArtifactDelete, onAtomSelect, onOpenSettings, onNavigateToOperate, onNavigateToGovern, onSpeak, speakingMessageId, onFeedback, agentMode, onSetAgentMode, onPlanApprove, onPlanReject, onInspect, onStartDictation, onStopDictation, dictating }: CenterProps) {
+function CenterWorkspace({ activeSurface, sessionId, activeProjectTitle, projectCollection, chatCollection, projects, activeProjectId, onSelectProject, messages, isStreaming, workspaceMode, fanoutModelCount, modelId, thinkingBudget, onSend, onFanout, onStop, onRegenerate, onResume, onFork, onEdit, onRecombine, onWorkspaceModeChange, onExtractArtifact, onModelChange, onOpenPalette, mcpTools, systemPrompt, onSystemPromptChange, activeArtifact, onCloseArtifact, onArtifactUpdate, onArtifactDelete, onAtomSelect, onOpenSettings, onNavigateToOperate, onNavigateToGovern, onSpeak, speakingMessageId, onFeedback, agentMode, onSetAgentMode, onPlanApprove, onPlanReject, onInspect, onStartDictation, onStopDictation, dictating, speaking, onStopSpeaking }: CenterProps) {
   if (activeSurface === 'notes')        return <NotesSurface />
   if (activeSurface === 'canvas')       return <CanvasSurface />
   if (activeSurface === 'workrooms')    return <TabbedWorkspace tabs={[
@@ -2283,6 +2287,8 @@ function CenterWorkspace({ activeSurface, sessionId, activeProjectTitle, project
           onStartDictation={onStartDictation}
           onStopDictation={onStopDictation}
           dictating={dictating}
+          speaking={speaking}
+          onStopSpeaking={onStopSpeaking}
         />
       </section>
 

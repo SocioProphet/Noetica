@@ -37,6 +37,9 @@ type InputAreaProps = {
   onStartDictation?: () => void
   onStopDictation?: () => void
   dictating?: boolean
+  /** Voice output state (Gus #2/#5): true while a reply is being spoken; onStopSpeaking halts it. */
+  speaking?: boolean
+  onStopSpeaking?: () => void
   disabled?: boolean
   fanoutModelCount?: number
   workspaceMode: WorkspaceMode
@@ -94,7 +97,7 @@ function useMenuMaxHeight(open: boolean, triggerRef: React.RefObject<HTMLButtonE
 
 export function InputArea({
   onSend, onFanout, onStop,
-  onStartDictation, onStopDictation, dictating = false,
+  onStartDictation, onStopDictation, dictating = false, speaking = false, onStopSpeaking,
   disabled = false,
   fanoutModelCount = 0,
   workspaceMode, onWorkspaceModeChange,
@@ -348,6 +351,41 @@ export function InputArea({
       <div className={`w-full rounded-2xl border bg-[var(--color-background-primary)] transition lg:w-auto lg:mr-[17rem] ${
         dragOver ? 'border-[var(--color-border-primary)]' : 'border-[var(--color-border-secondary)]'
       }`}>
+
+        {/* Voice status — one calm strip that appears only when the mic is hot or a reply is being
+            spoken. States the mode AND destination (Gus #5) and gives a prominent stop (Gus #2). */}
+        {(dictating || speaking) && (
+          <div className="flex items-center justify-between gap-3 px-3.5 pt-3">
+            {dictating ? (
+              <div className="flex items-center gap-2 text-[12px] font-medium text-[#f43f5e]">
+                <span className="relative flex h-2 w-2">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#f43f5e] opacity-60" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-[#f43f5e]" />
+                </span>
+                Listening — dictating into your message
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 text-[12px] font-medium text-[#0891b2]">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+                  <path d="M8 2 4.5 5H2v6h2.5L8 14V2Z" fill="currentColor"/>
+                  <path d="M11 5.5a3 3 0 0 1 0 5M12.8 3.5a5.5 5.5 0 0 1 0 9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+                </svg>
+                Speaking the reply
+              </div>
+            )}
+            {speaking && onStopSpeaking ? (
+              <button type="button" onClick={onStopSpeaking} aria-label="Stop speaking"
+                className="flex items-center gap-1.5 rounded-full bg-[#0891b2] px-3 py-1 text-[11px] font-semibold text-white shadow-sm transition hover:bg-[#0e7490] active:scale-95">
+                <span className="h-2.5 w-2.5 rounded-[2px] bg-white" /> Stop
+              </button>
+            ) : dictating && onStopDictation ? (
+              <button type="button" onClick={() => onStopDictation()} aria-label="Stop listening"
+                className="rounded-full border border-[#fecdd3] px-3 py-1 text-[11px] font-medium text-[#f43f5e] transition hover:bg-[#fff1f2] active:scale-95">
+                Stop listening
+              </button>
+            ) : null}
+          </div>
+        )}
 
         {/* Live ingestion queue (bulk/zip uploads → collection scope, parsed-vs-pending) */}
         <div className="px-3 pt-2.5 empty:hidden">
