@@ -55,13 +55,34 @@ function boot(extraEnv: Record<string, string>): ChildProcess {
   spawned.add(p)
   return p
 }
-async function waitUp(): Promise<void> {
-  const deadline = Date.now() + 30_000
+// Wait for READINESS, not liveness. The HTTP listener comes up before the storage
+// backend attaches (attachRocksDB runs in a detached async IIFE in server.ts), so a
+// 200 from /api/status only means the port answers. A goal POSTed in that window
+// lands in the default backend and is simply absent after a restart — which is the
+// flake this replaces, and why the two previous fixes (a longer pre-kill sleep, then
+// polling the read side) never touched it: the bug was on the WRITE side.
+// `booted` flips only in finishBoot(), after the backend is bound.
+async function waitUp(opts: { requireBackend?: boolean } = {}): Promise<void> {
+  const requireBackend = opts.requireBackend !== false
+  const deadline = Date.now() + 60_000
+  let sawLive = false
   while (Date.now() < deadline) {
-    try { const r = await fetch(`${BASE}/api/status`, { signal: AbortSignal.timeout(1500) }); if (r.ok) return } catch { /* wait */ }
-    await new Promise((res) => setTimeout(res, 500))
+    try {
+      const r = await fetch(`${BASE}/api/status`, { signal: AbortSignal.timeout(1500) })
+      if (r.ok) {
+        sawLive = true
+        if (!requireBackend) return
+        const body = await r.json() as { booted?: boolean }
+        // Tolerate an older server that predates the `booted` field rather than
+        // hanging forever on a key that will never appear.
+        if (body.booted === undefined || body.booted === true) return
+      }
+    } catch { /* wait */ }
+    await new Promise((res) => setTimeout(res, 250))
   }
-  throw new Error('server did not start')
+  throw new Error(sawLive
+    ? 'server listened but the storage backend never attached (booted stayed false)'
+    : 'server did not start')
 }
 const kill = (p: ChildProcess) => new Promise<void>((res) => { p.once('exit', () => { spawned.delete(p); res() }); p.kill('SIGKILL') })
 // Graceful shutdown: send SIGTERM so the server's teardown runs (it persists state — saveLearningState/
@@ -91,9 +112,10 @@ test('RocksDB backend persists a goal across a full server restart', async (t) =
     body: JSON.stringify({ session_id: 'rocks-it', objective: 'survive a reboot', subtasks: [], slots: [] }),
   })
   assert.equal(create.status, 200)
-  // give the async RocksDB write chain time to flush to disk before we kill the server. A fixed 500ms raced the
-  // flush on slow CI runners (the flake this replaces) — be generous; correctness over speed for a restart test.
-  await new Promise((r) => setTimeout(r, 5000))
+  // The goal is now guaranteed to have been written to the ATTACHED RocksDB backend
+  // (waitUp gated on `booted`), so this settle only covers the async write chain
+  // reaching the WAL — not the far larger backend-attach race it used to paper over.
+  await new Promise((r) => setTimeout(r, 2000))
   await killGraceful(s1)
 
   // confirm the store materialised on disk
@@ -104,7 +126,7 @@ test('RocksDB backend persists a goal across a full server restart', async (t) =
   // the store rehydrates from disk asynchronously after boot — POLL before asserting rather than reading once
   // and racing the load (the other half of the flake).
   let restored = false
-  for (let i = 0; i < 25 && !restored; i++) {
+  for (let i = 0; i < 20 && !restored; i++) {
     const list = await (await fetch(`${BASE}/api/goals?session=rocks-it`)).json() as { goals?: Array<{ objective?: string }> }
     restored = !!list.goals?.some((g) => g.objective === 'survive a reboot')
     if (!restored) await new Promise((r) => setTimeout(r, 1000))
