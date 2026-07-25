@@ -811,8 +811,16 @@ const OPERATOR_API = `You have a verified Python library 'math_operators' (alrea
   dilution(M1,V1,M2,V2)                          # M1V1=M2V2; pass three, get the fourth (others None)
   ph_from_concentration(h_conc)  /  concentration_from_ph(ph)  /  percent_yield(actual, theoretical)
   expected_value(values, probs)  /  binomial_probability(n, k, p)  /  binomial_mean_sd(n, p)
+  binomial_at_least(n, k, p)  /  binomial_at_most(n, k, p)      # cumulative binomial tails, EXACT — for "at least/at most k of n"
+  one_sample_z_test(sample_mean, null_mean, sd, n, tail)        # tail 'greater'|'less'|'two-sided' -> (z, p_value); hypothesis testing
   sample_mean(values)  /  sample_sd(values, population)  /  combination_probability(fav_n, fav_k, total_n, total_k)
   correlation(xs, ys)  /  r_squared(xs, ys)  /  linear_regression(xs, ys)   # Pearson r, R^2 (variance explained), OLS -> (slope, intercept)
+SELECTION HINTS (common misreads — map the phrasing to the right operator):
+  • "factor P(x) into linear factors in Z_p" / "roots in Z_p" -> finite_field_zeros(coeffs, p) (linear factors are (x - root) for each zero)
+  • "how many k make k! end in EXACTLY N zeros" -> factorial_trailing_zeros_count(N)
+  • "value of x - y" (or any combination) from a system -> solve_equations(...) then compute the asked combination from the solution
+  • "at least/at most k" of n independent trials -> binomial_at_least / binomial_at_most (NOT binomial_probability, which is exactly-k)
+  • hypothesis test H0 vs Ha with a sample -> one_sample_z_test(...); match the reported z OR p-value to the choice
 Pick the operator, extract the arguments from the problem, and write a tiny program that imports from
 math_operators and prints ONLY the final answer value on the last line. If none fit, write a short correct program.`
 
