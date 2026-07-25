@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.socioprophet.ai/superconscious/interpretability/intervention-spec.v0.json",
+  "title": "Interpretability Intervention Spec v0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "intervention_kind",
+    "intervention_id",
+    "provider_binding_ref",
+    "target",
+    "coefficient_schedule",
+    "position_policy",
+    "safety_policy",
+    "required_source_locks",
+    "expected_effect",
+    "forbidden_effects",
+    "replay_class",
+    "non_claims"
+  ],
+  "properties": {
+    "schema_version": { "const": "0.1.0" },
+    "intervention_kind": { "enum": ["prompt_only", "feature_steering", "activation_patching", "activation_addition", "logit_bias", "probe_guided_routing", "provider_side_control"] },
+    "intervention_id": { "type": "string", "pattern": "^iv-[a-z0-9][a-z0-9._-]*$" },
+    "provider_binding_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_binding_id", "access_mode"],
+      "properties": {
+        "provider_binding_id": { "type": "string", "pattern": "^pb-[a-z0-9][a-z0-9._-]*$" },
+        "access_mode": { "enum": ["white_box", "gray_box", "black_box", "registry_only"] }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_kind"],
+      "properties": {
+        "target_kind": { "enum": ["prompt", "feature", "activation_site", "logit", "probe", "provider_control"] },
+        "model_id": { "type": ["string", "null"] },
+        "source_lock_id": { "type": ["string", "null"], "pattern": "^asl-[a-z0-9][a-z0-9._-]*$" },
+        "feature_entry_id": { "type": ["string", "null"], "pattern": "^fre-[a-z0-9][a-z0-9._-]*$" },
+        "layer": { "type": ["integer", "null"], "minimum": 0 },
+        "position_selector": { "type": ["string", "null"] },
+        "description": { "type": ["string", "null"] }
+      }
+    },
+    "coefficient_schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schedule_kind"],
+      "properties": {
+        "schedule_kind": { "enum": ["none", "single_alpha", "linear_sweep", "grid", "provider_default"] },
+        "alpha": { "type": ["number", "null"] },
+        "values": { "type": "array", "items": { "type": "number" } },
+        "unit": { "type": ["string", "null"] }
+      }
+    },
+    "position_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy_kind"],
+      "properties": {
+        "policy_kind": { "enum": ["not_applicable", "prompt_level", "end_of_prompt", "beginning_of_completion", "all_assistant_tokens", "position_conditioned", "custom"] },
+        "details": { "type": ["string", "null"] }
+      }
+    },
+    "safety_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy_ref", "policy_decision_required", "off_target_audit_required", "human_review_required"],
+      "properties": {
+        "policy_ref": { "type": "string", "minLength": 1 },
+        "policy_decision_required": { "type": "boolean" },
+        "off_target_audit_required": { "type": "boolean" },
+        "human_review_required": { "type": "boolean" }
+      }
+    },
+    "required_source_locks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_lock_id", "artifact_kind"],
+        "properties": {
+          "source_lock_id": { "type": "string", "pattern": "^asl-[a-z0-9][a-z0-9._-]*$" },
+          "artifact_kind": { "enum": ["model", "tokenizer", "sae", "transcoder", "probe", "dataset", "benchmark", "feature_registry_entry", "activation_cache"] }
+        }
+      }
+    },
+    "expected_effect": { "type": "string", "minLength": 1 },
+    "forbidden_effects": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "evaluation_plan_ref": { "type": ["string", "null"] },
+    "replay_class": { "enum": ["bit_exact", "manifest_only", "best_effort", "provider_behavior_only", "non_replayable", "synthetic_fixture"] },
+    "non_claims": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "intervention_kind": { "const": "prompt_only" } }, "required": ["intervention_kind"] },
+      "then": {
+        "properties": {
+          "target": { "properties": { "target_kind": { "const": "prompt" } } },
+          "coefficient_schedule": { "properties": { "schedule_kind": { "const": "none" } } }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "intervention_kind": { "const": "feature_steering" } }, "required": ["intervention_kind"] },
+      "then": {
+        "properties": {
+          "provider_binding_ref": { "properties": { "access_mode": { "const": "white_box" } } },
+          "target": { "properties": { "target_kind": { "const": "feature" } } },
+          "required_source_locks": {
+            "contains": { "properties": { "artifact_kind": { "enum": ["sae", "transcoder", "probe"] } }, "required": ["artifact_kind"] }
+          },
+          "safety_policy": { "properties": { "off_target_audit_required": { "const": true }, "policy_decision_required": { "const": true } } }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "intervention_kind": { "const": "activation_patching" } }, "required": ["intervention_kind"] },
+      "then": {
+        "properties": {
+          "provider_binding_ref": { "properties": { "access_mode": { "const": "white_box" } } },
+          "target": { "properties": { "target_kind": { "const": "activation_site" } } },
+          "required_source_locks": {
+            "contains": { "properties": { "artifact_kind": { "enum": ["model", "activation_cache"] } }, "required": ["artifact_kind"] }
+          }
+        }
+      }
+    }
+  ]
+}
