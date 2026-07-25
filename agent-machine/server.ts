@@ -1765,6 +1765,15 @@ function runInWorkspace(command: string, cwd: string, timeoutMs: number, signal?
 // Start a long-running dev server, resolve once it prints its Local URL (or on timeout). The
 // process keeps running so the UI can preview it; tracked for reaping on teardown.
 const _devServers = new Set<number>()
+// Boot readiness. The HTTP listener comes up BEFORE the storage backend attaches
+// (attachRocksDB runs in a detached async IIFE), so "the port answers" does not mean
+// "writes will be durable". Anything that must not write before the backend is bound
+// — tests, deploy readiness probes — should wait on /api/status .booted, not on a 200.
+// This was a real persistence race: a goal POSTed in that window landed in the default
+// backend and vanished on restart.
+let _bootComplete = false
+export function markBootComplete(): void { _bootComplete = true }
+export function isBootComplete(): boolean { return _bootComplete }
 function startDevServer(command: string, cwd: string, timeoutMs: number): Promise<{ url?: string; pid?: number }> {
   return new Promise((resolve) => {
     const child = cp.spawn(LOGIN_SHELL, ['-lc', command], { cwd, env: safeShellEnv() })
@@ -6706,6 +6715,10 @@ const server = http.createServer((req, res) => {
           modelSuite: LOCAL_MODEL_SUITE,
           tools: BUILTIN_TOOLS.map((t) => t.name),
           mode: 'agent-machine',
+          // booted=false means the listener is up but the storage backend has NOT
+          // attached yet — writes in that window are not durable. Readiness probes
+          // and integration tests must gate on this, not merely on a 200.
+          booted: isBootComplete(),
           capabilities: ['streaming', 'tool_use', 'vision', 'code_execute', 'web_search', 'generate_image'],
         }),
       )
@@ -18661,6 +18674,7 @@ server.listen(PORT, BIND_HOST, () => {
   // Learning state is loaded AFTER the backend is attached, so it hydrates from
   // the durable store rather than the about-to-be-replaced default.
   const finishBoot = () => {
+    markBootComplete() // storage backend is bound; writes are now durable
     loadLearningState()
     loadContainment()
     loadAutonomy()
