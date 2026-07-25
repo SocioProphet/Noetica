@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.socioprophet.ai/superconscious/interpretability/provider-binding.v0.json",
+  "title": "Interpretability Provider Binding v0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "binding_kind",
+    "provider_binding_id",
+    "provider_name",
+    "access_mode",
+    "supported_observables",
+    "supported_interventions",
+    "governance_class",
+    "runtime_claims",
+    "evidence_requirements",
+    "non_claims"
+  ],
+  "properties": {
+    "schema_version": { "const": "0.1.0" },
+    "binding_kind": { "const": "provider-binding" },
+    "provider_binding_id": { "type": "string", "pattern": "^pb-[a-z0-9][a-z0-9._-]*$" },
+    "provider_name": { "type": "string", "minLength": 1 },
+    "provider_display_name": { "type": "string" },
+    "access_mode": { "enum": ["white_box", "gray_box", "black_box", "registry_only"] },
+    "provider_surface": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["surface_kind", "execution_location"],
+      "properties": {
+        "surface_kind": { "enum": ["local_model_runtime", "hosted_model_api", "public_feature_registry", "hosted_interpretability_api", "local_fixture"] },
+        "execution_location": { "enum": ["local_offline", "local_networked", "remote_hosted", "registry_only", "synthetic_fixture"] },
+        "source_uri": { "type": ["string", "null"] },
+        "terms_or_policy_ref": { "type": ["string", "null"] }
+      }
+    },
+    "supported_observables": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "outputs",
+          "logits",
+          "logprobs",
+          "hidden_states",
+          "residual_stream",
+          "attention",
+          "sae_features",
+          "transcoder_features",
+          "probe_scores",
+          "tool_traces",
+          "provider_eval_traces",
+          "feature_dashboard",
+          "attribution_graph",
+          "registry_metadata",
+          "activation_examples"
+        ]
+      }
+    },
+    "supported_interventions": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "none",
+          "prompt_only",
+          "logit_bias",
+          "feature_steering",
+          "activation_patching",
+          "activation_addition",
+          "probe_guided_routing",
+          "provider_side_control"
+        ]
+      }
+    },
+    "governance_class": { "enum": ["local_offline", "gated_public_artifact", "remote_hosted_api", "restricted_proprietary", "public_registry", "synthetic_fixture"] },
+    "runtime_claims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["live_runtime_execution", "internal_state_replay", "white_box_replay_possible"],
+      "properties": {
+        "live_runtime_execution": { "type": "boolean" },
+        "internal_state_replay": { "type": "boolean" },
+        "white_box_replay_possible": { "type": "boolean" },
+        "runtime_evidence_ref": { "type": ["string", "null"] }
+      }
+    },
+    "evidence_requirements": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "authority_scope": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["candidate_discovery", "behavior_benchmark", "white_box_feature_claim", "steering_experiment", "attribution_graph_claim", "public_note", "runtime_action"] }
+    },
+    "non_claims": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "access_mode": { "const": "black_box" } }, "required": ["access_mode"] },
+      "then": {
+        "properties": {
+          "supported_observables": {
+            "not": {
+              "contains": { "enum": ["hidden_states", "residual_stream", "attention", "sae_features", "transcoder_features"] }
+            }
+          },
+          "supported_interventions": {
+            "not": {
+              "contains": { "enum": ["feature_steering", "activation_patching", "activation_addition"] }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "access_mode": { "const": "registry_only" } }, "required": ["access_mode"] },
+      "then": {
+        "properties": {
+          "runtime_claims": {
+            "properties": {
+              "live_runtime_execution": { "const": false },
+              "internal_state_replay": { "const": false },
+              "white_box_replay_possible": { "const": false }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

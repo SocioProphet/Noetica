@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.socioprophet.ai/superconscious/interpretability/feature-registry-entry.v0.json",
+  "title": "Interpretability Feature Registry Entry v0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "entry_kind",
+    "feature_entry_id",
+    "registry_source",
+    "feature_identity",
+    "source_lock_refs",
+    "explanation",
+    "evidence_refs",
+    "claim_status",
+    "replay_class",
+    "non_claims"
+  ],
+  "properties": {
+    "schema_version": { "const": "0.1.0" },
+    "entry_kind": { "const": "feature-registry-entry" },
+    "feature_entry_id": { "type": "string", "pattern": "^fre-[a-z0-9][a-z0-9._-]*$" },
+    "registry_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["registry_name", "provider_binding_id"],
+      "properties": {
+        "registry_name": { "type": "string", "minLength": 1 },
+        "provider_binding_id": { "type": "string", "pattern": "^pb-[a-z0-9][a-z0-9._-]*$" },
+        "registry_url": { "type": ["string", "null"] },
+        "export_ref": { "type": ["string", "null"] }
+      }
+    },
+    "feature_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_id", "feature_id", "feature_kind"],
+      "properties": {
+        "model_id": { "type": "string", "minLength": 1 },
+        "sae_id": { "type": ["string", "null"] },
+        "transcoder_id": { "type": ["string", "null"] },
+        "probe_id": { "type": ["string", "null"] },
+        "layer": { "type": ["integer", "null"], "minimum": 0 },
+        "feature_index": { "type": ["integer", "string", "null"] },
+        "feature_id": { "type": "string", "minLength": 1 },
+        "feature_kind": { "enum": ["sae_feature", "transcoder_feature", "probe_concept", "neuron", "activation_direction", "registry_concept"] }
+      }
+    },
+    "source_lock_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_lock_id", "artifact_kind"],
+        "properties": {
+          "source_lock_id": { "type": "string", "pattern": "^asl-[a-z0-9][a-z0-9._-]*$" },
+          "artifact_kind": { "type": "string" }
+        }
+      }
+    },
+    "explanation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "text", "explanation_authority"],
+      "properties": {
+        "status": { "enum": ["none", "human_proposed", "model_generated", "registry_supplied", "validated", "rejected"] },
+        "text": { "type": ["string", "null"] },
+        "explanation_authority": { "enum": ["none", "human", "model", "registry", "mixed"] },
+        "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 }
+      }
+    },
+    "activation_evidence_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "top_examples_ref": { "type": ["string", "null"] },
+        "negative_examples_ref": { "type": ["string", "null"] },
+        "activation_statistics_ref": { "type": ["string", "null"] },
+        "position_policy": { "type": ["string", "null"] }
+      }
+    },
+    "evidence_refs": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "claim_status": { "enum": ["candidate_only", "witnessed", "causal_tested", "promoted_to_composition", "rejected", "superseded"] },
+    "replay_class": { "enum": ["bit_exact", "manifest_only", "best_effort", "registry_reference", "non_replayable", "synthetic_fixture"] },
+    "non_claims": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+  }
+}
