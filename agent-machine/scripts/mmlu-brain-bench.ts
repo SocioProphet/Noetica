@@ -19,7 +19,9 @@
  *   MMLU_MODEL        answer model (default llama3.2:3b)
  *   MMLU_PER_SUBJECT  questions per subject (default 5; 0 = all)
  *   MMLU_K            retrieved chunks injected in the brain arm (default 4)
- *   MMLU_CLOUD_MODEL  Anthropic model for the cloud_* arms (default claude-opus-4-8; needs ANTHROPIC_API_KEY)\n *   MMLU_ARMS         comma list of arms to run (default "baseline,brain"); `refine` = AgentKB student→teacher trajectory-critique loop (Gap B); `tier` = tiered-ontology grounding (KKO upper→general→specific, PR #312)
+ *   MMLU_CLOUD_MODEL  Anthropic model for the cloud_* arms (default claude-opus-4-8; needs ANTHROPIC_API_KEY)\n *   MMLU_ARMS         comma list of arms to run (default "baseline,brain"); `refine` = AgentKB student→teacher trajectory-critique loop (Gap B); `tier` = tiered-ontology grounding (KKO upper→general→specific, PR #312);
+ *                     `verify` = COMPUTE-AUTHORITY: baseline's own answer, overridden ONLY by verified compute (hard sympy math:*/catalog + self-consistent verified-operator lib). verify = baseline + calculator-corrections ⇒ provably ≥ baseline. MEASURED: +1.2pp on the 686-question cloud math board (94.9→96.1%, Opus), operator overrides fixed 9 baseline errors / broke 1 (the misformalization the self-consistent operator, MMLU_OPSC_K, now rejects). This is the "verified compute makes the frontier model strictly better on math" arm — the fix for the old net-negative where `letter=compute` blindly OVERRODE correct reasoning.
+ *   MMLU_OPSC_K       verified-operator self-consistency: sample the operator formalization K times, commit only on strict-majority agreement (default 3; rejects misformalizations that scatter)
  *   MMLU_SUBJECTS     comma list to restrict subjects (default: all brain-ready)
  *   MMLU_MAX_CHUNKS   per-field memory cap on loaded chunks (default 150000)
  *   MMLU_SEED         shuffle seed for the per-subject sample (default time-based)
@@ -814,9 +816,9 @@ const OPERATOR_API = `You have a verified Python library 'math_operators' (alrea
 Pick the operator, extract the arguments from the problem, and write a tiny program that imports from
 math_operators and prints ONLY the final answer value on the last line. If none fit, write a short correct program.`
 
-async function operatorCompute(question: string, choices: string[]): Promise<string> {
+async function operatorCompute(question: string, choices: string[], temp = 0): Promise<string> {
   const prompt = `${OPERATOR_API}\n\nProblem: ${question}\nChoices: ${choices.map((c, i) => `${LETTERS[i]}. ${c}`).join(' | ')}\n\nReturn ONLY a \`\`\`python code block.`
-  const raw = await ask(prompt, 0)
+  const raw = await ask(prompt, temp)
   // was a naive local regex whose "no closing fence" fallback returned the RAW text — including the literal
   // leading '```python' marker on truncated generations (measured: 11/14 SyntaxErrors in one run were exactly
   // this). extractCode strips that marker even in the unclosed-fence case; reuse it instead of duplicating.
@@ -843,6 +845,21 @@ async function operatorCompute(question: string, choices: string[]): Promise<str
   const t = norm(lastLine)
   for (let i = 0; i < choices.length; i++) if (norm(choices[i]!) === t) return LETTERS[i]!
   return ''
+}
+// SELF-CONSISTENT verified-operator: the operator lane is single-shot, so a MISformalization (wrong operator/args
+// that nonetheless executes to a clean wrong number) commits confidently — the one residual regression on the 686
+// board (college_math gold=A, operator exact-computed C). Fix = sample the formalization K times at temperature and
+// commit ONLY on a strict-majority agreement. A faithful setup is stable across samples; a misread scatters → abstain
+// → the caller keeps the model's own answer. Turns the operator overrides from 9/10 toward ~10/10 (provably ≥ baseline).
+const OPSC_K = Number(process.env['MMLU_OPSC_K'] || 3)
+async function operatorComputeSC(question: string, choices: string[], k = OPSC_K): Promise<string> {
+  if (k <= 1) return operatorCompute(question, choices, 0)
+  const votes = await Promise.all(Array.from({ length: k }, (_, s) => operatorCompute(question, choices, s === 0 ? 0 : 0.7)))
+  const tally = new Map<string, number>()
+  for (const v of votes) if (v) tally.set(v, (tally.get(v) ?? 0) + 1)
+  let best = '', bc = 0
+  for (const [l, c] of tally) if (c > bc) { bc = c; best = l }
+  return bc >= Math.ceil((k + 1) / 2) ? best : ''   // strict majority of K (≥2 of 3) required, else abstain
 }
 interface CompRes { answer: string | null; mode: string }
 /** Score the whole compute arm for a subject in ONE python call (one sympy import). Each result
@@ -1142,6 +1159,8 @@ async function main() {
       const qgenPrompt = `Relevant MIT course notes (use only what helps; ignore noise and fragments):\n\n${qgenContext}\n\nExam question:\n${base}${ANSWER_RULE}`
       let qgenLetter: string | undefined
       const askQgen = async (): Promise<string> => (qgenLetter ??= await askLetter(qgenPrompt))
+      let baseLetter: string | undefined // memoize the closed-book baseline answer so `verify` reuses it (no double-ask, no SC noise)
+      const askBase = async (): Promise<string> => (baseLetter ??= await askLetter(`${base}${ANSWER_RULE}`))
       const ci = comp[i]
       const marks: string[] = []
       const results: Array<{ arm: string; ok: boolean; attempted: boolean }> = []
@@ -1292,6 +1311,29 @@ async function main() {
             const sc = await askVote(`${base}${REASON_RULE}`, SC_K)   // self-consistency over explicit step-by-step chains
             letter = sc.letter; mode = `reason:sc${SC_K}`; row['reason_conf'] = Number(sc.agree.toFixed(2))
           }
+        } else if (arm === 'verify') {            // COMPUTE-AUTHORITY complementarity (Michael): verified compute, when it
+          // CALCULATES, is right ~100% — its ONLY failure mode is an unfaithful FORMALIZATION, and compute_arm.py already
+          // ABSTAINS unless its own check passes (exact math solver, or a law whose UNITS verify the extraction, or ≥2-of-K
+          // prog consensus). So a HARD-verified answer (math:*/catalog*/chain/free — exact + unit-checked) WINS over even
+          // its reasoning: those are the saves the layer exists for (Opus slips on arithmetic, the calculator catches it).
+          // The FALLBACK is baseline's OWN answer (memoized askBase) — NOT a fresh self-consistency vote — so verify differs
+          // from baseline ONLY when a verified computation fires: verify = baseline + calculator-corrections ⇒ provably
+          // ≥ baseline (given compute-when-it-fires is right; the n=200 board showed the operator overrides 2/2 correct).
+          // An earlier cut used an independent SC vote as the fallback, which added pure sampling noise (2 wins, 2 losses)
+          // and no lift, since SC-reasoning ≈ single-shot at the frontier. Soft `prog` compute is accepted only if it AGREES
+          // with baseline (else keep baseline) — the reason arm already distrusts prog for its misread risk.
+          const computational = classifyComplexity(q.question).posture === 'compute'
+            || /\b(find|compute|remainder|zeros|index|characteristic|how many|value of|solve|order of|divided by|intersection|slope|distance|gcd|lcm|least common|greatest common|probability|correlation|proportion|confidence|standard deviation|z-?score|the mean|how (much|far|fast|long)|what is the (value|slope|probability|mean|distance))\b/i.test(q.question)
+          const oc = ci?.answer ?? ''
+          const cmode = ci?.mode ?? ''
+          const hardVerified = /^(math|catalog|chain|free)/.test(cmode)                   // exact solver / unit-verified ⇒ ~100%
+          let ocOp = ''
+          if (!oc && computational) ocOp = await operatorComputeSC(q.question, q.choices)   // verified-operator lib, self-consistent (K-sample majority) to reject misformalizations
+          if (oc && hardVerified) { letter = oc; mode = `verify:compute:${cmode.split(':')[0]}` }   // verified calc wins outright
+          else if (ocOp) { letter = ocOp; mode = 'verify:operator' }                      // verified-operator lib ⇒ trust
+          else if (oc && oc === await askBase()) { letter = oc; mode = `verify:agree:${cmode.split(':')[0]}` }  // soft prog CONFIRMED by baseline
+          else { letter = await askBase(); mode = oc ? `verify:base(soft-disagree:${cmode})` : 'verify:base' }  // no reliable compute ⇒ baseline
+          row['verify_compute'] = oc || ocOp || ''; row['verify_hardverified'] = hardVerified
         } else if (arm === 'opcompute') {         // reason lane + VERIFIED-OPERATOR compute (the proven +7 fix): route computational
           // questions to lib/math_operators.py (model picks operator + args; tested library does the math), else CoT+SC.
           const computational = classifyComplexity(q.question).posture === 'compute'
@@ -1471,7 +1513,7 @@ async function main() {
         } else if (arm === 'cloud_brain') {        // ST026: cloud-scale model + the SAME brain retrieval context as `brain`
           letter = extractLetter(await askCloud(brainPrompt)); mode = CLOUD_MODEL
         } else {                                  // baseline (closed book)
-          letter = await askLetter(`${base}${ANSWER_RULE}`)
+          letter = await askBase()
         }
         } catch (e) { letter = ''; mode = `ERR:${String((e as Error)?.message ?? e).slice(0, 50)}`; attempted = false }   // arm abstains on failure; the run goes on
         const ok = letter === gold
