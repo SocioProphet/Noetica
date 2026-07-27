@@ -22,10 +22,13 @@ function authHeaders(json = true): Record<string, string> {
   return h
 }
 
-function binaryPath(): string | null {
+/** Where the embedder binary is, or null when it isn't installed. Exported so /api/status can
+ *  REPORT it — a missing sidecar degrades silently by design, so it has to be observable. */
+export function embedBinaryPath(): string | null {
   const here = __dirname   // CommonJS build target (house pattern; see canon-lookup.ts) — not import.meta
   return resolveSidecarBinary('noetica-embed', 'embed-sidecar', here)
 }
+const binaryPath = embedBinaryPath
 
 async function healthy(): Promise<boolean> {
   try { const r = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(1200) }); return r.ok } catch { return false }

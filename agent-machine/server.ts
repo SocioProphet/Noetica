@@ -33,6 +33,7 @@
  */
 
 import * as http from 'node:http'
+import pkg from '../package.json'   // the ONE source of the version (see VERSION below)
 import * as vm from 'node:vm'
 import * as cp from 'node:child_process'
 import * as crypto from 'node:crypto'
@@ -178,7 +179,12 @@ if (process.env['NOETICA_JS_SANDBOX'] === '1') {
 }
 
 const PORT = parseInt(process.env['NOETICA_AM_PORT'] ?? '8080', 10)
-const VERSION = '0.4.21'
+// Sourced from the app's package.json, NOT hand-maintained. This was pinned at '0.4.21' while
+// the app shipped 0.4.24, so every build for three releases announced itself as v0.4.21 in the
+// startup banner and /api/status. Field reports then carried a version that was simply false —
+// a user's log read "v0.4.21", which made a bug already fixed in 0.4.23 look unfixed, and sent
+// triage at the wrong build entirely. A version string nobody can trust is worse than none.
+const VERSION: string = pkg.version
 
 // Loopback local-auth secret — auto-generated on first run so the API is not open to EVERY local
 // process by default (a second OS user, a malicious binary, a browser-extension native host, curl can
@@ -6809,6 +6815,26 @@ const server = http.createServer((req, res) => {
     void (async () => {
       const ollamaUp = await isOllamaRunning()
       const localModels = ollamaUp ? await listLocalModels() : []
+      // Sidecar reachability, REPORTED rather than inferred. Both Rust sidecars degrade
+      // gracefully when absent, so a total outage looked exactly like a box that never built
+      // them — that is how the Windows `.exe`-suffix bug reached users (#556) with nothing in
+      // the logs. `binary` is the basename only, never the full path: enough for a smoke test
+      // to assert the platform suffix, without publishing the install layout over HTTP.
+      const sidecars = await (async () => {
+        try {
+          const [embed, operator] = await Promise.all([
+            import('./lib/embed-runtime.js'),
+            import('./lib/operator-runtime.js'),
+          ])
+          const base = (p: string | null) => (p ? p.replace(/^.*[\\/]/, '') : null)
+          return {
+            embed: { available: embed.isLocalEmbedAvailable(), binary: base(embed.embedBinaryPath()) },
+            operator: { available: operator.isLocalOperatorAvailable(), binary: base(operator.operatorBinaryPath()) },
+          }
+        } catch {
+          return { embed: { available: false, binary: null }, operator: { available: false, binary: null } }
+        }
+      })()
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(
         JSON.stringify({
@@ -6816,6 +6842,7 @@ const server = http.createServer((req, res) => {
           description: 'Noetica Agent Machine — local-first agentic runtime',
           localFirst: true,
           ollama: { running: ollamaUp, models: localModels },
+          sidecars,
           modelSuite: LOCAL_MODEL_SUITE,
           tools: BUILTIN_TOOLS.map((t) => t.name),
           mode: 'agent-machine',

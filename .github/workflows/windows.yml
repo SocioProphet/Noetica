@@ -100,6 +100,28 @@ jobs:
         shell: bash
         run: find src-tauri/binaries -maxdepth 1 -type f ! -name '*windows-msvc*' -print -delete
 
+      # ── Windows RUNTIME smoke ────────────────────────────────────────────────────────────
+      # The installer building is not evidence the app works. Both Rust sidecars were invisible
+      # on every Windows install for a week because the runtime probed `noetica-embed` while
+      # Tauri ships `noetica-embed.exe` — CI was green throughout, because a missing sidecar
+      # degrades gracefully and looks identical to a box that never built one. The only symptom
+      # was a user reporting slow embeddings. This stages the install layout, boots the real
+      # binary, and asks it whether it can actually see its sidecars.
+      - name: Windows sidecar runtime smoke
+        if: ${{ inputs.bundle_sidecars }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage=$(mktemp -d)
+          cp src-tauri/binaries/agent-machine-x86_64-pc-windows-msvc.exe "$stage/agent-machine.exe"
+          missing=0
+          for b in noetica-embed noetica-operator; do
+            src="src-tauri/binaries/$b-x86_64-pc-windows-msvc.exe"
+            if [ -f "$src" ]; then cp "$src" "$stage/$b.exe"; else echo "::warning::$b was not built — skipping smoke"; missing=1; fi
+          done
+          if [ "$missing" = "1" ]; then echo "sidecars unavailable (best-effort build); nothing to assert"; exit 0; fi
+          node agent-machine/scripts/sidecar-smoke.mjs "$stage/agent-machine.exe"
+
       - name: Inject externalBin (only binaries present on disk)
         run: node scripts/inject-am-sidecar-config.mjs
 
