@@ -117,6 +117,17 @@ export interface IngestResult {
   grounding?: { confirmed: number; residual: number } // confirmed = grounded to prime basis; residual = surprise
 }
 
+/** How much of a freshly-ingested document to hand the composer as an ORIENTATION excerpt.
+ *  The full text is never inlined — it lives in the vector tier and comes back through
+ *  retrieval. But 2×120 chars (the old value) was too thin to even identify the document:
+ *  the chat announced "319 chunks extracted" while the model saw 240 characters, so it
+ *  answered from nothing and looked like it hadn't read the upload at all. The opening of a
+ *  document is its best orientation material (title, abstract, contents), so take the head. */
+const PREVIEW_CHUNKS = 6
+const PREVIEW_CHARS = 400
+const previewOf = (chunks: string[]): string[] =>
+  chunks.slice(0, PREVIEW_CHUNKS).map((c) => c.slice(0, PREVIEW_CHARS))
+
 /** Link a doc to the canonical entities it mentions (GROUNDS edges), matched by normalised surface — interned
  *  entities carry no per-doc provenance. Idempotent (skips already-linked). PURE linking — never re-ingests
  *  entities (that's the expensive part); callers that need ingest do it separately. Returns edges added. */
@@ -197,7 +208,7 @@ export async function ingestDocument(filename: string, text: string): Promise<In
     const existing = g.nodesByLabel(CHUNK_LABEL).filter((n) => n.properties['doc_id'] === docId)
     const gr = groundThroughOntology(docId, text)
     linkProjections(g, docId)   // backfill projection edges on re-ingest of older docs
-    return { documentId: docId, filename, chunks: existing.length, embedded: existing.filter((n) => String(n.properties['embedding'] ?? '')).length, preview: existing.slice(0, 2).map((n) => String(n.properties['text'] ?? '').slice(0, 120)), entities: gr.entities, grounding: { confirmed: gr.confirmed, residual: gr.residual } }
+    return { documentId: docId, filename, chunks: existing.length, embedded: existing.filter((n) => String(n.properties['embedding'] ?? '')).length, preview: previewOf(existing.map((n) => String(n.properties['text'] ?? ''))), entities: gr.entities, grounding: { confirmed: gr.confirmed, residual: gr.residual } }
   }
   const chunks = chunkText(text)
   let embedded = 0
@@ -223,7 +234,7 @@ export async function ingestDocument(filename: string, text: string): Promise<In
   const gr = groundThroughOntology(docId, text)
   // Link the source doc to ALL its projections as explicit edges (chunks + entities).
   linkProjections(g, docId)
-  return { documentId: docId, filename, chunks: chunks.length, embedded, preview: chunks.slice(0, 2).map((c) => c.slice(0, 120)), entities: gr.entities, grounding: { confirmed: gr.confirmed, residual: gr.residual } }
+  return { documentId: docId, filename, chunks: chunks.length, embedded, preview: previewOf(chunks), entities: gr.entities, grounding: { confirmed: gr.confirmed, residual: gr.residual } }
 }
 
 // ─── Semantic retrieval ─────────────────────────────────────────────────────

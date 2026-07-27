@@ -1298,6 +1298,14 @@ export function AppShell() {
     const next = [...baseMessages, userMessage, assistantMessage]
     setMessages(next)
     setIsStreaming(true)
+    // Trust visible by default: surface the governance rail for the turn that's starting rather
+    // than making the operator click Inspect to find out how the answer was produced. Unpinning
+    // `inspectMessage` lets the panel track the LIVE answer; an explicit Inspect on an older reply
+    // still pins it (that's the replay path, and it survives because it's set after this point).
+    if (settings.autoOpenGovernance) {
+      setInspectMessage(null)
+      setUtilityPanel('answer')
+    }
     const abort = new AbortController()
     abortControllerRef.current = abort
     const providerKeys = {
@@ -1363,6 +1371,16 @@ export function AppShell() {
             // and honor the composer's scope selector + web toggle. Unset when nothing is active → global.
             collection_id: activeProject ? projectCollectionId(activeProject.id) : undefined,
             retrieval_scope: scope?.retrievalScope,
+            // Episodic recall is keyed on sessions, not collections, so the project's conversations
+            // have to travel with the request — otherwise the project bounds the documents while
+            // prior exchanges still arrive from every other project. The current chat is always
+            // included: it may not be filed under the project yet, but it plainly belongs to it.
+            project_session_ids: activeProject && scope?.retrievalScope !== 'everything'
+              ? Array.from(new Set([
+                  ...sessions.filter((s) => s.projectId === activeProject.id).map((s) => s.id),
+                  ...(activeSession?.id ? [activeSession.id] : []),
+                ]))
+              : undefined,
             web: scope?.web,
             // Prophet Cloud Mesh: when opted-in, route inference to the sovereign cloud mesh.
             prophet_mesh: settings.prophetMeshEnabled && settings.prophetMeshEndpoint
@@ -1747,7 +1765,7 @@ export function AppShell() {
         if (m.id !== id) return m
         const prev = m.retrieval_trace
         const merged = isProvenance
-          ? { ...(prev ?? trace), memory_sources: trace.memory_sources, episode_sources: trace.episode_sources }
+          ? { ...(prev ?? trace), memory_sources: trace.memory_sources, episode_sources: trace.episode_sources, knowledge_boundary: trace.knowledge_boundary }
           : isDocs
             ? { ...(prev ?? trace), document_sources: trace.sources }
             : { ...trace, document_sources: prev?.document_sources, memory_sources: prev?.memory_sources, episode_sources: prev?.episode_sources }

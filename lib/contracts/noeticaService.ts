@@ -54,6 +54,12 @@ export type NoeticaChatRequest = {
   collection_id?: string
   /** Retrieval breadth: 'chat' (only this chat's docs) | 'project' (chat + project KB, default) | 'everything'. */
   retrieval_scope?: 'chat' | 'project' | 'everything'
+  /**
+   * Sessions belonging to the active project. Documents scope by collection, but episodic recall is
+   * keyed on sessions — sending these confines "what we discussed earlier" to this project instead of
+   * every conversation on the machine. Omit when no project is active (unscoped recall).
+   */
+  project_session_ids?: string[]
   /** Force external web research on for this turn (adds web_search + prefers fresh external sources). */
   web?: boolean
   /** Prophet Cloud Mesh opt-in — route inference to the sovereign cloud mesh (OpenAI-compatible). */

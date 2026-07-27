@@ -1195,6 +1195,11 @@ interface ChatRequest {
   // in this chat, 'project' = chat + project KB (default), 'everything' = the full corpus (legacy).
   collection_id?: string
   retrieval_scope?: 'chat' | 'project' | 'everything'
+  // The conversations belonging to the active project. Documents scope by collection, but episodic
+  // recall is keyed on sessions — without this, selecting a project bounded the docs while prior
+  // exchanges still leaked in from every other project. Sent only when a project is active; absent
+  // means unscoped recall (the pre-Projects behaviour, and what an unfiled chat should still get).
+  project_session_ids?: string[]
   // Force external web research on for this turn (adds web_search regardless of the intent classifier)
   // and tell the model to prefer fresh external sources over internal knowledge.
   web?: boolean
@@ -3189,18 +3194,39 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
   // Even when generation is slow, the user watches the agent move through its plan
   // instead of waiting on a blank spinner. Steps mirror the real pipeline below.
   const willRetrieveDocs = wantsVectorRag(intentPlan.retrieval) && hasDoc
+  // The steps ARE the governance pipeline, not a generic spinner: which policy is in force, what
+  // knowledge boundary applies, what was consulted, and — the step that was missing — whether the
+  // turn is actually finished and sealed. "Composing the answer" used to be the last thing the
+  // operator saw, leaving no signal for "is it still thinking, or is it done?".
+  const policyProfileName = body.policy_profile ?? 'default'
+  const boundaryLabel = body.retrieval_scope === 'everything' ? 'entire corpus'
+    : (typeof body.collection_id === 'string' && body.collection_id.trim()) ? 'this project'
+    : 'this chat'
   const planSteps = [
     { id: 'classify', label: 'Understanding the request', status: 'done', detail: intentPlan.name.replace(/_/g, ' ') },
+    { id: 'govern', label: 'Applying governance policy', status: 'running', detail: `${policyProfileName} profile · scope: ${boundaryLabel}` },
     { id: 'retrieve', label: willRetrieveDocs ? 'Retrieving relevant document passages' : 'Gathering memory & grounding', status: 'running', detail: '' },
     { id: 'generate', label: 'Composing the answer', status: 'pending', detail: '' },
+    { id: 'seal', label: 'Sealing the evidence trail', status: 'pending', detail: '' },
   ]
   sse(res, 'plan', { plan: {
     intent: intentPlan.name, capability: intentPlan.model,
     retrieval: intentPlan.retrieval, slots: intentPlan.slots, steps: planSteps,
     surface: intentPlan.surface, skill: intentPlan.skill, tools: intentPlan.tools,
   } })
-  const step = (id: string, status: 'running' | 'done', detail = '') =>
+  // Marking `generate` done means the turn produced its answer — by generation, by logic, by
+  // extraction, or by giving up with an error. Every one of those paths returns early, so closing
+  // the terminal `seal` step here (once) is what stops it hanging pending forever on the ~10
+  // early exits. The main path re-emits `seal` afterwards with richer detail; it's already `done`
+  // by then, so the text sharpens without the step flickering between states.
+  let sealAutoClosed = false
+  const step = (id: string, status: 'running' | 'done', detail = '') => {
     sse(res, 'step', { step: { id, status, detail } })
+    if (id === 'generate' && status === 'done' && !sealAutoClosed) {
+      sealAutoClosed = true
+      sse(res, 'step', { step: { id: 'seal', status: 'done', detail: '' } })
+    }
+  }
   // The announcer: stream plain narration of WHAT the agent is doing and WHY — which
   // model, for what purpose, why it's adapting — so the user follows the reasoning and
   // never sees a silent gap (the "not frozen" signal).
@@ -3323,6 +3349,24 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
   let resolvedBaseUrl = routing.resolvedBaseUrl   // set for openrouter/huggingface hosted aggregators
   const { resolvedModel: _rm, resolvedProvider: _rp, resolvedBaseUrl: _rb, ...routerDecision } = routing
 
+  // ── Model sovereignty ───────────────────────────────────────────────────────
+  // Picking a model by hand is a sovereignty action: the operator is asserting which model
+  // sees their data. The router honours it (router.ts, "Explicit model override"), but four
+  // optimisation layers downstream — capability escalation, the UCB1 bandit, the concierge
+  // downgrade, and the responsive-base re-route — used to swap the model out again without
+  // consulting it, so the provenance panel reported a model the operator never chose.
+  //
+  // Rule: an explicit choice beats every OPTIMISATION. It does NOT beat a POLICY floor —
+  // scope-d egress denial still routes down to local, because a governance denial that could
+  // be overridden by a dropdown isn't a governance control. Overrides that do survive are
+  // recorded below and surfaced to the UI, so an override is always visible and never silent.
+  const explicitModelId = typeof body.model_id === 'string' && body.model_id.trim() ? body.model_id.trim() : undefined
+  const routeOverrides: Array<{ layer: string; from: string; to: string; reason: string; kind: 'policy' | 'capability' | 'optimisation' }> = []
+  const recordOverride = (layer: string, from: string, to: string, reason: string, kind: 'policy' | 'capability' | 'optimisation') => {
+    if (from === to) return
+    routeOverrides.push({ layer, from, to, reason, kind })
+  }
+
   // ── Prophet Cloud Mesh opt-in ────────────────────────────────────────────────
   // When the operator opts in (Settings → Models → Prophet Cloud Mesh), route ALL
   // inference for this turn to their cloud mesh — an OpenAI-compatible vLLM endpoint
@@ -3385,13 +3429,16 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
   // Self-model routing hook (opt-in via NOETICA_CAPABILITY_ROUTING=1). If the
   // local model has a poor track record on this task family and a cloud key is
   // available, escalate. Default OFF so demo routing is unchanged unless enabled.
-  if (process.env['NOETICA_CAPABILITY_ROUTING'] === '1' && provider === 'ollama') {
+  if (process.env['NOETICA_CAPABILITY_ROUTING'] === '1' && provider === 'ollama' && !explicitModelId) {
     const hint = capabilityHint(routerDecision.task ?? 'general')
     if (hint.recommendEscalation) {
+      const from = model
       let escalated = false
       if (anthropicAvailable) { provider = 'anthropic'; model = 'claude-haiku-4-5'; escalated = true }
       else if (openaiKey) { provider = 'openai'; model = 'gpt-5.4-mini'; escalated = true }
       if (escalated) {
+        recordOverride('capability-routing', from, model,
+          `local success rate ${(hint.localSuccessRate ?? 0).toFixed(2)} over ${hint.localRuns} runs on this task family`, 'capability')
         console.log(`[self-model] escalated task="${String(routerDecision.task)}" → ${provider}:${model} (local success ${(hint.localSuccessRate ?? 0).toFixed(2)} over ${hint.localRuns} runs)`.replace(/\r/g, '').replace(/\n/g, ''))
       }
     }
@@ -3401,7 +3448,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
   // router's primary and fallback for this task using a UCB1 bandit over learned
   // reward (VJ worth + user feedback). The model that produces better-judged
   // answers for a task family gets used more — self-improving, technique-driven.
-  if (isFlagOn('NOETICA_BANDIT_ROUTING') && provider === 'ollama') {
+  if (isFlagOn('NOETICA_BANDIT_ROUTING') && provider === 'ollama' && !explicitModelId) {
     const fallbackModel = routerDecision.fallbackRoute
     const toolOk = (m: string) => LOCAL_MODEL_SUITE.find((x) => x.name === m)?.toolUse !== false
     const needTools = (body.tools?.length ?? 0) > 0
@@ -3414,6 +3461,8 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
       .filter((m) => routerDecision.task === 'reasoning' || !/deepseek-r1/i.test(m))
     const pick = selectArmUCB(routerDecision.task ?? 'general', arms)
     if (pick && pick !== model) {
+      recordOverride('bandit-routing', model, pick,
+        `UCB1 selection over learned reward for task "${String(routerDecision.task ?? 'general')}"`, 'optimisation')
       console.log(`[bandit] task="${String(routerDecision.task)}" ${model} → ${pick} (arms: ${arms.join(', ')})`.replace(/\r/g, '').replace(/\n/g, ''))
       model = pick
     }
@@ -3452,6 +3501,10 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
         const localPick = [routerDecision.fallbackRoute, 'qwen2.5:7b', ...availableModels]
           .find((m) => m && !m.startsWith('claude') && !m.startsWith('gpt') && availableModels.includes(m))
         if (ollamaUp && localPick) {
+          // A POLICY override — this one applies even to an explicitly-chosen model. Recorded so
+          // the operator sees that their choice was overruled, and by what.
+          recordOverride('scope-d-egress', model, localPick,
+            `egress to ${target} denied by policy (${verdict.reason}) — routed down to local`, 'policy')
           console.warn(`[scope-d] egress denied (${verdict.reason}) → routing down to local ${localPick}`)
           provider = 'ollama'; model = localPick
         } else {
@@ -3462,6 +3515,11 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
     } else {
       emitScopedTelemetry({ kind: 'route', provider, model, tier: 'local', scope: scopeName })
     }
+    // The governance step closes on the REAL decision, not a generic tick: which policy scope
+    // was evaluated and whether any data left the machine this turn.
+    step('govern', 'done', provider === 'ollama'
+      ? `${scopeName} · no egress (sovereign local compute)`
+      : `${scopeName} · egress allowed → ${provider}`)
   }
 
   // ── Chat-first concierge (O1) ───────────────────────────────────────────────
@@ -3482,9 +3540,13 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
       // keeps its routed 7b worker — otherwise "summarize this report" falls into
       // planTurn's default "direct" bucket and gets quietly downgraded to the 3B.
       const conciergeIntents = new Set(['converse_smalltalk', 'confirm_steer', 'meta_capability', 'self_identity'])
-      if (turnPlan.mode === 'direct' && conciergeIntents.has(intentPlan.name)) {
+      if (turnPlan.mode === 'direct' && conciergeIntents.has(intentPlan.name) && !explicitModelId) {
         const fast = ['llama3.2:3b', 'qwen2.5:7b'].find((m) => availableModels.includes(m))
-        if (fast) { model = fast; console.log(`[concierge] direct turn → ${model} (${intentPlan.name})`) }
+        if (fast) {
+          recordOverride('concierge', model, fast, `trivial intent "${intentPlan.name}" answered inline by the fast model`, 'optimisation')
+          model = fast
+          console.log(`[concierge] direct turn → ${model} (${intentPlan.name})`)
+        }
       }
     } catch { /* orchestration is best-effort — fall back to routed model */ }
   }
@@ -3496,7 +3558,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
   // our grounding + forms, answers accurately. So START substantive general/research/
   // writing turns on the 3B; the escalation step below climbs to a 7B only when the
   // turn actually struggles. Code/reasoning keep their routed worker.
-  if (isFlagOn('NOETICA_RESPONSIVE') && provider === 'ollama') {
+  if (isFlagOn('NOETICA_RESPONSIVE') && provider === 'ollama' && !explicitModelId) {
     // Fast 3B for NON-grounded turns (chat, quick general). But doc-grounded intents
     // (vector-rag) keep the 7B: the dry-run proved a 3B confabulates on specific-entity
     // questions even with the right chunks in context and a strict-grounding instruction
@@ -3531,16 +3593,22 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
         model = bestResponsive(availableModels, model)
       }
     }
-    if (model !== before) console.log(`[responsive] ${String(task)} ${before} → ${model}`.replace(/\r/g, '').replace(/\n/g, ''))
+    if (model !== before) {
+      recordOverride('responsive-base', before, model, `latency-tuned base model for task "${String(task)}"`, 'optimisation')
+      console.log(`[responsive] ${String(task)} ${before} → ${model}`.replace(/\r/g, '').replace(/\n/g, ''))
+    }
   }
 
   // ── Escalation: climb to a more capable model when the cheap flow is failing ──
   // After 2 unresolved turns in a session — or 1 turn when intent/path confidence is
   // low — fall back to a more capable model (cloud when a key is present, else the
-  // best available local). The final word on routing, overriding bandit/concierge.
+  // best available local). The final word on routing, overriding bandit/concierge —
+  // but NOT an explicit choice: escalating a hand-picked local model to a cloud one
+  // would move the operator's data off the machine on a heuristic. That is exactly the
+  // decision the model picker exists to make.
   let escalated = false
   const trivialIntent = ['converse_smalltalk', 'confirm_steer', 'meta_capability', 'self_identity'].includes(intentPlan.name)
-  if (provider === 'ollama' && !trivialIntent) {
+  if (provider === 'ollama' && !trivialIntent && !explicitModelId) {
     try {
       const { sessionStruggle } = await import('./lib/dialogue-tracker.js')
       const { decideEscalation } = await import('./lib/dialogue-policy.js')
@@ -3552,6 +3620,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
         availableModels, currentModel: model,
       })
       if (esc.escalate && esc.model) {
+        recordOverride('escalation', model, esc.model, esc.reason ?? 'the turn was struggling on the routed model', 'capability')
         provider = esc.provider as typeof provider; model = esc.model; escalated = true
         sse(res, 'escalation', { escalation: { to: `${provider}:${model}`, reason: esc.reason } })
         const { narrateEscalation } = await import('./lib/narration.js')
@@ -3589,11 +3658,18 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
   // OpenAI. Report it honestly so the footer reads "prophet-mesh", not "openai".
   const reportedProvider = meshRoute ? 'prophet-mesh' : provider
 
+  // Model sovereignty in the audit trail: what was ASKED for, what actually ran, and every
+  // layer that moved it. `model_honored` is false only when an explicit choice was overruled
+  // (a policy floor), so the UI can say so instead of quietly showing a different model.
+  const modelHonored = !explicitModelId || routeOverrides.length === 0
   sse(res, 'meta', {
     governance: {
       run_id,
       model_routed: model,
       model_route_reason: routerDecision.rationale ?? '',
+      model_requested: explicitModelId ?? null,
+      model_honored: modelHonored,
+      route_overrides: routeOverrides,
       provider: reportedProvider,
       policy_admitted: true,
       memory_written: false,
@@ -3602,6 +3678,9 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
       agent_machine_version: VERSION,
     },
   })
+  if (explicitModelId && !modelHonored) {
+    console.warn(`[sovereignty] explicit model ${explicitModelId} overridden: ${routeOverrides.map((o) => `${o.layer}(${o.kind})`).join(', ')}`.replace(/[\r\n]/g, ''))
+  }
 
   // Merge built-in tools with any tools from the request.
   // If the routed model doesn't support tool use, pass an empty set — sending
@@ -4054,20 +4133,39 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
 
   // Cross-session episodic recall: prior exchanges relevant to this question, so the agent
   // remembers what was discussed in EARLIER sessions (the Interaction layer was write-only).
+  // Bounded by the active project when there is one — "cross-session" must not mean
+  // "cross-project", or the project selector isn't a knowledge boundary at all.
   let episodeContext = ''
   let recalledEpisodes: Array<{ question: string }> = []
+  const projectSessionIds = Array.isArray(body.project_session_ids) && body.project_session_ids.length > 0
+    ? body.project_session_ids.filter((s): s is string => typeof s === 'string' && s.length > 0)
+    : undefined
   try {
     const { recallExchanges, formatExchanges } = await import('./lib/episodic.js')
     const gEp = getHellGraph()
-    const exchanges = recallExchanges({ nodesByLabel: (l: string) => gEp.nodesByLabel(l) as any[] }, latestUserContent, { limit: 3 })
+    const exchanges = recallExchanges(
+      { nodesByLabel: (l: string) => gEp.nodesByLabel(l) as any[], out: (id: string, e?: string) => gEp.out(id, e) as any[] },
+      latestUserContent,
+      { limit: 3, ...(projectSessionIds ? { sessionIds: projectSessionIds } : {}) },
+    )
     recalledEpisodes = exchanges.map((e) => ({ question: e.question.slice(0, 120) }))
     episodeContext = formatExchanges(exchanges)
   } catch { /* episodic recall best-effort */ }
 
-  // Provenance: surface what the agent REMEMBERED + RECALLED for this answer (merges into the
-  // retrieval trace shown in the UI). Best-effort.
+  // Provenance: surface what the agent REMEMBERED + RECALLED for this answer, and the boundary
+  // that governed it — so "was my project scope honoured?" is answerable from the trace rather
+  // than taken on trust. Best-effort. (Long-term memories stay cross-project by design: they're
+  // things the operator explicitly asked to be remembered, like a preferred language, and are
+  // reported here as such rather than silently scoped.)
+  const boundaryCollection = typeof body.collection_id === 'string' && body.collection_id.trim() ? body.collection_id.trim() : null
+  const knowledgeBoundary = {
+    scope: projectSessionIds ? 'project' : (body.retrieval_scope ?? 'project'),
+    collection: boundaryCollection,
+    sessions: projectSessionIds ? projectSessionIds.length : null,
+    memories: 'cross-project' as const,   // explicit "remember this" facts are deliberately not scoped
+  }
   if (recalledMems.length > 0 || recalledEpisodes.length > 0) {
-    sse(res, 'retrieval', { trace: { patterns: [], timings: [], sources: [], token_estimate: 0, beliefs_injected: 0, memory_sources: recalledMems, episode_sources: recalledEpisodes } })
+    sse(res, 'retrieval', { trace: { patterns: [], timings: [], sources: [], token_estimate: 0, beliefs_injected: 0, memory_sources: recalledMems, episode_sources: recalledEpisodes, knowledge_boundary: knowledgeBoundary } })
   }
 
   // Few-shot training memory: inject the best gold Q/A exemplars for this intent —
@@ -5321,6 +5419,12 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
       const d = decideAnswer({ verified: turnGrounded, coverage: valueJudgment?.grounding ?? 0, entropy: 0 })
       if (d !== 'answer') uncertaintyDecision = d
     } catch { /* uncertainty decision is best-effort */ }
+
+    // The turn IS over — say so. Without a terminal step the plan's last visible state was
+    // "Composing the answer", which reads as "still working" long after the stream ended.
+    step('seal', 'done', turnGrounded
+      ? `grounded · ${citations.length} citation${citations.length === 1 ? '' : 's'} · run ${run_id.slice(0, 8)}`
+      : `generated · run ${run_id.slice(0, 8)}`)
 
     sse(res, 'done', {
       result: {

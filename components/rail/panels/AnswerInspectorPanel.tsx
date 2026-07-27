@@ -250,6 +250,34 @@ export function AnswerInspectorPanel({ message }: { message: ChatMessage | null 
         </Section>
       )}
 
+      {/* Knowledge boundary — what this turn was ALLOWED to read. Selecting a project is a
+          governance action, so the trace has to confirm the boundary was actually applied
+          rather than leaving the operator to trust that it was. */}
+      {message.retrieval_trace?.knowledge_boundary && (
+        <Section title="Knowledge boundary">
+          <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-[12px] text-[var(--color-text-secondary)]">
+            <dt className="text-[var(--color-text-tertiary)]">scope</dt>
+            <dd>{message.retrieval_trace.knowledge_boundary.scope}</dd>
+            {message.retrieval_trace.knowledge_boundary.collection && (
+              <>
+                <dt className="text-[var(--color-text-tertiary)]">collection</dt>
+                <dd className="truncate font-mono text-[11px]">{message.retrieval_trace.knowledge_boundary.collection}</dd>
+              </>
+            )}
+            {message.retrieval_trace.knowledge_boundary.sessions != null && (
+              <>
+                <dt className="text-[var(--color-text-tertiary)]">recall</dt>
+                <dd>confined to {message.retrieval_trace.knowledge_boundary.sessions} project conversation{message.retrieval_trace.knowledge_boundary.sessions === 1 ? '' : 's'}</dd>
+              </>
+            )}
+            <dt className="text-[var(--color-text-tertiary)]">memories</dt>
+            <dd title="Facts you explicitly asked to be remembered apply across projects by design.">
+              {message.retrieval_trace.knowledge_boundary.memories}
+            </dd>
+          </dl>
+        </Section>
+      )}
+
       {/* Discipline */}
       {message.discipline && (
         <Section title="Discipline">

@@ -34,6 +34,7 @@ export const defaultSettings: NoeticaSettings = {
   memoryScope: 'session',
   memoryRetentionDays: 30,
 
+  autoOpenGovernance: true,
   defaultEvidenceLevel: 'standard',
   defaultPolicyProfile: 'default',
   securityEphemeralMinutes: 15,

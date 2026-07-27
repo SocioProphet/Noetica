@@ -7,6 +7,18 @@ export interface GovernanceTrace {
   model_routed: string
   /** Why the router chose this model — from router.ts rationale field */
   model_route_reason?: string
+  /** The model the operator explicitly selected, if any — null when routing was automatic. */
+  model_requested?: string | null
+  /** False only when an explicit selection was overruled (a policy floor). */
+  model_honored?: boolean
+  /** Every layer that moved the model this turn, so an override is never silent. */
+  route_overrides?: Array<{
+    layer: string
+    from: string
+    to: string
+    reason: string
+    kind: 'policy' | 'capability' | 'optimisation'
+  }>
   provider: string
   model_overridden?: boolean
   policy_admitted: boolean

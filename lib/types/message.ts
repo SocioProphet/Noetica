@@ -223,4 +223,15 @@ export interface RetrievalTrace {
   memory_sources?: Array<{ kind: string; preview: string; pinned: boolean }>
   /** Prior cross-session exchanges recalled this turn */
   episode_sources?: Array<{ question: string }>
+  /**
+   * The knowledge boundary that governed this turn's recall — so "was my project scope honoured?"
+   * is answerable from the trace instead of taken on trust. `memories` records that explicit
+   * "remember this" facts stay cross-project by design rather than being silently scoped.
+   */
+  knowledge_boundary?: {
+    scope: string
+    collection: string | null
+    sessions: number | null
+    memories: 'cross-project'
+  }
 }
