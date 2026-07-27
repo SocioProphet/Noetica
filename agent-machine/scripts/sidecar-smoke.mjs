@@ -9,25 +9,69 @@
  * the only symptom was "embeddings are slow" reported by a user weeks later. Unit tests over
  * the path logic can't catch the packaging half of that; this runs the real binary and asks it.
  *
- * Usage: node scripts/sidecar-smoke.mjs <path-to-agent-machine-binary>
- * Exits non-zero with a diagnosis on failure.
+ * Usage:
+ *   node scripts/sidecar-smoke.mjs <path-to-agent-machine-binary>
+ *   node scripts/sidecar-smoke.mjs --stage <binaries-dir> --triple <target-triple>
+ *
+ * `--stage` mirrors the INSTALL layout out of a Tauri `binaries/` directory: it copies
+ * `<name>-<triple><exe>` to `<name><exe>` in a temp dir, which is exactly the rename Tauri
+ * performs when bundling. That rename is where the Windows bug lived, so reproducing it is
+ * the point — and it keeps each CI job a single line instead of duplicated staging bash.
+ *
+ * Exits non-zero with a diagnosis on failure. Exits 0 with a notice when sidecars were not
+ * built at all (they're best-effort in several jobs — absence must not turn a soft dependency
+ * into a hard one; only a sidecar that exists but cannot be RESOLVED is a failure).
  */
 import { spawn } from 'node:child_process'
 import * as fs from 'node:fs'
+import * as os from 'node:os'
 import * as path from 'node:path'
 
-const bin = process.argv[2]
+const argv = process.argv.slice(2)
+const flag = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : null }
+const stageDir = flag('--stage')
+const triple = flag('--triple')
+
+const PORT = Number(process.env.SMOKE_PORT || 8099)
+const EXPECTED_SUFFIX = process.platform === 'win32' ? '.exe' : ''
+const SIDECARS = ['noetica-embed', 'noetica-operator']
+
+let bin = argv[0] && !argv[0].startsWith('--') ? argv[0] : null
+
+if (stageDir) {
+  if (!triple) { console.error('[smoke] FAIL: --stage requires --triple'); process.exit(1) }
+  if (!fs.existsSync(stageDir)) { console.error(`[smoke] FAIL: --stage dir not found: ${stageDir}`); process.exit(1) }
+  const src = (n) => path.join(stageDir, `${n}-${triple}${EXPECTED_SUFFIX}`)
+  const amSrc = src('agent-machine')
+  if (!fs.existsSync(amSrc)) {
+    console.error(`[smoke] FAIL: agent-machine binary not found: ${amSrc}`)
+    console.error(`[smoke] contents: ${fs.readdirSync(stageDir).join(', ')}`)
+    process.exit(1)
+  }
+  const built = SIDECARS.filter((n) => fs.existsSync(src(n)))
+  if (built.length < SIDECARS.length) {
+    const absent = SIDECARS.filter((n) => !built.includes(n))
+    console.log(`[smoke] SKIP: sidecar(s) not built for ${triple}: ${absent.join(', ')} (best-effort build) — nothing to assert`)
+    process.exit(0)
+  }
+  const dest = fs.mkdtempSync(path.join(os.tmpdir(), 'noetica-smoke-'))
+  // The install-layout rename: `<name>-<triple><exe>` → `<name><exe>`.
+  fs.copyFileSync(amSrc, path.join(dest, `agent-machine${EXPECTED_SUFFIX}`))
+  for (const n of SIDECARS) fs.copyFileSync(src(n), path.join(dest, `${n}${EXPECTED_SUFFIX}`))
+  for (const f of fs.readdirSync(dest)) fs.chmodSync(path.join(dest, f), 0o755)
+  bin = path.join(dest, `agent-machine${EXPECTED_SUFFIX}`)
+  console.log(`[smoke] staged ${triple} install layout → ${dest}`)
+}
+
 if (!bin || !fs.existsSync(bin)) {
   console.error(`[smoke] FAIL: agent-machine binary not found: ${bin ?? '<no argument>'}`)
   process.exit(1)
 }
 
-const PORT = Number(process.env.SMOKE_PORT || 8099)
-const EXPECTED_SUFFIX = process.platform === 'win32' ? '.exe' : ''
 const dir = path.dirname(path.resolve(bin))
 
 // The sidecars must be staged beside the binary, exactly as the installer lays them out.
-const expected = ['noetica-embed', 'noetica-operator'].map((n) => ({ name: n, file: `${n}${EXPECTED_SUFFIX}` }))
+const expected = SIDECARS.map((n) => ({ name: n, file: `${n}${EXPECTED_SUFFIX}` }))
 const missingOnDisk = expected.filter((e) => !fs.existsSync(path.join(dir, e.file)))
 if (missingOnDisk.length) {
   console.error(`[smoke] FAIL: sidecar(s) not staged beside the binary in ${dir}:`)
