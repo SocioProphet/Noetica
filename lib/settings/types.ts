@@ -83,6 +83,8 @@ export interface NoeticaSettings {
   // Voice
   wakeWordEnabled: boolean
   voiceLanguage: string
+  /** Auto-speak assistant replies when you used voice INPUT. Default off — voice-in shouldn't force voice-out (Gus #2). */
+  speakResponses: boolean
   ttsProvider: 'cloned' | 'elevenlabs' | 'openai' | 'system'
   ttsVoice: 'nova' | 'shimmer' | 'alloy' | 'echo' | 'fable' | 'onyx'
   macVoice: string

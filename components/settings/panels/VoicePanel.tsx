@@ -180,6 +180,17 @@ export function VoicePanel() {
         </p>
       </div>
 
+      {/* Auto-speak replies to voice input (Gus #2 — off by default) */}
+      <div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+          <input type="checkbox" checked={settings.speakResponses ?? false} onChange={e => update({ speakResponses: e.target.checked })} />
+          <span style={{ fontSize: '13px', color: 'var(--color-text-primary)' }}>Speak replies aloud when I use voice input</span>
+        </label>
+        <p style={{ margin: '4px 0 0 24px', fontSize: '11px', color: 'var(--color-text-secondary)' }}>
+          Off by default — using the mic to dictate won’t auto-play the response. Turn on for a hands-free back-and-forth.
+        </p>
+      </div>
+
       {/* TTS Provider */}
       <div>
         <Label>TTS Provider</Label>

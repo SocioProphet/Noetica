@@ -528,7 +528,9 @@ export function AppShell() {
     }
     // Live conversation → route to the metachat lane (side-transcript, doesn't touch the chat).
     if (isLiveRef.current) { liveTurnRef.current(transcript); return }
-    voiceReplyRef.current = true
+    // Gus #2: only auto-speak the reply if the user opted into it — using voice as INPUT
+    // shouldn't silently force audio OUTPUT.
+    voiceReplyRef.current = settings.speakResponses === true
     setActiveSurface('chat')
     void handleSendRaw(transcript, [], messages)
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1879,6 +1881,7 @@ export function AppShell() {
                 activeSurface={activeSurface}
                 sessionId={activeSession?.id}
                 activeProjectTitle={activeProject?.title}
+                projectDocCount={activeProject?.fileAttachments?.length ?? 0}
                 projectCollection={activeProject ? projectCollectionId(activeProject.id) : undefined}
                 chatCollection={activeSession ? chatCollectionId(activeSession.id) : undefined}
                 projects={projects.map((p) => ({ id: p.id, title: p.title }))}
@@ -1930,6 +1933,8 @@ export function AppShell() {
                 onStartDictation={startDictation}
                 onStopDictation={stopListening}
                 dictating={isDictating}
+                speaking={!!speakingId}
+                onStopSpeaking={stopSpeaking}
               />
               </SurfaceErrorBoundary>
               </div>
@@ -2127,6 +2132,7 @@ type CenterProps = {
   thinkingBudget: number | undefined
   onSend: (content: string, attachments: PendingAttachment[], mcpTools?: string[], scope?: { retrievalScope: RetrievalScope; web: boolean }) => Promise<void>
   activeProjectTitle?: string
+  projectDocCount?: number
   projectCollection?: string
   chatCollection?: string
   projects?: Array<{ id: string; title: string }>
@@ -2166,9 +2172,11 @@ type CenterProps = {
   onStartDictation?: () => void
   onStopDictation?: () => void
   dictating?: boolean
+  speaking?: boolean
+  onStopSpeaking?: () => void
 }
 
-function CenterWorkspace({ activeSurface, sessionId, activeProjectTitle, projectCollection, chatCollection, projects, activeProjectId, onSelectProject, messages, isStreaming, workspaceMode, fanoutModelCount, modelId, thinkingBudget, onSend, onFanout, onStop, onRegenerate, onResume, onFork, onEdit, onRecombine, onWorkspaceModeChange, onExtractArtifact, onModelChange, onOpenPalette, mcpTools, systemPrompt, onSystemPromptChange, activeArtifact, onCloseArtifact, onArtifactUpdate, onArtifactDelete, onAtomSelect, onOpenSettings, onNavigateToOperate, onNavigateToGovern, onSpeak, speakingMessageId, onFeedback, agentMode, onSetAgentMode, onPlanApprove, onPlanReject, onInspect, onStartDictation, onStopDictation, dictating }: CenterProps) {
+function CenterWorkspace({ activeSurface, sessionId, activeProjectTitle, projectDocCount, projectCollection, chatCollection, projects, activeProjectId, onSelectProject, messages, isStreaming, workspaceMode, fanoutModelCount, modelId, thinkingBudget, onSend, onFanout, onStop, onRegenerate, onResume, onFork, onEdit, onRecombine, onWorkspaceModeChange, onExtractArtifact, onModelChange, onOpenPalette, mcpTools, systemPrompt, onSystemPromptChange, activeArtifact, onCloseArtifact, onArtifactUpdate, onArtifactDelete, onAtomSelect, onOpenSettings, onNavigateToOperate, onNavigateToGovern, onSpeak, speakingMessageId, onFeedback, agentMode, onSetAgentMode, onPlanApprove, onPlanReject, onInspect, onStartDictation, onStopDictation, dictating, speaking, onStopSpeaking }: CenterProps) {
   if (activeSurface === 'notes')        return <NotesSurface />
   if (activeSurface === 'canvas')       return <CanvasSurface />
   if (activeSurface === 'workrooms')    return <TabbedWorkspace tabs={[
@@ -2273,6 +2281,7 @@ function CenterWorkspace({ activeSurface, sessionId, activeProjectTitle, project
           systemPrompt={systemPrompt}
           onSystemPromptChange={onSystemPromptChange}
           activeProjectTitle={activeProjectTitle}
+          projectDocCount={projectDocCount}
           projectCollection={projectCollection}
           projects={projects}
           activeProjectId={activeProjectId}
@@ -2281,6 +2290,8 @@ function CenterWorkspace({ activeSurface, sessionId, activeProjectTitle, project
           onStartDictation={onStartDictation}
           onStopDictation={onStopDictation}
           dictating={dictating}
+          speaking={speaking}
+          onStopSpeaking={onStopSpeaking}
         />
       </section>
 
