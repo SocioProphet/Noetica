@@ -6,9 +6,8 @@
  * is lazy-spawned on first use and proxied over HTTP; batch calls embed hundreds of strings in
  * a single request (~ms warm). Falls back to null if the binary isn't present (callers degrade).
  */
-import * as fs from 'node:fs'
-import * as path from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
+import { resolveSidecarBinary } from './sidecar-path.js'
 
 const PORT = 8126
 const BASE = `http://127.0.0.1:${PORT}`
@@ -24,16 +23,8 @@ function authHeaders(json = true): Record<string, string> {
 }
 
 function binaryPath(): string | null {
-  // prod: shipped next to the agent-machine binary in the .app (Tauri externalBin)
-  const beside = path.join(path.dirname(process.execPath), 'noetica-embed')
-  if (fs.existsSync(beside)) return beside
-  // dev: the cargo target
   const here = __dirname   // CommonJS build target (house pattern; see canon-lookup.ts) — not import.meta
-  for (const p of [
-    path.resolve(process.cwd(), 'embed-sidecar/target/release/noetica-embed'),
-    path.resolve(here, '../../embed-sidecar/target/release/noetica-embed'),
-  ]) { if (fs.existsSync(p)) return p }
-  return null
+  return resolveSidecarBinary('noetica-embed', 'embed-sidecar', here)
 }
 
 async function healthy(): Promise<boolean> {

@@ -13,8 +13,8 @@
  * the embedder we already ship.
  */
 import * as fs from 'node:fs'
-import * as path from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
+import { resolveSidecarBinary } from './sidecar-path.js'
 
 // ── Wire contract (the stable, reusable seam — keep in sync with the Rust sidecar) ───────────────────────
 /** A dense tensor: row-major f32 `data` whose length MUST equal the product of `shape`. */
@@ -60,14 +60,8 @@ export function operatorBinaryPath(): string | null {
   // Explicit override (packaging / tests): an absolute path, or '' to force "unavailable".
   const override = process.env['NOETICA_OPERATOR_BIN']
   if (override !== undefined) return override && fs.existsSync(override) ? override : null
-  const beside = path.join(path.dirname(process.execPath), 'noetica-operator')
-  if (fs.existsSync(beside)) return beside
   const here = __dirname   // CommonJS build target (house pattern; see canon-lookup.ts) — not import.meta
-  for (const p of [
-    path.resolve(process.cwd(), 'operator-sidecar/target/release/noetica-operator'),
-    path.resolve(here, '../../operator-sidecar/target/release/noetica-operator'),
-  ]) { if (fs.existsSync(p)) return p }
-  return null
+  return resolveSidecarBinary('noetica-operator', 'operator-sidecar', here)
 }
 
 export function isLocalOperatorAvailable(): boolean { return operatorBinaryPath() !== null }
