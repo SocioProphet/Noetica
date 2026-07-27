@@ -36,7 +36,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { ensureOperatorImport, extractCode } from '../lib/exec-verify.js'
+import { ensureOperatorImport, extractCode, OPERATOR_API } from '../lib/exec-verify.js'
 import { embedText } from '../lib/ollama.js'
 import { sanitizeRetrieved } from '../lib/rag-trust.js'
 import { councilVote, learnedCouncilVote } from '../lib/council.js'
@@ -778,51 +778,8 @@ function nearestChoice(choices: string[], val: number): string {
 // complex roots for finite fields, unevaluated ODEs → 1/6). So OFFER it a verified library to CALL: the model
 // extracts args + picks the operator, the tested library does the math. Measured 4/5→5/5 recovery on the losses.
 const LIBDIR = path.join(__dirname, '..', 'lib')
-const OPERATOR_API = `You have a verified Python library 'math_operators' (already correct — CALL it, never reimplement):
-  permutation_index(cycle_str, n)               # index of <p> in S_n; cycle_str like '(1,2,5,4)(2,3)'
-  finite_field_zeros(coeffs, p)                 # zeros over Z_p; coeffs highest-degree-first (x^2+1 -> [1,0,1])
-  mod_pow(base, exponent, modulus)              # INTEGER modular exponentiation only (base**exponent % modulus) — NOT a general power/exponent operator
-  linear_ode_eval(ode_lhs, x0, y0, x_eval)      # solve 'expr=0' in x and y(x); use Derivative(y,x); y(x0)=y0
-  factorial_trailing_zeros_count(target)        # how many k have EXACTLY target trailing zeros in k!
-  ring_char_product(component_chars)            # characteristic of a product ring; 0 for an infinite component
-  count_real_intersections(eq_strs, var_names)  # # real solutions of a system of 'lhs=0' equations
-  gcd(a,b)  /  lcm(a,b)
-  slope(p1,p2)  /  distance_2d(p1,p2)           # p = (x,y) tuples
-  solve_equations(eq_strs, var_names)           # solve a system 'lhs=0' (sympy syntax), e.g. word problems
-  z_score(x, mean, sd)  /  normal_prob_less_than(z)   # P(Z<z) standard normal
-  confidence_interval_mean(mean, sd, n, confidence)
-  confidence_interval_proportion(phat, n, confidence)
-  definite_integral(expr_str, var, a, b)        # integral of expr d(var) from a to b; bounds may be 'oo'/'-oo'
-  derivative_at(expr_str, var, x0)              # d/d(var) expr_str evaluated at var=x0
-  limit_at(expr_str, var, point)                # limit of expr_str as var -> point; point may be 'oo'/'-oo'
-  determinant(matrix)                           # determinant of a square matrix (list-of-lists)
-  eigenvalues(matrix)                           # eigenvalues of a square matrix (list-of-lists)
-  solve_linear_system(A, b)                     # solve A x = b; A list-of-lists, b list -> x list
-  n_choose_k(n, k)  /  n_permute_k(n, k)        # combinations C(n,k) / permutations P(n,k), exact integers
-  kinematic_velocity(v0,a,t)  /  kinematic_displacement(v0,a,t)  /  kinematic_velocity_from_distance(v0,a,d)
-  newtons_second_law(mass,accel,force)          # F=ma; pass two, get the third (others None)
-  kinetic_energy(mass,velocity)  /  gravitational_pe(mass,height,g)  /  momentum(mass,velocity)
-  work_done(force,distance,angle_deg)  /  power(work,time)
-  ohms_law(voltage,current,resistance)          # V=IR; pass two, get the third (others None)
-  density(mass,volume,density_val)              # rho=m/V; pass two, get the third (others None)
-  molarity(moles,liters,molarity_val)           # M=mol/L; pass two, get the third (others None)
-  moles_from_mass(mass_g, molar_mass)
-  ideal_gas(P,V,n,T,R)                           # PV=nRT (R=0.082057 default); pass three, get the fourth (others None)
-  dilution(M1,V1,M2,V2)                          # M1V1=M2V2; pass three, get the fourth (others None)
-  ph_from_concentration(h_conc)  /  concentration_from_ph(ph)  /  percent_yield(actual, theoretical)
-  expected_value(values, probs)  /  binomial_probability(n, k, p)  /  binomial_mean_sd(n, p)
-  binomial_at_least(n, k, p)  /  binomial_at_most(n, k, p)      # cumulative binomial tails, EXACT — for "at least/at most k of n"
-  one_sample_z_test(sample_mean, null_mean, sd, n, tail)        # tail 'greater'|'less'|'two-sided' -> (z, p_value); hypothesis testing
-  sample_mean(values)  /  sample_sd(values, population)  /  combination_probability(fav_n, fav_k, total_n, total_k)
-  correlation(xs, ys)  /  r_squared(xs, ys)  /  linear_regression(xs, ys)   # Pearson r, R^2 (variance explained), OLS -> (slope, intercept)
-SELECTION HINTS (common misreads — map the phrasing to the right operator):
-  • "factor P(x) into linear factors in Z_p" / "roots in Z_p" -> finite_field_zeros(coeffs, p) (linear factors are (x - root) for each zero)
-  • "how many k make k! end in EXACTLY N zeros" -> factorial_trailing_zeros_count(N)
-  • "value of x - y" (or any combination) from a system -> solve_equations(...) then compute the asked combination from the solution
-  • "at least/at most k" of n independent trials -> binomial_at_least / binomial_at_most (NOT binomial_probability, which is exactly-k)
-  • hypothesis test H0 vs Ha with a sample -> one_sample_z_test(...); match the reported z OR p-value to the choice
-Pick the operator, extract the arguments from the problem, and write a tiny program that imports from
-math_operators and prints ONLY the final answer value on the last line. If none fit, write a short correct program.`
+// OPERATOR_API: SINGLE SOURCE OF TRUTH — imported from ../lib/exec-verify.js (the prod compute lane), so the
+// bench can never grade a different operator menu than what ships. Add operators there, not here.
 
 async function operatorCompute(question: string, choices: string[], temp = 0): Promise<string> {
   const prompt = `${OPERATOR_API}\n\nProblem: ${question}\nChoices: ${choices.map((c, i) => `${LETTERS[i]}. ${c}`).join(' | ')}\n\nReturn ONLY a \`\`\`python code block.`

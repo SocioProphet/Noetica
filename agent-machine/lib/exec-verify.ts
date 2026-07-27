@@ -92,6 +92,7 @@ export const OPERATOR_API = `You have a verified Python library 'math_operators'
   definite_integral(expr_str, var, a, b)        # integral of expr d(var) from a to b; bounds may be 'oo'/'-oo'
   derivative_at(expr_str, var, x0)              # d/d(var) expr_str evaluated at var=x0
   limit_at(expr_str, var, point)                # limit of expr_str as var -> point; point may be 'oo'/'-oo'
+  count_sign_changes(expr_str, var, a, b)       # # times expr crosses zero on (a,b) — 'how many times reverse direction / change sign'
   determinant(matrix)                           # determinant of a square matrix (list-of-lists)
   eigenvalues(matrix)                           # eigenvalues of a square matrix (list-of-lists)
   solve_linear_system(A, b)                     # solve A x = b; A list-of-lists, b list -> x list
@@ -118,6 +119,7 @@ SELECTION HINTS (common misreads — map the phrasing to the right operator):
   • "value of x - y" (or any combination) from a system -> solve_equations(...) then compute the asked combination
   • "at least/at most k" of n independent trials -> binomial_at_least / binomial_at_most (NOT binomial_probability, which is exactly-k)
   • hypothesis test H0 vs Ha with a sample -> one_sample_z_test(...); match the reported z OR p-value to the choice
+  • "how many times does it reverse direction / change sign / cross zero" (e.g. velocity v(t)) -> count_sign_changes(expr, var, a, b)
 Pick the operator, extract the arguments from the problem, and write a tiny program that imports from
 math_operators and prints ONLY the final answer value on the last line. If none fit, write a short correct program.`
 

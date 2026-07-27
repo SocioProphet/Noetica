@@ -151,6 +151,14 @@ def test_derivative_at():
         assert abs(M.derivative_at('x**2', 'x', x0) - 2 * x0) < 1e-6   # d/dx x^2 = 2x
 
 
+def test_count_sign_changes():
+    assert M.count_sign_changes('(x-1)*(x-2)*(x-3)', 'x', 0, 4) == 3   # k simple roots -> k sign changes
+    assert M.count_sign_changes('sin(x)', 'x', 0, 3 * math.pi) == 2    # zeros at pi, 2pi
+    assert M.count_sign_changes('x**2 + 1', 'x', -5, 5) == 0           # strictly positive -> none
+    # transcendental (no closed-form sympy solve) still counted correctly
+    assert M.count_sign_changes('t*cos(t) - log(t + 2)', 't', 0, 10) == 2
+
+
 if __name__ == '__main__':
     import pytest as _pytest
     raise SystemExit(_pytest.main([__file__, '-q']))

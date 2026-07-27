@@ -371,6 +371,31 @@ def sample_sd(values: list, population: bool = False) -> float:
     return math.sqrt(sum((x - m) ** 2 for x in values) / denom)
 
 
+def count_sign_changes(expr_str: str, var: str = 'x', a: float = 0.0, b: float = 1.0, samples: int = 20000) -> int:
+    """How many times expr(var) CHANGES SIGN on the open interval (a, b) — i.e. how many times a
+    continuous quantity crosses zero. Use for 'how many times does it reverse direction / change
+    sign / cross zero' (e.g. velocity v(t) -> direction reversals). Dense numerical scan (like the
+    finely-sampled sign check a person would do), correct for continuous functions with isolated
+    roots. Not exact-symbolic (handles transcendental expressions sympy can't solve in closed form)."""
+    import sympy as _sp
+    _x = _sp.Symbol(var)
+    _f = _sp.lambdify(_x, _sp.sympify(expr_str), 'math')
+    changes = 0
+    prev = 0  # sign of the last NON-zero sample (0 = none yet)
+    for i in range(samples + 1):
+        t = a + (b - a) * i / samples
+        try:
+            y = _f(t)
+        except Exception:
+            continue  # domain gap (e.g. log of <=0) — skip without corrupting the sign run
+        s = 1 if y > 0 else (-1 if y < 0 else 0)
+        if s != 0:
+            if prev != 0 and s != prev:
+                changes += 1
+            prev = s
+    return changes
+
+
 def combination_probability(favorable_n: int, favorable_k: int, total_n: int, total_k: int) -> float:
     """Hypergeometric-style probability C(favorable_n,favorable_k)*... — here the simple ratio
     C(favorable_n, favorable_k) / C(total_n, total_k) for 'probability of choosing k specific items'."""
@@ -428,6 +453,9 @@ if __name__ == '__main__':
     _z, _p = one_sample_z_test(510, 500, 100, 100, 'two-sided')
     assert abs(_z - 1.0) < 1e-9 and abs(_p - 0.3173) < 0.001
     assert abs(one_sample_z_test(3.6, 3.5, 0.35, 50, 'greater')[1] - 0.0217) < 0.002  # botanist Ha: mu>3.5
+    assert count_sign_changes('sin(x)', 'x', 0, 3 * math.pi) == 2   # crosses 0 at pi, 2pi in (0,3pi)
+    assert count_sign_changes('x - 3', 'x', 0, 10) == 1             # one crossing at x=3
+    assert count_sign_changes('x**2 + 1', 'x', -5, 5) == 0          # never zero -> no reversals
     # calculus
     assert Fraction(definite_integral('x**2', 'x', 0, 1)).limit_denominator() == Fraction(1, 3)
     assert abs(definite_integral('x**2', 'x', 0, 1) - 0.3333) < 0.001
@@ -476,4 +504,4 @@ if __name__ == '__main__':
     # common re-exports the model reaches for even off-menu (leak-audit finding: pi/factorial were genuine gaps)
     assert abs(pi - 3.14159265) < 1e-6
     assert factorial(5) == 120
-    print('all math_operators unit tests PASS (', 43 + 6 + 3 + 2, 'operators )')
+    print('all math_operators unit tests PASS (', 43 + 6 + 3 + 3, 'operators )')
