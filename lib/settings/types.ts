@@ -60,6 +60,9 @@ export interface NoeticaSettings {
   memoryRetentionDays: number
 
   // Governance
+  /** Open the Answer/provenance rail automatically on each new turn — trust visible by default,
+   *  rather than hidden behind an Inspect click. Inspect still pins an older reply for replay. */
+  autoOpenGovernance: boolean
   defaultEvidenceLevel: 'minimal' | 'standard' | 'full'
   defaultPolicyProfile: 'default' | 'strict' | 'permissive' | 'research' | 'security' | 'enterprise' | 'medical'
   // Operator self-attestation for the SECURITY_RESEARCHER profile. The uncensored

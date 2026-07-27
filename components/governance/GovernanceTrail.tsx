@@ -105,6 +105,32 @@ export function GovernanceTrail({ trace }: GovernanceTrailProps) {
             <dd title={trace.model_route_reason}>{trace.model_route_reason.slice(0, 80)}{trace.model_route_reason.length > 80 ? '…' : ''}</dd>
           </>
         )}
+        {/* Model sovereignty: when the operator picked a model by hand, say whether it ran.
+            A silent swap is the thing this row exists to make impossible. */}
+        {trace.model_requested && (
+          <>
+            <dt className="text-[var(--color-text-tertiary)]">you selected</dt>
+            <dd>
+              {trace.model_requested}
+              {trace.model_honored === false
+                ? <span className="ml-1.5 rounded bg-[#fef3c7] px-1 py-0.5 text-[11px] text-[#b45309]">overridden</span>
+                : <span className="ml-1.5 rounded bg-[#ecfdf5] px-1 py-0.5 text-[11px] text-[#047857]">honoured</span>}
+            </dd>
+          </>
+        )}
+        {trace.route_overrides && trace.route_overrides.length > 0 && (
+          <>
+            <dt className="text-[var(--color-text-tertiary)]">route changes</dt>
+            <dd className="flex flex-col gap-1">
+              {trace.route_overrides.map((o, i) => (
+                <span key={i} title={o.reason}>
+                  <span className="font-mono text-[11px]">{o.from} → {o.to}</span>
+                  <span className="ml-1 text-[var(--color-text-tertiary)]">({o.layer}, {o.kind})</span>
+                </span>
+              ))}
+            </dd>
+          </>
+        )}
         {trace.credential && (
           <>
             <dt className="text-[var(--color-text-tertiary)]">C2PA / Art.50</dt>

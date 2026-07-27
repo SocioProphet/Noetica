@@ -309,13 +309,26 @@ export function InputArea({
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
-    // Prepend ingested document context if any docs were loaded
+    // Prepend ingested document context if any docs were loaded.
+    // The full text is NOT inlined — it's indexed in the knowledge brain and comes back through
+    // retrieval. Say so plainly: the old copy claimed the document was "loaded into memory" while
+    // handing over 240 characters, so a thin answer read as "the AI ignored my document" (Gus #3).
     let finalContent = trimmed
     if (docs.length > 0) {
-      const docContext = docs.map((d) =>
-        `[Document: ${d.filename} — ${d.chunks} chunks, ${d.entities} entities extracted]\n${d.preview.map((p, i) => `Chunk ${i + 1}: ${p}…`).join('\n')}`,
-      ).join('\n\n')
-      finalContent = docContext + (trimmed ? `\n\n${trimmed}` : '\n\nI have loaded the above document(s) into memory. What would you like to know?')
+      const docContext = docs.map((d) => {
+        const passages = `${d.chunks} searchable passage${d.chunks === 1 ? '' : 's'}`
+        const entities = `${d.entities} linked ${d.entities === 1 ? 'entity' : 'entities'}`
+        const header = `[Document indexed: ${d.filename} — ${passages}, ${entities}. `
+          + `The full text is in the knowledge base, not in this message. Relevant passages are `
+          + `retrieved automatically when you answer, and you can call search_knowledge to pull more. `
+          + `The excerpt below is the opening of the document, for orientation only — do not treat it `
+          + `as the whole text.]`
+        const excerpt = d.preview.map((p, i) => `Opening excerpt ${i + 1}: ${p}…`).join('\n')
+        return `${header}\n${excerpt}`
+      }).join('\n\n')
+      finalContent = docContext + (trimmed
+        ? `\n\n${trimmed}`
+        : `\n\nI've added the above document(s) to the knowledge base. What would you like to know?`)
     }
     try {
       if (fanoutActive && onFanout) {
@@ -417,18 +430,27 @@ export function InputArea({
         {ingestedDocs.length > 0 && (
           <div className="flex flex-wrap gap-1.5 px-3 pt-2.5">
             {ingestedDocs.map((d, i) => (
-              <div key={i} className="flex items-center gap-1.5 rounded-lg border border-[var(--color-accent)] bg-[var(--color-accent-bg)] px-2 py-1 text-xs dark:border-[var(--color-accent)] dark:bg-[rgba(22,101,52,0.15)]">
-                <span className="text-[var(--color-accent)]">
-                  <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden>
+              // Same neutral shell as AttachmentChip — the accent survives only as the small
+              // "indexed" tick, which is the one bit of state that distinguishes an ingested
+              // document from a raw attachment. Accent-on-accent text was unreadable (Gus #2).
+              <div
+                key={i}
+                className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] px-2 py-1 text-xs"
+                title={`Indexed into the knowledge brain: ${d.chunks} searchable passage${d.chunks === 1 ? '' : 's'}, ${d.entities} linked ${d.entities === 1 ? 'entity' : 'entities'}. Noetica searches these passages when they're relevant to your question.`}
+              >
+                <span className="text-[var(--color-accent)]" aria-hidden>
+                  <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
                     <path d="M2 1h5.5L10 3.5V11H2V1z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
                     <path d="M6 1v3h4" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
                   </svg>
                 </span>
-                <span className="max-w-[140px] truncate text-[var(--color-accent)] dark:text-[#4ade80]">{d.filename}</span>
-                <span className="text-[var(--color-accent)] dark:text-[#4ade80]">{d.chunks}ch · {d.entities}ent</span>
+                <span className="max-w-[140px] truncate text-[var(--color-text-primary)]">{d.filename}</span>
+                <span className="text-[var(--color-text-tertiary)]">
+                  Indexed · {d.chunks} passage{d.chunks === 1 ? '' : 's'}
+                </span>
                 <button
                   onClick={() => setIngestedDocs((prev) => prev.filter((_, j) => j !== i))}
-                  className="ml-0.5 text-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                  className="ml-0.5 text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]"
                   title="Remove"
                 >
                   <svg width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden>
@@ -441,7 +463,10 @@ export function InputArea({
         )}
 
         {/* Attachment chips */}
-        {attachments.length > 0 && (
+        {/* `attaching` must be in the guard: an ingestible document never becomes an attachment,
+            so gating on attachments alone hid the instant "reading…" feedback for the exact
+            doc-upload case it was added for. */}
+        {(attachments.length > 0 || attaching.length > 0) && (
           <div className="flex flex-wrap gap-1.5 px-3 pt-2.5">
             {attaching.map((name, i) => (
               <div key={`attaching-${i}`} className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] px-2 py-1 text-xs opacity-70">

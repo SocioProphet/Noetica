@@ -76,6 +76,23 @@ export function PolicyPanel() {
 
   return (
     <div className="space-y-6">
+      {/* Trust visible by default — the provenance rail opens with each turn instead of
+          waiting for an Inspect click. Replay of older replies is unaffected. */}
+      <div>
+        <label className="flex cursor-pointer items-center gap-2">
+          <input
+            type="checkbox"
+            checked={settings.autoOpenGovernance ?? true}
+            onChange={(e) => update({ autoOpenGovernance: e.target.checked })}
+          />
+          <span className="text-sm font-semibold text-[var(--color-text-primary)]">Show the governance trail automatically</span>
+        </label>
+        <p className="ml-6 mt-1 text-xs text-[var(--color-text-secondary)]">
+          Opens the Answer rail on every new turn, so provenance, policy and knowledge sources are
+          visible as the reply is composed. Turn off to keep it behind the Inspect button.
+        </p>
+      </div>
+
       <div>
         <label className="block text-sm font-semibold text-[var(--color-text-primary)]">Authorization Context</label>
         <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
