@@ -22,18 +22,37 @@ const CANDIDATES: Array<[string, string[]]> = process.platform === 'win32'
 
 let cached: ResolvedPython | null | undefined
 
+/** Ask a candidate for sys.executable. Returns null when it can't run. */
+function probe(cmd: string, pre: string[]): string | null {
+  try {
+    return execFileSync(cmd, [...pre, '-c', 'import sys;print(sys.executable)'], {
+      encoding: 'utf8', timeout: 5000, windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim() || null
+  } catch { return null }
+}
+
 export function resolvePython(): ResolvedPython | null {
   if (cached !== undefined) return cached
+  const overrideVar = process.env['HELLGRAPH_PYTHON'] ? 'HELLGRAPH_PYTHON' : 'NOETICA_PYTHON'
   const override = process.env['HELLGRAPH_PYTHON'] || process.env['NOETICA_PYTHON']
-  if (override) { cached = { cmd: override, args: [] }; return cached }
+  if (override) {
+    // PROBE the override too. It used to be trusted blindly, so a stale path — an uninstalled
+    // 3.10 still listed in the registry, a typo, a moved venv — sailed through here and failed
+    // later as an opaque `uv_spawn ENOENT` from whichever sidecar spawned first. That reads as
+    // "the app can't find Python" when the truth is "the path you set is wrong", which sends
+    // people hunting the wrong bug. Fail loudly, at the point of the lie.
+    const exe = probe(override, [])
+    if (exe) { cached = { cmd: override, args: [], exe }; return cached }
+    console.warn(
+      `[python-resolve] ${overrideVar}='${override}' is set but could not be executed — ignoring it ` +
+      `and falling back to auto-detection. Point it at a real python executable, or unset it.`,
+    )
+    // fall through to auto-detection rather than dying on a bad hint
+  }
   for (const [cmd, pre] of CANDIDATES) {
-    try {
-      const exe = execFileSync(cmd, [...pre, '-c', 'import sys;print(sys.executable)'], {
-        encoding: 'utf8', timeout: 5000, windowsHide: true,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      }).trim()
-      if (exe && !/\\WindowsApps\\/i.test(exe)) { cached = { cmd, args: pre, exe }; return cached }
-    } catch { /* next candidate */ }
+    const exe = probe(cmd, pre)
+    if (exe && !/\\WindowsApps\\/i.test(exe)) { cached = { cmd, args: pre, exe }; return cached }
   }
   cached = null
   return null
