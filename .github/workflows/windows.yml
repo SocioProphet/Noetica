@@ -110,17 +110,7 @@ jobs:
       - name: Windows sidecar runtime smoke
         if: ${{ inputs.bundle_sidecars }}
         shell: bash
-        run: |
-          set -euo pipefail
-          stage=$(mktemp -d)
-          cp src-tauri/binaries/agent-machine-x86_64-pc-windows-msvc.exe "$stage/agent-machine.exe"
-          missing=0
-          for b in noetica-embed noetica-operator; do
-            src="src-tauri/binaries/$b-x86_64-pc-windows-msvc.exe"
-            if [ -f "$src" ]; then cp "$src" "$stage/$b.exe"; else echo "::warning::$b was not built — skipping smoke"; missing=1; fi
-          done
-          if [ "$missing" = "1" ]; then echo "sidecars unavailable (best-effort build); nothing to assert"; exit 0; fi
-          node agent-machine/scripts/sidecar-smoke.mjs "$stage/agent-machine.exe"
+        run: node agent-machine/scripts/sidecar-smoke.mjs --stage src-tauri/binaries --triple x86_64-pc-windows-msvc
 
       - name: Inject externalBin (only binaries present on disk)
         run: node scripts/inject-am-sidecar-config.mjs
