@@ -1,65 +1,41 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Chocolatey package for the Noetica DESKTOP app (NSIS installer — the same artifact winget
+     ships). Replaces the pre-0.4.24 package that wrapped the old agent-machine Windows service
+     (NSSM + clone-from-source fallback — both choco-moderation rejections). Version bumps:
+     update <version>, the url + checksum in tools/chocolateyInstall.ps1, then choco pack/push. -->
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>noetica</id>
-    <version>0.4.11</version>
-    <packageSourceUrl>https://github.com/socioprophet/Noetica</packageSourceUrl>
+    <version>0.4.24</version>
+    <packageSourceUrl>https://github.com/SocioProphet/Noetica/tree/main/packaging/chocolatey</packageSourceUrl>
     <owners>socioprophet</owners>
     <title>Noetica</title>
-    <authors>socioprophet</authors>
-    <projectUrl>https://github.com/socioprophet/Noetica</projectUrl>
-    <licenseUrl>https://github.com/socioprophet/Noetica/blob/main/LICENSE</licenseUrl>
+    <authors>SocioProphet, Inc.</authors>
+    <projectUrl>https://socioprophet.ai</projectUrl>
+    <projectSourceUrl>https://github.com/SocioProphet/Noetica</projectSourceUrl>
+    <licenseUrl>https://github.com/SocioProphet/Noetica/blob/main/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
-    <bugTrackerUrl>https://github.com/socioprophet/Noetica/issues</bugTrackerUrl>
-    <tags>ai nlp dialogue self-hosted sourceos noetica llm backend inference</tags>
-    <summary>Self-hosted AI dialogue management backend — 22-intent layer on :8080</summary>
+    <bugTrackerUrl>https://github.com/SocioProphet/Noetica/issues</bugTrackerUrl>
+    <releaseNotes>https://github.com/SocioProphet/Noetica/releases/tag/v0.4.24</releaseNotes>
+    <tags>ai llm local sovereign knowledge-graph governance desktop</tags>
+    <summary>Governed, sovereign AI workstation — local-first, cites its sources, abstains instead of guessing.</summary>
     <description><![CDATA[
 # Noetica
 
-Noetica is a self-hosted AI dialogue management backend built for sovereign, cloud-free AI inference. It powers TurtleTerm's co-pilot NL-to-shell and intent routing.
+Noetica is a local-first desktop workstation for governed AI. It runs models on your own
+machine, grounds answers in your own knowledge graph, cites its sources, and returns
+"insufficient evidence" instead of guessing — so an answer can be defended, not just produced.
 
-## Features
+- **On-device inference** — your data never has to leave the machine.
+- **Verified compute** — calculations are checked, not merely reasoned.
+- **Provenance on every answer** — a sealed, replay-exact receipt you can audit.
+- **A sovereign knowledge graph** that compounds as you work.
 
-- **22-intent dialogue layer** — routes queries to model, retrieval, slots, tools, surface, or skill handlers
-- **HTTP API** on `localhost:8080` — `/health`, `/api/chat`, `/api/intent`, `/api/complete`
-- **No cloud dependency** — fully local, air-gap compatible
-- **TurtleTerm integration** — set `SOURCEOS_NOETICA_URL=http://localhost:8080` to use as co-pilot backend
-- **Windows Service** — runs via NSSM as a background Windows service
-- **22 intents**: chat, explain, fix, search, summarize, translate, codegen, debug, refactor, test, document, deploy, review, plan, recall, memorize, learn, compare, analyze, classify, generate, complete
+Open source (MIT): https://github.com/SocioProphet/Noetica
 
-## Quick Start
-
-```powershell
-# Start Noetica service
-Start-Service Noetica
-
-# Check health
-Invoke-RestMethod http://localhost:8080/health
-
-# Use with TurtleTerm
-$env:SOURCEOS_NOETICA_URL = "http://localhost:8080"
-turtle-copilot use noetica
-turtle-copilot start
-```
-
-## API
-
-```powershell
-# Chat
-Invoke-RestMethod -Method POST -Uri http://localhost:8080/api/chat `
-  -ContentType application/json `
-  -Body '{"message": "how do I list running processes on Windows?"}'
-
-# Intent classification
-Invoke-RestMethod -Method POST -Uri http://localhost:8080/api/intent `
-  -ContentType application/json `
-  -Body '{"text": "fix my failing tests"}'
-```
+**Note:** the installer is currently unsigned — Windows SmartScreen may warn on first run
+("More info → Run anyway").
     ]]></description>
-    <releaseNotes>https://github.com/socioprophet/Noetica/releases</releaseNotes>
-    <dependencies>
-      <dependency id="nodejs" version="20.0.0" />
-    </dependencies>
   </metadata>
   <files>
     <file src="tools\**" target="tools" />

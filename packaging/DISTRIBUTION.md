@@ -27,7 +27,7 @@ Legend: ✅ live · 🟡 scaffold ready, needs a human/one-time step · 🔴 nee
 |---|---|---|
 | Direct `.exe` (NSIS) | ✅ live | Built + attached by `release.yml`. |
 | winget | ✅ **first submission OPEN** | [microsoft/winget-pkgs#409113](https://github.com/microsoft/winget-pkgs/pull/409113) — full 1.6-schema manifest trio for `SocioProphet.Noetica` 0.4.24 (authored at `packaging/windows/winget/manifests/…`, sha256 from the published exe, fork pushed via API). **Watch the PR for moderation feedback.** Once merged, CI's `wingetcreate update` owns every release (still needs a `WINGET_PAT` secret for that job). |
-| Chocolatey | 🟡 | `packaging/chocolatey/` nuspec + scripts exist, stale at 0.4.11. Bump to 0.4.24, `choco pack`, `choco push`. **Needs:** a Chocolatey API key + the one-time package approval. |
+| Chocolatey | ✅ push-ready | Package REWRITTEN for the desktop app (the old one wrapped the agent-machine NSSM service with a clone-from-source fallback + `Checksum SKIP` — all moderation rejections). Now: nuspec 0.4.24 + `Install-ChocolateyPackage` over the pinned NSIS exe (sha256 verified), registry-based NSIS uninstall. **Needs:** Chocolatey account + API key ([register](https://community.chocolatey.org/account/Register)) → pack + push (nupkg can be assembled and pushed via the NuGet HTTP API from any OS). First push goes through moderation (days). |
 
 ## Linux — no-sandbox channels (do these first; best effort:reward)
 
