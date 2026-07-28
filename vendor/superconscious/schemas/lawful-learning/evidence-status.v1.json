@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "schemas/lawful-learning/evidence-status.v1.json",
+  "title": "LawfulLearningEvidenceStatus",
+  "description": "Evidence status record for a lawful-learning artifact. Tracks what evidence exists, at what confidence, and with what receipt binding.",
+  "type": "object",
+  "required": ["artifact_id", "evidence_class", "evidence_status", "receipt_ref"],
+  "additionalProperties": false,
+  "properties": {
+    "artifact_id": {"type": "string"},
+    "evidence_class": {
+      "type": "string",
+      "enum": [
+        "causal_triad",
+        "ablation_study",
+        "feature_activation",
+        "circuit_discovery",
+        "benchmark_result",
+        "alignment_check",
+        "replay_seal_verification",
+        "training_provenance",
+        "other"
+      ]
+    },
+    "evidence_status": {
+      "type": "string",
+      "enum": ["not_started", "in_progress", "complete_synthetic", "complete_real", "failed", "superseded"]
+    },
+    "receipt_ref": {"type": "string"},
+    "creation_time": {"type": "string", "format": "date-time"},
+    "evidence_scope": {"type": "string"},
+    "claim_refs": {"type": "array", "items": {"type": "string"}},
+    "non_claims": {"type": "array", "items": {"type": "string"}}
+  }
+}

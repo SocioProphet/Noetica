@@ -17,9 +17,9 @@
       "sha256": "617acf86db7e92371b7932c019e93b35d25597134b27e78f7c6d46dc30ff005b"
     }
   },
-  "note": "Byte-identical copy. Drift is detectable: recompute sha256 per file and compare against this manifest. noetica-impair's conformance tests do exactly that and FAIL on divergence rather than silently validating against a stale copy.",
+  "note": "Byte-identical copy. Drift is detectable: recompute sha256 per file and compare against this manifest. noetica-impair's conformance tests do exactly that and FAIL on divergence rather than silently validating against a stale copy. Generated in the same pass as ../manifest.json, which is the authority across all vendored families.",
   "upstream_commit": "921973094645c9223c22a1b9f52ecf75c2ccf785",
   "upstream_path": "schemas/interpretability",
-  "vendored_at": "2026-07-25T03:08:19Z",
+  "vendored_at": "2026-07-28T16:12:00Z",
   "vendored_from": "https://github.com/SocioProphet/superconscious"
 }

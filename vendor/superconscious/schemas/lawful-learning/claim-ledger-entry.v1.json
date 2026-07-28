@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "schemas/lawful-learning/claim-ledger-entry.v1.json",
+  "title": "LawfulLearningClaimLedgerEntry",
+  "description": "A single entry in the lawful-learning claim ledger. Encodes M/T/S/E/G tag discipline from Phase 1 hard rules.",
+  "type": "object",
+  "required": ["claim_id", "claim", "tag", "status"],
+  "additionalProperties": false,
+  "properties": {
+    "claim_id": {"type": "string", "pattern": "^claim\\.[a-z0-9_.-]+$"},
+    "claim": {"type": "string", "minLength": 10},
+    "tag": {"type": "string", "pattern": "^(M|T|S|E|G)(\\|(M|T|S|E|G))*$"},
+    "status": {"type": "string", "enum": ["captured", "under_review", "promoted", "retracted"]},
+    "mathematical_dependency": {"type": "string"},
+    "typological_parallel_target": {"type": "string"},
+    "speculative_test_artifact": {"type": "string"},
+    "empirical_measurement_ref": {"type": "string"},
+    "governance_invariant_ref": {"type": "string"},
+    "claim_demarcation": {"type": "string"},
+    "promotion_rule": {"type": "string"},
+    "repo_follow_on": {"type": "string"},
+    "source_refs": {"type": "array", "items": {"type": "string"}}
+  },
+  "allOf": [
+    {"if": {"properties": {"tag": {"pattern": "(^|\\|)M(\\||$)"}}}, "then": {"required": ["mathematical_dependency"], "properties": {"mathematical_dependency": {"minLength": 1}}}},
+    {"if": {"properties": {"tag": {"pattern": "(^|\\|)T(\\||$)"}}}, "then": {"required": ["typological_parallel_target"], "properties": {"typological_parallel_target": {"minLength": 1}}}},
+    {"if": {"properties": {"tag": {"pattern": "(^|\\|)S(\\||$)"}}}, "then": {"required": ["speculative_test_artifact"], "properties": {"speculative_test_artifact": {"minLength": 1}}}},
+    {"if": {"properties": {"tag": {"pattern": "(^|\\|)E(\\||$)"}}}, "then": {"required": ["empirical_measurement_ref"], "properties": {"empirical_measurement_ref": {"minLength": 1}}}},
+    {"if": {"properties": {"tag": {"pattern": "(^|\\|)G(\\||$)"}}}, "then": {"required": ["governance_invariant_ref"], "properties": {"governance_invariant_ref": {"minLength": 1}}}},
+    {"if": {"properties": {"tag": {"pattern": "\\|"}}}, "then": {"required": ["claim_demarcation"], "properties": {"claim_demarcation": {"minLength": 1}}}},
+    {"if": {"properties": {"status": {"const": "promoted"}}}, "then": {"required": ["promotion_rule"], "properties": {"promotion_rule": {"minLength": 1}}}}
+  ]
+}

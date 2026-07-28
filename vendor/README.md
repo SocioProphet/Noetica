@@ -29,10 +29,19 @@ Unlike the npm tarball above, these are vendored as plain JSON with an integrity
 manifest rather than a packed archive, because they are read directly by validators in
 several languages (the rig that produces this evidence is Python).
 
+Now extended beyond the interpretability four to the **lawful-learning** family and
+the **composition** tier-2 binding, because those are the auditable/attested layer —
+they define what may be *asserted* about an intervention (claim-ledger M/T/S/E/G tag
+discipline), what may be *touched* (forbidden-circuit declarations), and how a release
+bundle of 14 fragments is bound by opaque hash.
+
 - Upstream: https://github.com/SocioProphet/superconscious
-- Upstream path: `schemas/interpretability/`
+- Upstream paths: `schemas/interpretability/`, `schemas/lawful-learning/`,
+  `schemas/composition/interpretability-harness-tier2-binding.v1.json`
 - Pinned commit: `921973094645c9223c22a1b9f52ecf75c2ccf785`
-- Integrity: `manifest.json` records a sha256 per file.
+- Integrity: `schemas/manifest.json` is the authority across every vendored family.
+  `schemas/interpretability/manifest.json` is kept for the existing resolver path and
+  is generated in the SAME pass, so the two cannot disagree.
 
 **Drift is the failure mode here, not absence.** A stale vendored schema validates
 happily and silently certifies evidence against a contract that has since changed. So

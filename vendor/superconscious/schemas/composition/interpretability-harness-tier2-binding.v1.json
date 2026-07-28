@@ -1,0 +1,328 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://socioprophet.org/schemas/composition/interpretability-harness-tier2-binding.v1.json",
+  "title": "Interpretability Harness Release Bundle — Tier 2 Invariant Binding",
+  "description": "Doctrine-only schema binding the 14-fragment interpretability harness release bundle to ProCybernetica Tier 2 invariant declared modes. Opaque hashes only; no runtime provider access, feature activation, steering execution, receipt lookup, or public-claim promotion.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "composition_id",
+    "composition_kind",
+    "binding_doctrine_version",
+    "fragment_refs",
+    "bound_modes",
+    "non_claims"
+  ],
+  "properties": {
+    "composition_id": {
+      "const": "superconscious.interpretability_harness.release_bundle"
+    },
+    "composition_kind": {
+      "const": "certificate_fragment_composition"
+    },
+    "binding_doctrine_version": {
+      "type": "string",
+      "pattern": "^v[0-9]+\\.[0-9]+$",
+      "description": "Doctrine version under which this binding is declared. Pins the binding to a specific Tier 2 invariant binding revision."
+    },
+    "fragment_refs": {
+      "type": "array",
+      "description": "Exactly one opaque reference for each declared interpretability harness release fragment.",
+      "minItems": 14,
+      "maxItems": 14,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "fragment_kind",
+          "opaque_hash"
+        ],
+        "properties": {
+          "fragment_kind": {
+            "enum": [
+              "ModelArtifact",
+              "SAEArtifact",
+              "FeatureArtifact",
+              "FeatureExplanation",
+              "FeatureActivationSet",
+              "SteeringIntervention",
+              "CausalTriad",
+              "AttributionGraph",
+              "OffTargetAudit",
+              "ManifoldBaseline",
+              "ImplementabilityCurve",
+              "RobustnessCertificate",
+              "BenchmarkResult",
+              "PublicInterpretabilityNote"
+            ]
+          },
+          "opaque_hash": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "description": "Opaque content-addressed reference. This binding schema does not resolve the hash at validation time."
+          }
+        }
+      },
+      "allOf": [
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "fragment_kind"
+            ],
+            "properties": {
+              "fragment_kind": {
+                "const": "ModelArtifact"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "fragment_kind"
+            ],
+            "properties": {
+              "fragment_kind": {
+                "const": "SAEArtifact"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "fragment_kind"
+            ],
+            "properties": {
+              "fragment_kind": {
+                "const": "FeatureArtifact"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "fragment_kind"
+            ],
+            "properties": {
+              "fragment_kind": {
+                "const": "FeatureExplanation"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "fragment_kind"
+            ],
+            "properties": {
+              "fragment_kind": {
+                "const": "FeatureActivationSet"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "fragment_kind"
+            ],
+            "properties": {
+              "fragment_kind": {
+                "const": "SteeringIntervention"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "fragment_kind"
+            ],
+            "properties": {
+              "fragment_kind": {
+                "const": "CausalTriad"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "fragment_kind"
+            ],
+            "properties": {
+              "fragment_kind": {
+                "const": "AttributionGraph"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "fragment_kind"
+            ],
+            "properties": {
+              "fragment_kind": {
+                "const": "OffTargetAudit"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "fragment_kind"
+            ],
+            "properties": {
+              "fragment_kind": {
+                "const": "ManifoldBaseline"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "fragment_kind"
+            ],
+            "properties": {
+              "fragment_kind": {
+                "const": "ImplementabilityCurve"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "fragment_kind"
+            ],
+            "properties": {
+              "fragment_kind": {
+                "const": "RobustnessCertificate"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "fragment_kind"
+            ],
+            "properties": {
+              "fragment_kind": {
+                "const": "BenchmarkResult"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "fragment_kind"
+            ],
+            "properties": {
+              "fragment_kind": {
+                "const": "PublicInterpretabilityNote"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ]
+    },
+    "bound_modes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt_integration",
+        "authority_scope_analysis",
+        "non_claim_analysis",
+        "monitor_independence_analysis",
+        "evidence_freshness_analysis"
+      ],
+      "properties": {
+        "receipt_integration": {
+          "const": "hash_bound_reference"
+        },
+        "authority_scope_analysis": {
+          "const": "declared_scope_lattice_v1"
+        },
+        "non_claim_analysis": {
+          "const": "explicit_propagate_or_resolve_v1"
+        },
+        "monitor_independence_analysis": {
+          "const": "declared_monitor_independence_v1"
+        },
+        "evidence_freshness_analysis": {
+          "const": "declared_evidence_freshness_v1"
+        }
+      }
+    },
+    "non_claims": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "no_runtime_receipt_lookup",
+          "no_runtime_non_claim_verification",
+          "no_runtime_monitor_attestation",
+          "no_timestamp_authenticity",
+          "opaque_hashes_not_resolved",
+          "no_runtime_provider_access",
+          "no_runtime_feature_activation_claim",
+          "no_live_steering_execution",
+          "no_public_claim_promotion",
+          "no_neuronpedia_release_substitution"
+        ]
+      }
+    }
+  }
+}
