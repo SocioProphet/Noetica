@@ -253,67 +253,13 @@ export function GovernSurface({ recentTraces = [] }: { recentTraces?: RunTrace[]
   interface DueSkill { id?: string; task: string; abstraction: string; steps: string[]; card: { due: number; intervalDays: number; ease: number; reps: number } }
   const [dueSkills, setDueSkills]         = useState<DueSkill[]>([])
   const [grading, setGrading]             = useState<string | null>(null)
-  const [bonEnabled, setBonEnabled]                     = useState(false)
-  const [bonToggling, setBonToggling]                   = useState(false)
-  const [uncertaintyEnabled, setUncertaintyEnabled]     = useState(false)
-  const [uncertaintyToggling, setUncertaintyToggling]   = useState(false)
-  const [proceduralEnabled, setProceduralEnabled]       = useState(false)
-  const [proceduralToggling, setProceduralToggling]     = useState(false)
-  const [planModeEnabled, setPlanModeEnabled]           = useState(false)
-  const [planModeToggling, setPlanModeToggling]         = useState(false)
+  // Hardened-execution state is read-only here (displayed in the Posture band). The
+  // toggle itself lives in Settings → Agent behavior; this only mirrors the current
+  // containment purpose for a read-only status readout.
   const [hardenedExec, setHardenedExec]                 = useState(false)
-  const [hardenedToggling, setHardenedToggling]         = useState(false)
   interface DecayStats { pruned: number; lastPruneAt: number | null; budget: number }
   const [decayStats, setDecayStats]       = useState<DecayStats | null>(null)
-  interface HardwareSpec { parameterCount: number | null; quantization: string; ramGb: number | null }
-  interface RegistryModel { id: string; label: string; origin: string; openWeights: boolean; license: string; bench: { reasoning: number; coding: number; math: number; agentic: number }; hw: HardwareSpec; composite: number; ramFit: boolean }
-  interface RouterState { model: string; provider: string; task: string; rationale: string; at: number }
-  interface ModelRegistry { models: RegistryModel[]; hostRamGb: number; router: RouterState | null }
-  const [modelRegistry, setModelRegistry] = useState<ModelRegistry | null>(null)
-  interface MeshArmResult { arm: string; pass: number; total: number; avgLatencyMs: number }
-  interface MeshProofArtifact { results?: MeshArmResult[]; artifactFile?: string; artifactAt?: number; error?: string }
-  const [meshProof, setMeshProof] = useState<MeshProofArtifact | null>(null)
-  const [meshRunning, setMeshRunning] = useState(false)
   const [complianceLog, setComplianceLog] = useState<{ entries: ComplianceEntry[]; total: number } | null>(null)
-
-  // SCOPE-D policy editor
-  const ACTION_CLASSES = ['read','synthetic_event','dry_run','network_call','write','deployment','destructive_action','credential_access','memory_write','identity_write'] as const
-  const GATE_VALUES    = ['none','single_human','human_and_policy','human_and_policy_engine','frost_quorum'] as const
-  const AUTH_MODES     = ['read','write','synthetic_only'] as const
-  const [showPolicyEditor, setShowPolicyEditor] = useState(false)
-  const [pePolicyId,       setPePolicyId]       = useState('')
-  const [peName,           setPeName]           = useState('')
-  const [peTargets,        setPeTargets]        = useState('')
-  const [peModes,          setPeModes]          = useState<string[]>(['read'])
-  const [peRules,          setPeRules]          = useState<{ actionClass: string; requiredGate: string }[]>([{ actionClass: 'network_call', requiredGate: 'none' }])
-  const [peBlocked,        setPeBlocked]        = useState<string[]>([])
-  const [peExpires,        setPeExpires]        = useState('')
-  const [peSaving,         setPeSaving]         = useState(false)
-  const [peSaveMsg,        setPeSaveMsg]        = useState('')
-
-  async function savePolicy() {
-    setPeSaving(true); setPeSaveMsg('')
-    try {
-      const policy = {
-        policyId: pePolicyId.trim(),
-        name: peName.trim(),
-        authorizedTargets: peTargets.split('\n').map((t) => t.trim()).filter(Boolean),
-        authorizedModes: peModes,
-        approvalRules: peRules.filter((r) => r.actionClass),
-        blockedActions: peBlocked,
-        ...(peExpires ? { expiresAt: new Date(peExpires).toISOString() } : {}),
-      }
-      const r = await fetch(amUrl('/api/governance/policy'), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(policy),
-      })
-      const d = await r.json() as { saved?: boolean; error?: string }
-      if (!r.ok) throw new Error(d.error ?? `save ${r.status}`)
-      setPeSaveMsg('Policy saved — restart agent-machine to activate.')
-    } catch (e) { setPeSaveMsg(e instanceof Error ? e.message : 'save failed') }
-    finally { setPeSaving(false) }
-  }
 
   const runReplay = () => {
     setReplaying(true)
@@ -386,32 +332,10 @@ export function GovernSurface({ recentTraces = [] }: { recentTraces?: RunTrace[]
       .then(r => r.ok ? r.json() : null)
       .then((d: { due?: DueSkill[] } | null) => { if (d?.due) setDueSkills(d.due) })
       .catch(() => { /* not running — skip */ })
-    // Runtime settings (Best-of-N toggle state)
-    fetch(amUrl('/api/settings'), { signal: AbortSignal.timeout(3000) })
-      .then(r => r.ok ? r.json() : null)
-      .then((d: { bonEnabled?: boolean; uncertaintyEnabled?: boolean; proceduralEnabled?: boolean; planModeEnabled?: boolean } | null) => {
-        if (d) {
-          if (typeof d.bonEnabled === 'boolean') setBonEnabled(d.bonEnabled)
-          if (typeof d.uncertaintyEnabled === 'boolean') setUncertaintyEnabled(d.uncertaintyEnabled)
-          if (typeof d.proceduralEnabled === 'boolean') setProceduralEnabled(d.proceduralEnabled)
-          if (typeof d.planModeEnabled === 'boolean') setPlanModeEnabled(d.planModeEnabled)
-        }
-      })
-      .catch(() => { /* not running — skip */ })
     // Memory decay stats
     fetch(amUrl('/api/memory/decay-stats'), { signal: AbortSignal.timeout(3000) })
       .then(r => r.ok ? r.json() : null)
       .then((d: DecayStats | null) => { if (d) setDecayStats(d) })
-      .catch(() => { /* not running — skip */ })
-    // Model registry — RAM-fit badges + router transparency
-    fetch(amUrl('/api/model/registry'), { signal: AbortSignal.timeout(4000) })
-      .then(r => r.ok ? r.json() : null)
-      .then((d: ModelRegistry | null) => { if (d) setModelRegistry(d) })
-      .catch(() => { /* not running — skip */ })
-    // Cloud mesh proof — latest benchmark artifact (mesh-vs-frontier)
-    fetch(amUrl('/api/benchmark/mesh'), { signal: AbortSignal.timeout(5000) })
-      .then(r => r.ok ? r.json() : null)
-      .then((d: MeshProofArtifact | null) => { if (d && !d.error) setMeshProof(d) })
       .catch(() => { /* not running — skip */ })
     // EU AI Act Art.50 compliance log — every generated response is recorded here
     fetch(amUrl('/api/compliance/log?limit=50'), { signal: AbortSignal.timeout(4000) })
@@ -506,101 +430,15 @@ export function GovernSurface({ recentTraces = [] }: { recentTraces?: RunTrace[]
     finally { setGrading(null) }
   }
 
-  async function toggleBon() {
-    setBonToggling(true)
-    try {
-      const r = await fetch(amUrl('/api/settings'), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ bonEnabled: !bonEnabled }),
-      })
-      if (r.ok) { const d = await r.json() as { bonEnabled: boolean }; setBonEnabled(d.bonEnabled) }
-    } catch { /* best-effort */ }
-    finally { setBonToggling(false) }
-  }
-
-  async function toggleUncertainty() {
-    setUncertaintyToggling(true)
-    try {
-      const r = await fetch(amUrl('/api/settings'), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ uncertaintyEnabled: !uncertaintyEnabled }),
-      })
-      if (r.ok) { const d = await r.json() as { uncertaintyEnabled: boolean }; setUncertaintyEnabled(d.uncertaintyEnabled) }
-    } catch { /* best-effort */ }
-    finally { setUncertaintyToggling(false) }
-  }
-
-  async function toggleProcedural() {
-    setProceduralToggling(true)
-    try {
-      const r = await fetch(amUrl('/api/settings'), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ proceduralEnabled: !proceduralEnabled }),
-      })
-      if (r.ok) { const d = await r.json() as { proceduralEnabled: boolean }; setProceduralEnabled(d.proceduralEnabled) }
-    } catch { /* best-effort */ }
-    finally { setProceduralToggling(false) }
-  }
-
-  async function togglePlanMode() {
-    setPlanModeToggling(true)
-    try {
-      const r = await fetch(amUrl('/api/settings'), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ planModeEnabled: !planModeEnabled }),
-      })
-      if (r.ok) { const d = await r.json() as { planModeEnabled: boolean }; setPlanModeEnabled(d.planModeEnabled) }
-    } catch { /* best-effort */ }
-    finally { setPlanModeToggling(false) }
-  }
-
-  // Hardened execution — binds the agent's containment purpose to least-privilege 'research' (no shell,
-  // no file-writes) so a prompt-injected run_command/code_execute/write_file is denied by the purpose
-  // gate. 'full' restores unrestricted local action. Uses the existing /api/containment bind endpoint.
+  // Hardened execution is read-only here — this mirror of the bound containment purpose
+  // drives the Posture band's status readout. The actual toggle lives in
+  // Settings → Agent behavior (POST /api/containment).
   useEffect(() => {
     fetch(amUrl('/api/containment'), { signal: AbortSignal.timeout(3000) })
       .then((r) => r.ok ? r.json() as Promise<{ purpose?: string }> : null)
       .then((d) => { if (d?.purpose) setHardenedExec(d.purpose === 'research' || d.purpose === 'read-only') })
       .catch(() => { /* best-effort */ })
   }, [])
-
-  async function toggleHardenedExec() {
-    setHardenedToggling(true)
-    try {
-      const r = await fetch(amUrl('/api/containment'), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action: 'bind', purpose: hardenedExec ? 'full' : 'research' }),
-      })
-      if (r.ok) { const d = await r.json() as { purpose?: string }; setHardenedExec(d.purpose === 'research' || d.purpose === 'read-only') }
-    } catch { /* best-effort */ }
-    finally { setHardenedToggling(false) }
-  }
-
-  async function runMeshProof(n: number) {
-    setMeshRunning(true)
-    try {
-      await fetch(amUrl('/api/benchmark/mesh'), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ n }),
-      })
-      // Poll for completion — harness takes ~n*0.6s; cap at 3 polls of 8s each
-      for (let i = 0; i < 3; i++) {
-        await new Promise<void>(r => setTimeout(r, 8000))
-        const poll = await fetch(amUrl('/api/benchmark/mesh'), { signal: AbortSignal.timeout(4000) })
-        if (poll.ok) {
-          const d = await poll.json() as MeshProofArtifact
-          if (d && !d.error) { setMeshProof(d); break }
-        }
-      }
-    } catch { /* best-effort */ }
-    finally { setMeshRunning(false) }
-  }
 
   // Merge local ledger events with agent-machine run history, deduped by id, sorted newest-first
   const amEvents: AuditEvent[] = amRuns.map(amRunToAuditEvent)
@@ -701,6 +539,12 @@ export function GovernSurface({ recentTraces = [] }: { recentTraces?: RunTrace[]
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-6">
       <div className="mx-auto w-full max-w-3xl space-y-4">
 
+        {/* =============== POSTURE =============== */}
+        <div className="flex items-center gap-2.5 pt-3 first:pt-0">
+          <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">Posture</span>
+          <span className="h-px flex-1 bg-[var(--color-border-tertiary)]" />
+        </div>
+
         {/* Tamper-evidence attestation — egress audit chain (hash-linked + Ed25519-signed head) */}
         {audit && (
           <div className="rounded-2xl border p-4 shadow-sm" style={{ borderColor: audit.attested ? '#bbf7d0' : '#fde68a', background: audit.attested ? 'var(--color-accent-bg)' : 'var(--color-attention-bg)' }}>
@@ -721,53 +565,20 @@ export function GovernSurface({ recentTraces = [] }: { recentTraces?: RunTrace[]
           </div>
         )}
 
-        {/* EU AI Act Art.50 compliance log — every AI-generated response is marked and recorded here */}
+        {/* Sovereign identity — device-anchored did:key pseudonym */}
         <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
-          <div className="mb-2 flex items-center justify-between">
-            <div>
-              <div className="text-xs font-semibold text-[#0891b2]">AI Act compliance</div>
-              <div className="mt-0.5 text-[11px] text-[var(--color-text-tertiary)]">EU AI Act Art.50 · mandatory Aug 2026 · every response marked + logged on-device</div>
-            </div>
-            {complianceLog && (
-              <div className="flex items-center gap-2">
-                <span className="rounded-full bg-[rgba(8,145,178,0.10)] px-2.5 py-0.5 text-[11px] font-semibold text-[#0891b2]">{complianceLog.total.toLocaleString()} logged</span>
-              </div>
-            )}
+          <div className="mb-2 text-xs font-semibold text-[#0891b2]">Sovereign Identity</div>
+          <div className="text-[11px] text-[var(--color-text-tertiary)] mb-3 leading-relaxed">
+            Device-anchored identity. No account, no server. Derived from a local root key that never leaves this machine.
           </div>
-          {!complianceLog ? (
-            <div className="text-[11px] text-[var(--color-text-tertiary)]">Agent machine not running — compliance log unavailable.</div>
-          ) : complianceLog.entries.length === 0 ? (
-            <div className="text-[11px] text-[var(--color-text-tertiary)]">No events yet — entries appear here after the first AI-generated response.</div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse text-[11px]">
-                <thead>
-                  <tr className="text-left text-[11px] font-semibold text-[var(--color-text-tertiary)]">
-                    <th className="pb-1.5 pr-3">Time</th>
-                    <th className="pb-1.5 pr-3">Model</th>
-                    <th className="pb-1.5 pr-3">Digest</th>
-                    <th className="pb-1.5">Standard</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[var(--color-border-tertiary)]">
-                  {[...complianceLog.entries].reverse().slice(0, 20).map((e, i) => (
-                    <tr key={i} className="text-[var(--color-text-secondary)]">
-                      <td className="py-1.5 pr-3 font-mono tabular-nums text-[var(--color-text-tertiary)] whitespace-nowrap">
-                        {new Date(e.markedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                      </td>
-                      <td className="py-1.5 pr-3 max-w-[140px] truncate font-mono" title={e.model}>{e.model.split('/').pop() ?? e.model}</td>
-                      <td className="py-1.5 pr-3 font-mono text-[var(--color-text-tertiary)]" title={e.digest}>{e.digest.slice(0, 12)}</td>
-                      <td className="py-1.5">
-                        <span className="rounded-full bg-[rgba(8,145,178,0.10)] px-1.5 py-0.5 text-[11px] font-semibold text-[#0891b2]">{e.complianceStandard}</span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {complianceLog.total > 20 && (
-                <div className="mt-2 text-[11px] text-[var(--color-text-tertiary)]">Showing 20 of {complianceLog.total.toLocaleString()} events</div>
-              )}
+          {pseudonym ? (
+            <div className="flex items-center gap-2 rounded-xl border border-[var(--color-border-secondary)] bg-[var(--color-background-secondary)] px-3 py-2">
+              <span className="h-2 w-2 shrink-0 rounded-full bg-[#0891b2]" />
+              <span className="flex-1 min-w-0 truncate font-mono text-[11px] text-[var(--color-text-primary)]" title={pseudonym}>{pseudonym}</span>
+              <span className="shrink-0 rounded-full bg-[rgba(8,145,178,0.10)] px-2 py-0.5 text-[11px] font-semibold text-[#0891b2]">did:key</span>
             </div>
+          ) : (
+            <div className="text-[11px] text-[var(--color-text-tertiary)]">Agent machine not running — pseudonym unavailable.</div>
           )}
         </div>
 
@@ -817,101 +628,178 @@ export function GovernSurface({ recentTraces = [] }: { recentTraces?: RunTrace[]
           </div>
         )}
 
-        {/* SCOPE-D engagement policy editor */}
+        {/* Read-only posture readout — current policy mode, evidence level, hardened-exec state (change in Settings) */}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] px-4 py-2.5 text-[11px]">
+          <span className="text-[var(--color-text-tertiary)]">Policy <span className="font-semibold capitalize text-[var(--color-text-primary)]">{policyMode}</span></span>
+          <span className="text-[var(--color-text-tertiary)]">Evidence <span className="font-semibold text-[var(--color-text-primary)]">{EVIDENCE_LEVEL_LABEL[evidenceLevel]}</span></span>
+          <span className="text-[var(--color-text-tertiary)]">Hardened exec <span className={`font-semibold ${hardenedExec ? 'text-[#7c3aed]' : 'text-[var(--color-text-primary)]'}`}>{hardenedExec ? 'On' : 'Off'}</span></span>
+          <span className="ml-auto text-[var(--color-text-tertiary)]">Change in Settings → Agent behavior</span>
+        </div>
+
+
+        {/* =============== CONTROL =============== */}
+        <div className="flex items-center gap-2.5 pt-3 first:pt-0">
+          <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">Control</span>
+          <span className="h-px flex-1 bg-[var(--color-border-tertiary)]" />
+        </div>
+
+        {/* Policy profile */}
         <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
-          <div className="mb-3 flex items-center justify-between">
-            <div className="text-xs font-semibold text-[#7c3aed]">Engagement Policy</div>
-            <button onClick={() => setShowPolicyEditor((v) => !v)}
-              className="rounded-full border border-[var(--color-border-tertiary)] px-2.5 py-0.5 text-[11px] text-[var(--color-text-secondary)] hover:bg-[var(--color-background-secondary)] transition">
-              {showPolicyEditor ? 'Hide editor' : 'Edit policy'}
-            </button>
+          <div className="text-xs font-semibold text-[#1d4ed8]">Policy profile</div>
+          <div className="mt-3 flex flex-wrap gap-4">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-[var(--color-text-tertiary)]">Mode</span>
+              {([['default', 'Default'], ['strict', 'Strict'], ['permissive', 'Permissive']] as const).map(([val, label]) => (
+                <button
+                  key={val}
+                  onClick={() => syncPolicyMode(val)}
+                  className={`rounded-full border px-2.5 py-1 text-xs transition ${
+                    policyMode === val
+                      ? 'border-[#1d4ed8] bg-[rgba(29,78,216,0.12)] font-semibold text-[#1d4ed8]'
+                      : 'border-[var(--color-border-tertiary)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-secondary)]'
+                  }`}
+                >{label}</button>
+              ))}
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-[var(--color-text-tertiary)]">Evidence</span>
+              {([['minimal', 'Minimal'], ['standard', 'Standard'], ['full_hash', 'Full hash']] as const).map(([val, label]) => (
+                <button
+                  key={val}
+                  onClick={() => syncEvidenceLevel(val)}
+                  className={`rounded-full border px-2.5 py-1 text-xs transition ${
+                    evidenceLevel === val
+                      ? 'border-[#1d4ed8] bg-[rgba(29,78,216,0.12)] font-semibold text-[#1d4ed8]'
+                      : 'border-[var(--color-border-tertiary)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-secondary)]'
+                  }`}
+                >{label}</button>
+              ))}
+            </div>
           </div>
-          <p className="text-[11px] text-[var(--color-text-tertiary)] leading-relaxed">
-            SCOPE-D EngagementPolicy governs agent egress routing, action authorization, and operator approval requirements.
-            {posture?.scopedConfigured ? ` Active: ${posture.policyName ?? posture.policyId ?? 'configured'}.` : ' No policy configured — agent runs without egress gating.'}
-          </p>
-          {showPolicyEditor && (
-            <div className="mt-4 space-y-3">
-              <div className="grid grid-cols-2 gap-2">
-                <label className="block">
-                  <span className="text-[11px] font-medium text-[var(--color-text-secondary)]">Policy ID</span>
-                  <input value={pePolicyId} onChange={(e) => setPePolicyId(e.target.value)} placeholder="my-policy" className="mt-0.5 block w-full rounded-lg border border-[var(--color-border-secondary)] bg-[var(--color-background-secondary)] px-2 py-1.5 text-[11px] text-[var(--color-text-primary)] outline-none focus:border-[#7c3aed]" />
-                </label>
-                <label className="block">
-                  <span className="text-[11px] font-medium text-[var(--color-text-secondary)]">Name</span>
-                  <input value={peName} onChange={(e) => setPeName(e.target.value)} placeholder="My engagement policy" className="mt-0.5 block w-full rounded-lg border border-[var(--color-border-secondary)] bg-[var(--color-background-secondary)] px-2 py-1.5 text-[11px] text-[var(--color-text-primary)] outline-none focus:border-[#7c3aed]" />
-                </label>
-              </div>
+          <div className="mt-3 rounded-xl bg-[var(--color-background-secondary)] px-3 py-2 text-[11px] text-[var(--color-text-secondary)]">
+            {policyMode === 'default'    && 'Standard: refusal check active, evidence refs required for factual claims.'}
+            {policyMode === 'strict'     && 'Legal-grade: full hash provenance, mandatory evidence bundles, all outputs reviewed before emit.'}
+            {policyMode === 'permissive' && 'Research mode: minimal restrictions, policy checks recorded but non-blocking.'}
+          </div>
+        </div>
 
-              <label className="block">
-                <span className="text-[11px] font-medium text-[var(--color-text-secondary)]">Authorized egress targets <span className="font-normal text-[var(--color-text-tertiary)]">(one host per line; empty = unrestricted)</span></span>
-                <textarea value={peTargets} onChange={(e) => setPeTargets(e.target.value)} rows={3} placeholder={'api.anthropic.com\nbackend.composio.dev'} className="mt-0.5 block w-full resize-none rounded-lg border border-[var(--color-border-secondary)] bg-[var(--color-background-secondary)] px-2 py-1.5 text-[11px] text-[var(--color-text-primary)] outline-none focus:border-[#7c3aed] font-mono" />
-              </label>
-
-              <div>
-                <span className="text-[11px] font-medium text-[var(--color-text-secondary)]">Authorized modes</span>
-                <div className="mt-1 flex gap-3">
-                  {AUTH_MODES.map((m) => (
-                    <label key={m} className="flex items-center gap-1 cursor-pointer">
-                      <input type="checkbox" checked={peModes.includes(m)} onChange={(e) => setPeModes((ms) => e.target.checked ? [...ms, m] : ms.filter((x) => x !== m))} className="h-3 w-3 rounded" />
-                      <span className="text-[11px] text-[var(--color-text-secondary)]">{m}</span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-[11px] font-medium text-[var(--color-text-secondary)]">Approval rules</span>
-                  <button type="button" onClick={() => setPeRules((rs) => [...rs, { actionClass: 'write', requiredGate: 'single_human' }])}
-                    className="text-[11px] text-[#7c3aed] hover:underline">+ Add rule</button>
-                </div>
-                <div className="space-y-1">
-                  {peRules.map((rule, i) => (
-                    <div key={i} className="flex items-center gap-1">
-                      <select value={rule.actionClass} onChange={(e) => setPeRules((rs) => rs.map((r, j) => j === i ? { ...r, actionClass: e.target.value } : r))}
-                        className="flex-1 rounded-lg border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] px-2 py-1 text-[11px] text-[var(--color-text-primary)] outline-none">
-                        {ACTION_CLASSES.map((ac) => <option key={ac} value={ac}>{ac}</option>)}
-                      </select>
-                      <select value={rule.requiredGate} onChange={(e) => setPeRules((rs) => rs.map((r, j) => j === i ? { ...r, requiredGate: e.target.value } : r))}
-                        className="flex-1 rounded-lg border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] px-2 py-1 text-[11px] text-[var(--color-text-primary)] outline-none">
-                        {GATE_VALUES.map((g) => <option key={g} value={g}>{g}</option>)}
-                      </select>
-                      {peRules.length > 1 && <button type="button" onClick={() => setPeRules((rs) => rs.filter((_, j) => j !== i))} className="text-[var(--color-text-tertiary)] hover:text-[#dc2626] px-1 text-xs">×</button>}
+        {/* Memory — curate the long-term brain: pin to inject into recall, forget to drop. The
+            curatable graph memory no competitor ships (you asked: "curate memories into the brain"). */}
+        <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
+          <div className="mb-1 flex items-center justify-between">
+            <div className="text-xs font-semibold text-[#1d4ed8]">Memory</div>
+            <div className="text-[11px] text-[var(--color-text-tertiary)]">{memories.filter((m) => m.pinned).length} pinned · {memories.length} total</div>
+          </div>
+          <div className="mb-3 text-[11px] text-[var(--color-text-tertiary)]">What the agent remembers about you. ★ Pin to keep it in long-term recall; × to forget it. This is yours to curate — nothing leaves the device.</div>
+          {memories.length === 0 ? (
+            <div className="text-[11px] text-[var(--color-text-tertiary)]">No memories yet — the agent writes these as it learns your preferences and facts.</div>
+          ) : (
+            <div className="space-y-1.5">
+              {[...memories].sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.lti - a.lti).slice(0, 12).map((m) => (
+                <div key={m.id} className="flex items-start gap-2 rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] p-2.5">
+                  <button onClick={() => pinMemory(m.id, !m.pinned)} title={m.pinned ? 'Unpin from long-term recall' : 'Pin into long-term recall'} className={`mt-0.5 text-sm leading-none ${m.pinned ? 'text-[var(--color-attention)]' : 'text-[var(--color-text-tertiary)] hover:text-[var(--color-attention)]'}`}>{m.pinned ? '★' : '☆'}</button>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="rounded bg-[var(--color-background-tertiary)] px-1 text-[11px] font-medium text-[var(--color-text-tertiary)]">{m.kind}</span>
+                      <span className="text-[11px] text-[var(--color-text-tertiary)]">{new Date(m.createdAt).toLocaleDateString()}</span>
+                      {m.pinned && <span className="text-[11px] font-medium text-[var(--color-attention)]">in long-term recall</span>}
                     </div>
-                  ))}
+                    <div className="mt-0.5 line-clamp-2 text-[11px] text-[var(--color-text-secondary)]">{m.preview}</div>
+                  </div>
+                  <button onClick={() => forgetMemory(m.id)} title="Forget this memory" className="mt-0.5 text-sm leading-none text-[var(--color-text-tertiary)] hover:text-[#dc2626]">×</button>
                 </div>
-              </div>
-
-              <div>
-                <span className="text-[11px] font-medium text-[var(--color-text-secondary)]">Blocked actions</span>
-                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
-                  {ACTION_CLASSES.map((ac) => (
-                    <label key={ac} className="flex items-center gap-1 cursor-pointer">
-                      <input type="checkbox" checked={peBlocked.includes(ac)} onChange={(e) => setPeBlocked((bs) => e.target.checked ? [...bs, ac] : bs.filter((x) => x !== ac))} className="h-3 w-3 rounded" />
-                      <span className="text-[11px] text-[var(--color-text-secondary)] font-mono">{ac}</span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-
-              <label className="block">
-                <span className="text-[11px] font-medium text-[var(--color-text-secondary)]">Expires at <span className="font-normal text-[var(--color-text-tertiary)]">(leave blank = never)</span></span>
-                <input type="datetime-local" value={peExpires} onChange={(e) => setPeExpires(e.target.value)} className="mt-0.5 block rounded-lg border border-[var(--color-border-secondary)] bg-[var(--color-background-secondary)] px-2 py-1.5 text-[11px] text-[var(--color-text-primary)] outline-none focus:border-[#7c3aed]" />
-              </label>
-
-              {peSaveMsg && (
-                <div className={`rounded-lg px-3 py-2 text-[11px] ${peSaveMsg.includes('saved') ? 'border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/5 text-[var(--color-accent)]' : 'border border-[#fecaca] bg-[#fef2f2] text-[#dc2626]'}`}>{peSaveMsg}</div>
-              )}
-              <button type="button" onClick={() => void savePolicy()} disabled={peSaving || !pePolicyId.trim() || !peName.trim()}
-                className="rounded-xl bg-[#7c3aed] px-4 py-2 text-[11px] font-semibold text-white transition hover:bg-[#6d28d9] disabled:opacity-50">
-                {peSaving ? 'Saving…' : 'Save policy to disk'}
-              </button>
-              <p className="text-[11px] text-[var(--color-text-tertiary)]">Requires <code className="font-mono">SCOPED_ENGAGEMENT_POLICY</code> env var pointing to a writable JSON path. Restart agent-machine after saving.</p>
+              ))}
             </div>
           )}
         </div>
 
+        {/* Graph proposals — agent-staged changes the user must approve before they mutate the graph */}
+        {proposals.length > 0 && (
+          <div className="rounded-2xl border border-[#fef08a] bg-[var(--color-background-primary)] p-5 shadow-sm">
+            <div className="mb-3 flex items-center justify-between">
+              <div className="text-xs font-semibold text-[var(--color-attention)]">Graph proposals</div>
+              <span className="rounded-full bg-[#fef08a] px-2 py-0.5 text-[11px] font-semibold text-[var(--color-attention)]">{proposals.length} pending</span>
+            </div>
+            <ul className="space-y-2">
+              {proposals.map((p) => (
+                <li key={p.id} className="rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] p-3">
+                  <div className="mb-1 flex items-center gap-2">
+                    <span className="rounded-full border border-[#fde68a] bg-[var(--color-attention-bg)] px-1.5 py-0.5 font-mono text-[11px] font-semibold uppercase text-[var(--color-attention)]">{p.op}</span>
+                    {p.source && <span className="text-[11px] text-[var(--color-text-tertiary)]">from {p.source}</span>}
+                  </div>
+                  <div className="mb-1 text-[11px] text-[var(--color-text-primary)]">
+                    {p.op === 'add-edge' ? `${String(p.payload['from'])} → ${String(p.payload['rel'])} → ${String(p.payload['to'])}` :
+                     p.op === 'add-node' ? String(p.payload['node']) :
+                     p.op === 'remove-edge' ? `Remove: ${String(p.payload['from'])} → ${String(p.payload['to'])}` :
+                     `${String(p.payload['node'])}.${String(p.payload['prop'])} = ${String(p.payload['value'])}`}
+                  </div>
+                  {p.rationale && <div className="mb-2 text-[11px] italic text-[var(--color-text-tertiary)]">{p.rationale}</div>}
+                  <div className="flex gap-2">
+                    <button onClick={() => void handleProposal(p.id, 'reject')}
+                      className="rounded-md border border-[var(--color-border-secondary)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-background-tertiary)] transition">
+                      Reject
+                    </button>
+                    <button onClick={() => void handleProposal(p.id, 'accept')}
+                      className="rounded-md bg-[var(--color-accent)] px-2.5 py-1 text-[11px] font-medium text-white hover:bg-[var(--color-accent)] transition">
+                      Accept
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* SRS — skills due for spaced-repetition review */}
+        {dueSkills.length > 0 && (
+          <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <div className="text-xs font-semibold text-[var(--color-accent)]">Skills due for review</div>
+                <div className="mt-0.5 text-[11px] text-[var(--color-text-tertiary)]">{dueSkills.length} skill{dueSkills.length !== 1 ? 's' : ''} scheduled for spaced-repetition practice</div>
+              </div>
+            </div>
+            <div className="space-y-2">
+              {dueSkills.map((s) => {
+                const skillId = s.id ?? s.task
+                const isGrading = grading === skillId
+                return (
+                  <div key={skillId} className="rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] px-3 py-2.5">
+                    <div className="mb-1.5 flex items-start gap-1.5">
+                      <span className="mt-0.5 shrink-0 text-[11px] text-[var(--color-accent)]">◎</span>
+                      <span className="text-[12px] font-medium text-[var(--color-text-primary)]">{s.abstraction}</span>
+                    </div>
+                    <div className="mb-2 truncate text-[11px] text-[var(--color-text-tertiary)]">{s.task}</div>
+                    <div className="flex gap-1.5">
+                      {(['Again', 'Hard', 'Good', 'Easy'] as const).map((label, grade) => (
+                        <button
+                          key={label}
+                          disabled={isGrading}
+                          onClick={() => void gradeSkill(skillId, grade as 0|1|2|3)}
+                          className="flex-1 rounded-lg border border-[var(--color-border-secondary)] py-1 text-[11px] font-semibold transition hover:bg-[var(--color-background-primary)] disabled:opacity-40"
+                          style={{ color: grade === 0 ? '#dc2626' : grade === 1 ? 'var(--color-attention)' : grade === 2 ? 'var(--color-accent)' : '#0891b2' }}
+                        >
+                          {isGrading ? '…' : label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Autonomy — governed AI-driven-development ladder */}
+        <AutonomyPanel />
+
+        {/* Agent upkeep — background self-maintenance; collapsed by default */}
+        <details className="group rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] shadow-sm">
+          <summary className="flex cursor-pointer select-none items-center justify-between px-5 py-3.5 text-xs font-semibold text-[#7c3aed]">
+            <span>Agent upkeep <span className="font-normal text-[var(--color-text-tertiary)]">— learning loop · dreaming · trace consolidation</span></span>
+            <span className="text-[var(--color-text-tertiary)] transition group-open:rotate-90">›</span>
+          </summary>
+          <div className="space-y-4 border-t border-[var(--color-border-tertiary)] px-5 py-4">
         {/* Production-learning loop — what the agent has learned from real turns */}
         {learning && (learning.skills.count > 0 || learning.evalCases.count > 0 || (learning.experiences?.count ?? 0) > 0) && (
           <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
@@ -959,43 +847,6 @@ export function GovernSurface({ recentTraces = [] }: { recentTraces?: RunTrace[]
                 ))}
               </ul>
             )}
-          </div>
-        )}
-
-        {/* Graph proposals — agent-staged changes the user must approve before they mutate the graph */}
-        {proposals.length > 0 && (
-          <div className="rounded-2xl border border-[#fef08a] bg-[var(--color-background-primary)] p-5 shadow-sm">
-            <div className="mb-3 flex items-center justify-between">
-              <div className="text-xs font-semibold text-[var(--color-attention)]">Graph proposals</div>
-              <span className="rounded-full bg-[#fef08a] px-2 py-0.5 text-[11px] font-semibold text-[var(--color-attention)]">{proposals.length} pending</span>
-            </div>
-            <ul className="space-y-2">
-              {proposals.map((p) => (
-                <li key={p.id} className="rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] p-3">
-                  <div className="mb-1 flex items-center gap-2">
-                    <span className="rounded-full border border-[#fde68a] bg-[var(--color-attention-bg)] px-1.5 py-0.5 font-mono text-[11px] font-semibold uppercase text-[var(--color-attention)]">{p.op}</span>
-                    {p.source && <span className="text-[11px] text-[var(--color-text-tertiary)]">from {p.source}</span>}
-                  </div>
-                  <div className="mb-1 text-[11px] text-[var(--color-text-primary)]">
-                    {p.op === 'add-edge' ? `${String(p.payload['from'])} → ${String(p.payload['rel'])} → ${String(p.payload['to'])}` :
-                     p.op === 'add-node' ? String(p.payload['node']) :
-                     p.op === 'remove-edge' ? `Remove: ${String(p.payload['from'])} → ${String(p.payload['to'])}` :
-                     `${String(p.payload['node'])}.${String(p.payload['prop'])} = ${String(p.payload['value'])}`}
-                  </div>
-                  {p.rationale && <div className="mb-2 text-[11px] italic text-[var(--color-text-tertiary)]">{p.rationale}</div>}
-                  <div className="flex gap-2">
-                    <button onClick={() => void handleProposal(p.id, 'reject')}
-                      className="rounded-md border border-[var(--color-border-secondary)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-background-tertiary)] transition">
-                      Reject
-                    </button>
-                    <button onClick={() => void handleProposal(p.id, 'accept')}
-                      className="rounded-md bg-[var(--color-accent)] px-2.5 py-1 text-[11px] font-medium text-white hover:bg-[var(--color-accent)] transition">
-                      Accept
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
           </div>
         )}
 
@@ -1089,308 +940,65 @@ export function GovernSurface({ recentTraces = [] }: { recentTraces?: RunTrace[]
             </div>
           )}
         </div>
-
-        {/* Sovereign identity — device-anchored did:key pseudonym */}
-        <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
-          <div className="mb-2 text-xs font-semibold text-[#0891b2]">Sovereign Identity</div>
-          <div className="text-[11px] text-[var(--color-text-tertiary)] mb-3 leading-relaxed">
-            Device-anchored identity. No account, no server. Derived from a local root key that never leaves this machine.
           </div>
-          {pseudonym ? (
-            <div className="flex items-center gap-2 rounded-xl border border-[var(--color-border-secondary)] bg-[var(--color-background-secondary)] px-3 py-2">
-              <span className="h-2 w-2 shrink-0 rounded-full bg-[#0891b2]" />
-              <span className="flex-1 min-w-0 truncate font-mono text-[11px] text-[var(--color-text-primary)]" title={pseudonym}>{pseudonym}</span>
-              <span className="shrink-0 rounded-full bg-[rgba(8,145,178,0.10)] px-2 py-0.5 text-[11px] font-semibold text-[#0891b2]">did:key</span>
-            </div>
-          ) : (
-            <div className="text-[11px] text-[var(--color-text-tertiary)]">Agent machine not running — pseudonym unavailable.</div>
-          )}
+        </details>
+
+
+        {/* =============== REVIEW =============== */}
+        <div className="flex items-center gap-2.5 pt-3 first:pt-0">
+          <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">Review</span>
+          <span className="h-px flex-1 bg-[var(--color-border-tertiary)]" />
         </div>
 
-        {/* SRS — skills due for spaced-repetition review */}
-        {dueSkills.length > 0 && (
-          <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
-            <div className="mb-3 flex items-center justify-between">
-              <div>
-                <div className="text-xs font-semibold text-[var(--color-accent)]">Skills due for review</div>
-                <div className="mt-0.5 text-[11px] text-[var(--color-text-tertiary)]">{dueSkills.length} skill{dueSkills.length !== 1 ? 's' : ''} scheduled for spaced-repetition practice</div>
-              </div>
-            </div>
-            <div className="space-y-2">
-              {dueSkills.map((s) => {
-                const skillId = s.id ?? s.task
-                const isGrading = grading === skillId
-                return (
-                  <div key={skillId} className="rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] px-3 py-2.5">
-                    <div className="mb-1.5 flex items-start gap-1.5">
-                      <span className="mt-0.5 shrink-0 text-[11px] text-[var(--color-accent)]">◎</span>
-                      <span className="text-[12px] font-medium text-[var(--color-text-primary)]">{s.abstraction}</span>
-                    </div>
-                    <div className="mb-2 truncate text-[11px] text-[var(--color-text-tertiary)]">{s.task}</div>
-                    <div className="flex gap-1.5">
-                      {(['Again', 'Hard', 'Good', 'Easy'] as const).map((label, grade) => (
-                        <button
-                          key={label}
-                          disabled={isGrading}
-                          onClick={() => void gradeSkill(skillId, grade as 0|1|2|3)}
-                          className="flex-1 rounded-lg border border-[var(--color-border-secondary)] py-1 text-[11px] font-semibold transition hover:bg-[var(--color-background-primary)] disabled:opacity-40"
-                          style={{ color: grade === 0 ? '#dc2626' : grade === 1 ? 'var(--color-attention)' : grade === 2 ? 'var(--color-accent)' : '#0891b2' }}
-                        >
-                          {isGrading ? '…' : label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* Best-of-N runtime toggle */}
+        {/* EU AI Act Art.50 compliance log — every AI-generated response is marked and recorded here */}
         <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
           <div className="mb-2 flex items-center justify-between">
             <div>
-              <div className="text-xs font-semibold text-[#1d4ed8]">Best-of-N selection</div>
-              <div className="mt-0.5 text-[11px] text-[var(--color-text-tertiary)] leading-relaxed">
-                Samples N=3 candidates for low-confidence turns and picks the strongest grounded response.
-              </div>
+              <div className="text-xs font-semibold text-[#0891b2]">AI Act compliance</div>
+              <div className="mt-0.5 text-[11px] text-[var(--color-text-tertiary)]">EU AI Act Art.50 · mandatory Aug 2026 · every response marked + logged on-device</div>
             </div>
-            <button
-              onClick={() => void toggleBon()}
-              disabled={bonToggling}
-              className={`shrink-0 rounded-full px-3 py-1 text-[11px] font-semibold transition disabled:opacity-50 ${bonEnabled ? 'bg-[#1d4ed8] text-white hover:bg-[#1e40af]' : 'border border-[var(--color-border-primary)] text-[var(--color-text-secondary)] hover:border-[#1d4ed8] hover:text-[#1d4ed8]'}`}
-            >
-              {bonToggling ? '…' : bonEnabled ? 'Enabled' : 'Disabled'}
-            </button>
-          </div>
-          <div className="text-[11px] text-[var(--color-text-tertiary)]">
-            {bonEnabled ? 'Active — low-confidence turns will sample 3 completions and select the best.' : 'Off — single-sample path. Enable to improve response quality on ambiguous prompts.'}
-          </div>
-        </div>
-
-        {/* Uncertainty gate runtime toggle */}
-        <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
-          <div className="mb-2 flex items-center justify-between">
-            <div>
-              <div className="text-xs font-semibold text-[#0891b2]">Uncertainty gate</div>
-              <div className="mt-0.5 text-[11px] text-[var(--color-text-tertiary)] leading-relaxed">
-                Appends a calibrated low-confidence disclaimer when semantic entropy indicates the model is guessing.
-              </div>
-            </div>
-            <button
-              onClick={() => void toggleUncertainty()}
-              disabled={uncertaintyToggling}
-              className={`shrink-0 rounded-full px-3 py-1 text-[11px] font-semibold transition disabled:opacity-50 ${uncertaintyEnabled ? 'bg-[#0891b2] text-white hover:bg-[#0e7490]' : 'border border-[var(--color-border-primary)] text-[var(--color-text-secondary)] hover:border-[#0891b2] hover:text-[#0891b2]'}`}
-            >
-              {uncertaintyToggling ? '…' : uncertaintyEnabled ? 'Enabled' : 'Disabled'}
-            </button>
-          </div>
-          <div className="text-[11px] text-[var(--color-text-tertiary)]">
-            {uncertaintyEnabled ? 'Active — responses with high semantic entropy will carry a hedge or abstention notice.' : 'Off — no abstention overlay. Enable to surface genuine knowledge gaps rather than confident hallucinations.'}
-          </div>
-        </div>
-
-        {/* Procedural memory (loop 2+3) runtime toggle */}
-        <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
-          <div className="mb-2 flex items-center justify-between">
-            <div>
-              <div className="text-xs font-semibold text-[var(--color-accent)]">Procedural memory</div>
-              <div className="mt-0.5 text-[11px] text-[var(--color-text-tertiary)] leading-relaxed">
-                Distills successful turns into reusable skills (loop 2) and enrolls them in spaced-repetition review (loop 3).
-              </div>
-            </div>
-            <button
-              onClick={() => void toggleProcedural()}
-              disabled={proceduralToggling}
-              className={`shrink-0 rounded-full px-3 py-1 text-[11px] font-semibold transition disabled:opacity-50 ${proceduralEnabled ? 'bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]' : 'border border-[var(--color-border-primary)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]'}`}
-            >
-              {proceduralToggling ? '…' : proceduralEnabled ? 'Enabled' : 'Disabled'}
-            </button>
-          </div>
-          <div className="text-[11px] text-[var(--color-text-tertiary)]">
-            {proceduralEnabled
-              ? 'Active — high-quality turns are being distilled into the skill library and scheduled for SRS review.'
-              : 'Off — only eval-capture (failures) is running. Enable to start compounding the skill library.'}
-          </div>
-        </div>
-
-        {/* Plan mode — citizen-controlled approve-before-act gate (EU AI Act Art.14) */}
-        <div className={`rounded-2xl border p-5 shadow-sm transition ${planModeEnabled ? 'border-[rgba(220,38,38,0.35)] bg-[rgba(220,38,38,0.03)]' : 'border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)]'}`}>
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <div>
-              <div className={`text-xs font-semibold ${planModeEnabled ? 'text-[#dc2626]' : 'text-[var(--color-text-tertiary)]'}`}>Plan mode</div>
-              <div className="mt-0.5 text-[11px] text-[var(--color-text-secondary)]">Require step-by-step approval before any action executes.</div>
-            </div>
-            <button
-              onClick={() => void togglePlanMode()}
-              disabled={planModeToggling}
-              className={`shrink-0 rounded-full px-3 py-1 text-[11px] font-semibold transition disabled:opacity-50 ${planModeEnabled ? 'bg-[#dc2626] text-white hover:bg-[#b91c1c]' : 'border border-[var(--color-border-primary)] text-[var(--color-text-secondary)] hover:border-[#dc2626] hover:text-[#dc2626]'}`}
-            >
-              {planModeToggling ? '…' : planModeEnabled ? 'Enabled' : 'Disabled'}
-            </button>
-          </div>
-          <div className="text-[11px] text-[var(--color-text-tertiary)]">
-            {planModeEnabled
-              ? 'On — every turn the agent proposes a numbered step plan; no tool executes until you approve. High-oversight mode (EU AI Act Art.14).'
-              : 'Off — agent executes immediately. Enable to require an approve-before-act proposal for every action.'}
-          </div>
-        </div>
-
-        {/* Hardened execution — least-privilege containment: block shell + file-writes (injection backstop) */}
-        <div className={`rounded-2xl border p-5 shadow-sm transition ${hardenedExec ? 'border-[rgba(124,58,237,0.35)] bg-[rgba(124,58,237,0.03)]' : 'border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)]'}`}>
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <div>
-              <div className={`text-xs font-semibold ${hardenedExec ? 'text-[#7c3aed]' : 'text-[var(--color-text-tertiary)]'}`}>Hardened execution</div>
-              <div className="mt-0.5 text-[11px] text-[var(--color-text-secondary)]">Bind the agent to least-privilege — no shell, no file-writes. Blocks a prompt-injected command from ever executing.</div>
-            </div>
-            <button
-              onClick={() => void toggleHardenedExec()}
-              disabled={hardenedToggling}
-              className={`shrink-0 rounded-full px-3 py-1 text-[11px] font-semibold transition disabled:opacity-50 ${hardenedExec ? 'bg-[#7c3aed] text-white hover:bg-[#6d28d9]' : 'border border-[var(--color-border-primary)] text-[var(--color-text-secondary)] hover:border-[#7c3aed] hover:text-[#7c3aed]'}`}
-            >
-              {hardenedToggling ? '…' : hardenedExec ? 'Enabled' : 'Disabled'}
-            </button>
-          </div>
-          <div className="text-[11px] text-[var(--color-text-tertiary)]">
-            {hardenedExec
-              ? 'On — the agent runs read/search/reason only (purpose: research). run_command, code_execute, and file-writes are denied until you disable this or explicitly elevate the session.'
-              : 'Off — the agent has full local capability. Enable to neutralize the indirect-injection → RCE/exfil path (web search still works).'}
-          </div>
-        </div>
-
-        {/* Cloud Mesh Proof — head-to-head evidence that the local mesh matches frontier models */}
-        <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
-          <div className="mb-3 flex items-start justify-between gap-3">
-            <div>
-              <div className="text-xs font-semibold text-[#7c3aed]">Cloud Mesh Proof</div>
-              <div className="mt-0.5 text-[11px] text-[var(--color-text-tertiary)] leading-relaxed">
-                Head-to-head coding benchmark — mesh vs GPT / Claude on 25 real problems. Run it in front of a client.
-              </div>
-            </div>
-            <div className="flex shrink-0 gap-1.5">
-              <button
-                onClick={() => void runMeshProof(20)}
-                disabled={meshRunning}
-                className="rounded-lg border border-[#ddd6fe] bg-[#f5f3ff] px-2.5 py-1 text-[11px] font-semibold text-[#6d28d9] transition hover:bg-[#ede9fe] disabled:opacity-50"
-              >
-                {meshRunning ? 'Running…' : 'Run 20-q'}
-              </button>
-              <button
-                onClick={() => void runMeshProof(25)}
-                disabled={meshRunning}
-                className="rounded-lg border border-[#ddd6fe] bg-[#f5f3ff] px-2.5 py-1 text-[11px] font-semibold text-[#6d28d9] transition hover:bg-[#ede9fe] disabled:opacity-50"
-              >
-                {meshRunning ? '…' : 'Full 25-q'}
-              </button>
-            </div>
-          </div>
-          {meshProof && meshProof.results && meshProof.results.length > 0 ? (
-            <div>
-              <div className="mb-2 space-y-1.5">
-                {meshProof.results.map(arm => (
-                  <div key={arm.arm} className="flex items-center gap-3">
-                    <span className="w-32 shrink-0 truncate text-[11px] font-medium text-[var(--color-text-secondary)]">{arm.arm}</span>
-                    <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-[var(--color-background-tertiary)]">
-                      <div
-                        className="h-full rounded-full"
-                        style={{
-                          width: `${arm.total > 0 ? (arm.pass / arm.total) * 100 : 0}%`,
-                          background: arm.arm.startsWith('mesh') ? '#7c3aed' : '#94a3b8',
-                        }}
-                      />
-                    </div>
-                    <span className="w-16 shrink-0 text-right font-mono text-[11px] font-semibold tabular-nums text-[var(--color-text-primary)]">
-                      {arm.pass}/{arm.total}
-                    </span>
-                    <span className="w-14 shrink-0 text-right font-mono text-[11px] tabular-nums text-[var(--color-text-tertiary)]">
-                      {arm.avgLatencyMs > 0 ? `${(arm.avgLatencyMs / 1000).toFixed(1)}s` : '—'}
-                    </span>
-                  </div>
-                ))}
-              </div>
-              {meshProof.artifactFile && (
-                <div className="mt-2 text-[11px] text-[var(--color-text-tertiary)]">
-                  {meshProof.artifactFile}{meshProof.artifactAt ? ` · ${new Date(meshProof.artifactAt).toLocaleString()}` : ''}
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="text-[11px] text-[var(--color-text-tertiary)]">
-              {meshRunning
-                ? 'Harness running — results appear here when done (poll every 8s).'
-                : 'No artifact yet — click Run to execute the benchmark suite. Results persist to disk.'}
-            </div>
-          )}
-        </div>
-
-        {/* Memory decay health */}
-        {decayStats && (
-          <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
-            <div className="mb-3 text-xs font-semibold text-[#0891b2]">Memory health</div>
-            <div className="grid grid-cols-3 gap-3">
-              <div className="rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] p-3 text-center">
-                <div className="text-xl font-semibold text-[var(--color-text-primary)]">{decayStats.budget}</div>
-                <div className="mt-0.5 text-[11px] text-[var(--color-text-tertiary)]">Budget</div>
-              </div>
-              <div className="rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] p-3 text-center">
-                <div className={`text-xl font-semibold ${decayStats.pruned > 0 ? 'text-[var(--color-attention)]' : 'text-[var(--color-accent)]'}`}>{decayStats.pruned}</div>
-                <div className="mt-0.5 text-[11px] text-[var(--color-text-tertiary)]">Pruned</div>
-              </div>
-              <div className="rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] p-3 text-center">
-                <div className="text-xl font-semibold text-[var(--color-text-primary)]">{decayStats.lastPruneAt ? new Date(decayStats.lastPruneAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}</div>
-                <div className="mt-0.5 text-[11px] text-[var(--color-text-tertiary)]">Last prune</div>
-              </div>
-            </div>
-            <div className="mt-2 text-[11px] text-[var(--color-text-tertiary)]">
-              {decayStats.pruned === 0 ? 'Memory store is within budget — no evictions yet.' : `${decayStats.pruned} low-salience memories evicted to stay within the ${decayStats.budget}-memory budget.`}
-            </div>
-          </div>
-        )}
-
-        {/* Model browser — RAM-fit badges + router transparency */}
-        {modelRegistry && (
-          <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
-            <div className="mb-1 flex items-center justify-between">
-              <div className="text-xs font-semibold text-[#7c3aed]">Model browser</div>
-              <div className="text-[11px] text-[var(--color-text-tertiary)]">{modelRegistry.hostRamGb} GB RAM · {modelRegistry.models.filter(m => m.ramFit).length} of {modelRegistry.models.length} fit locally</div>
-            </div>
-            {modelRegistry.router && (
-              <div className="mb-3 rounded-xl border border-[rgba(124,58,237,0.2)] bg-[rgba(124,58,237,0.05)] px-3 py-2 text-[11px]">
-                <span className="font-semibold text-[#7c3aed]">Last routed → </span>
-                <span className="font-mono text-[var(--color-text-primary)]">{modelRegistry.router.model}</span>
-                <span className="mx-1 text-[var(--color-text-tertiary)]">·</span>
-                <span className="text-[var(--color-text-tertiary)]">{modelRegistry.router.task}</span>
-                {modelRegistry.router.rationale && (
-                  <span className="ml-1 text-[var(--color-text-tertiary)]">· {modelRegistry.router.rationale.slice(0, 80)}</span>
-                )}
+            {complianceLog && (
+              <div className="flex items-center gap-2">
+                <span className="rounded-full bg-[rgba(8,145,178,0.10)] px-2.5 py-0.5 text-[11px] font-semibold text-[#0891b2]">{complianceLog.total.toLocaleString()} logged</span>
               </div>
             )}
-            <div className="space-y-1.5 max-h-64 overflow-y-auto">
-              {modelRegistry.models.map(m => {
-                const ORIGIN_COLOR: Record<string, string> = { 'frontier-api': '#6366f1', US: '#1d4ed8', EU: '#0891b2', CN: 'var(--color-attention)' }
-                const originColor = ORIGIN_COLOR[m.origin] ?? '#6b7280'
-                const isLastRouted = modelRegistry.router?.model === m.id || modelRegistry.router?.model.startsWith(m.id.split('/').pop() ?? '__none')
-                return (
-                  <div key={m.id} className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-[11px] transition ${isLastRouted ? 'border-[rgba(124,58,237,0.4)] bg-[rgba(124,58,237,0.06)]' : 'border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)]'}`}>
-                    <span className="min-w-0 flex-1 truncate font-medium text-[var(--color-text-primary)]">{m.label}</span>
-                    <span className="shrink-0 text-[11px] font-semibold" style={{ color: originColor }}>{m.origin}</span>
-                    <span className="shrink-0 tabular-nums text-[11px] text-[var(--color-text-tertiary)]">{m.composite}%</span>
-                    {m.hw.ramGb !== null ? (
-                      <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${m.ramFit ? 'bg-[var(--color-accent-bg)] text-[var(--color-accent)]' : 'bg-[#fef3c7] text-[var(--color-attention)]'}`}>
-                        {m.hw.ramGb} GB · {m.ramFit ? 'fits' : 'too large'}
-                      </span>
-                    ) : (
-                      <span className="shrink-0 rounded-full bg-[var(--color-background-tertiary)] px-2 py-0.5 text-[11px] font-semibold text-[var(--color-text-tertiary)]">API</span>
-                    )}
-                    {isLastRouted && <span className="shrink-0 text-[11px] font-semibold text-[#7c3aed]">● active</span>}
-                  </div>
-                )
-              })}
-            </div>
-            <div className="mt-2 text-[11px] text-[var(--color-text-tertiary)]">RAM-fit uses a 75% headroom threshold at Q4_K_M quantization. Frontier-API models run off-device.</div>
           </div>
-        )}
+          {!complianceLog ? (
+            <div className="text-[11px] text-[var(--color-text-tertiary)]">Agent machine not running — compliance log unavailable.</div>
+          ) : complianceLog.entries.length === 0 ? (
+            <div className="text-[11px] text-[var(--color-text-tertiary)]">No events yet — entries appear here after the first AI-generated response.</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-[11px]">
+                <thead>
+                  <tr className="text-left text-[11px] font-semibold text-[var(--color-text-tertiary)]">
+                    <th className="pb-1.5 pr-3">Time</th>
+                    <th className="pb-1.5 pr-3">Model</th>
+                    <th className="pb-1.5 pr-3">Digest</th>
+                    <th className="pb-1.5">Standard</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[var(--color-border-tertiary)]">
+                  {[...complianceLog.entries].reverse().slice(0, 20).map((e, i) => (
+                    <tr key={i} className="text-[var(--color-text-secondary)]">
+                      <td className="py-1.5 pr-3 font-mono tabular-nums text-[var(--color-text-tertiary)] whitespace-nowrap">
+                        {new Date(e.markedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                      </td>
+                      <td className="py-1.5 pr-3 max-w-[140px] truncate font-mono" title={e.model}>{e.model.split('/').pop() ?? e.model}</td>
+                      <td className="py-1.5 pr-3 font-mono text-[var(--color-text-tertiary)]" title={e.digest}>{e.digest.slice(0, 12)}</td>
+                      <td className="py-1.5">
+                        <span className="rounded-full bg-[rgba(8,145,178,0.10)] px-1.5 py-0.5 text-[11px] font-semibold text-[#0891b2]">{e.complianceStandard}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {complianceLog.total > 20 && (
+                <div className="mt-2 text-[11px] text-[var(--color-text-tertiary)]">Showing 20 of {complianceLog.total.toLocaleString()} events</div>
+              )}
+            </div>
+          )}
+        </div>
 
         {/* Analytics metrics */}
         {chatRuns.length > 0 && (
@@ -1469,35 +1077,29 @@ export function GovernSurface({ recentTraces = [] }: { recentTraces?: RunTrace[]
           )}
         </div>
 
-        {/* Memory — curate the long-term brain: pin to inject into recall, forget to drop. The
-            curatable graph memory no competitor ships (you asked: "curate memories into the brain"). */}
-        <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
-          <div className="mb-1 flex items-center justify-between">
-            <div className="text-xs font-semibold text-[#1d4ed8]">Memory</div>
-            <div className="text-[11px] text-[var(--color-text-tertiary)]">{memories.filter((m) => m.pinned).length} pinned · {memories.length} total</div>
-          </div>
-          <div className="mb-3 text-[11px] text-[var(--color-text-tertiary)]">What the agent remembers about you. ★ Pin to keep it in long-term recall; × to forget it. This is yours to curate — nothing leaves the device.</div>
-          {memories.length === 0 ? (
-            <div className="text-[11px] text-[var(--color-text-tertiary)]">No memories yet — the agent writes these as it learns your preferences and facts.</div>
-          ) : (
-            <div className="space-y-1.5">
-              {[...memories].sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.lti - a.lti).slice(0, 12).map((m) => (
-                <div key={m.id} className="flex items-start gap-2 rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] p-2.5">
-                  <button onClick={() => pinMemory(m.id, !m.pinned)} title={m.pinned ? 'Unpin from long-term recall' : 'Pin into long-term recall'} className={`mt-0.5 text-sm leading-none ${m.pinned ? 'text-[var(--color-attention)]' : 'text-[var(--color-text-tertiary)] hover:text-[var(--color-attention)]'}`}>{m.pinned ? '★' : '☆'}</button>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="rounded bg-[var(--color-background-tertiary)] px-1 text-[11px] font-medium text-[var(--color-text-tertiary)]">{m.kind}</span>
-                      <span className="text-[11px] text-[var(--color-text-tertiary)]">{new Date(m.createdAt).toLocaleDateString()}</span>
-                      {m.pinned && <span className="text-[11px] font-medium text-[var(--color-attention)]">in long-term recall</span>}
-                    </div>
-                    <div className="mt-0.5 line-clamp-2 text-[11px] text-[var(--color-text-secondary)]">{m.preview}</div>
-                  </div>
-                  <button onClick={() => forgetMemory(m.id)} title="Forget this memory" className="mt-0.5 text-sm leading-none text-[var(--color-text-tertiary)] hover:text-[#dc2626]">×</button>
-                </div>
-              ))}
+        {/* Memory decay health */}
+        {decayStats && (
+          <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
+            <div className="mb-3 text-xs font-semibold text-[#0891b2]">Memory health</div>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] p-3 text-center">
+                <div className="text-xl font-semibold text-[var(--color-text-primary)]">{decayStats.budget}</div>
+                <div className="mt-0.5 text-[11px] text-[var(--color-text-tertiary)]">Budget</div>
+              </div>
+              <div className="rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] p-3 text-center">
+                <div className={`text-xl font-semibold ${decayStats.pruned > 0 ? 'text-[var(--color-attention)]' : 'text-[var(--color-accent)]'}`}>{decayStats.pruned}</div>
+                <div className="mt-0.5 text-[11px] text-[var(--color-text-tertiary)]">Pruned</div>
+              </div>
+              <div className="rounded-xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-secondary)] p-3 text-center">
+                <div className="text-xl font-semibold text-[var(--color-text-primary)]">{decayStats.lastPruneAt ? new Date(decayStats.lastPruneAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}</div>
+                <div className="mt-0.5 text-[11px] text-[var(--color-text-tertiary)]">Last prune</div>
+              </div>
             </div>
-          )}
-        </div>
+            <div className="mt-2 text-[11px] text-[var(--color-text-tertiary)]">
+              {decayStats.pruned === 0 ? 'Memory store is within budget — no evictions yet.' : `${decayStats.pruned} low-salience memories evicted to stay within the ${decayStats.budget}-memory budget.`}
+            </div>
+          </div>
+        )}
 
         {/* Mesh learning — the verifier→selection loop made visible (introspection cloud chat lacks) */}
         <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
@@ -1536,49 +1138,6 @@ export function GovernSurface({ recentTraces = [] }: { recentTraces?: RunTrace[]
           ) : (
             <div className="text-[11px] text-[var(--color-text-tertiary)]">No routing learned yet — the bandit converges as you use local models across varied tasks. Every judged answer updates an arm.</div>
           )}
-        </div>
-
-        {/* Autonomy — governed AI-driven-development ladder */}
-        <AutonomyPanel />
-
-        {/* Policy profile */}
-        <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] p-5 shadow-sm">
-          <div className="text-xs font-semibold text-[#1d4ed8]">Policy profile</div>
-          <div className="mt-3 flex flex-wrap gap-4">
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] text-[var(--color-text-tertiary)]">Mode</span>
-              {([['default', 'Default'], ['strict', 'Strict'], ['permissive', 'Permissive']] as const).map(([val, label]) => (
-                <button
-                  key={val}
-                  onClick={() => syncPolicyMode(val)}
-                  className={`rounded-full border px-2.5 py-1 text-xs transition ${
-                    policyMode === val
-                      ? 'border-[#1d4ed8] bg-[rgba(29,78,216,0.12)] font-semibold text-[#1d4ed8]'
-                      : 'border-[var(--color-border-tertiary)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-secondary)]'
-                  }`}
-                >{label}</button>
-              ))}
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] text-[var(--color-text-tertiary)]">Evidence</span>
-              {([['minimal', 'Minimal'], ['standard', 'Standard'], ['full_hash', 'Full hash']] as const).map(([val, label]) => (
-                <button
-                  key={val}
-                  onClick={() => syncEvidenceLevel(val)}
-                  className={`rounded-full border px-2.5 py-1 text-xs transition ${
-                    evidenceLevel === val
-                      ? 'border-[#1d4ed8] bg-[rgba(29,78,216,0.12)] font-semibold text-[#1d4ed8]'
-                      : 'border-[var(--color-border-tertiary)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-secondary)]'
-                  }`}
-                >{label}</button>
-              ))}
-            </div>
-          </div>
-          <div className="mt-3 rounded-xl bg-[var(--color-background-secondary)] px-3 py-2 text-[11px] text-[var(--color-text-secondary)]">
-            {policyMode === 'default'    && 'Standard: refusal check active, evidence refs required for factual claims.'}
-            {policyMode === 'strict'     && 'Legal-grade: full hash provenance, mandatory evidence bundles, all outputs reviewed before emit.'}
-            {policyMode === 'permissive' && 'Research mode: minimal restrictions, policy checks recorded but non-blocking.'}
-          </div>
         </div>
 
         {/* Run details — current session + agent-machine history */}
@@ -1761,6 +1320,12 @@ export function GovernSurface({ recentTraces = [] }: { recentTraces?: RunTrace[]
               </div>
             ))}
           </div>
+        </div>
+
+        {/* =============== PROOF =============== */}
+        <div className="flex items-center gap-2.5 pt-3 first:pt-0">
+          <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">Proof</span>
+          <span className="h-px flex-1 bg-[var(--color-border-tertiary)]" />
         </div>
 
         {/* Evidence bundles */}

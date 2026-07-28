@@ -4,6 +4,7 @@ import { cloneElement, useEffect, useRef, useState, type ReactElement } from 're
 import { AppearancePanel } from './panels/AppearancePanel'
 import { ModelsPanel } from './panels/ModelsPanel'
 import { RuntimePanel } from './panels/RuntimePanel'
+import { AgentBehaviorPanel } from './panels/AgentBehaviorPanel'
 import { ConnectorsPanel } from './panels/ConnectorsPanel'
 import { ConnectionsPanel } from './panels/ConnectionsPanel'
 import { WorkspacePanel } from './panels/WorkspacePanel'
@@ -46,6 +47,14 @@ function IconRuntime() {
       <rect x="2" y="3" width="12" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
       <path d="M5 14h6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
       <circle cx="8" cy="7" r="1.5" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  )
+}
+function IconAgentBehavior() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle cx="8" cy="8" r="2" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M12.6 3.4l-1.4 1.4M4.8 11.2l-1.4 1.4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
     </svg>
   )
 }
@@ -136,6 +145,7 @@ const categories: Category[] = [
   { id: 'appearance', label: 'Appearance', icon: <IconAppearance />, panel: <AppearancePanel /> },
   { id: 'models', label: 'Models', icon: <IconModels />, panel: <ModelsPanel /> },
   { id: 'runtime', label: 'Runtime', icon: <IconRuntime />, panel: <RuntimePanel /> },
+  { id: 'agent-behavior', label: 'Agent behavior', icon: <IconAgentBehavior />, panel: <AgentBehaviorPanel /> },
   { id: 'connections', label: 'Connections', icon: <IconConnections />, panel: <ConnectionsPanel /> },
   { id: 'workspace', label: 'Workspace', icon: <IconConnections />, panel: <WorkspacePanel /> },
   { id: 'connectors', label: 'Connectors', icon: <IconConnectors />, panel: <ConnectorsPanel />, badge: 'MCP' },
