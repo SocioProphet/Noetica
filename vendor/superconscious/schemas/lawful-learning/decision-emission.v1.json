@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "schemas/lawful-learning/decision-emission.v1.json",
+  "title": "LawfulLearningDecisionEmission",
+  "description": "A decision event emitted by a lawful-learning system. Must carry evidence_status and authority chain. No decision without evidence binding.",
+  "type": "object",
+  "required": [
+    "decision_id",
+    "decision_type",
+    "decision_outcome",
+    "evidence_status_refs",
+    "authority_ref",
+    "replay_seal"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "decision_id": {"type": "string"},
+    "decision_type": {
+      "type": "string",
+      "enum": [
+        "circuit_admit",
+        "circuit_reject",
+        "circuit_quarantine",
+        "claim_promote",
+        "claim_retract",
+        "tag_upgrade",
+        "tag_downgrade",
+        "training_continue",
+        "training_halt",
+        "audit_trigger",
+        "composition_admit",
+        "composition_reject"
+      ]
+    },
+    "decision_outcome": {"type": "string", "enum": ["admitted", "rejected", "quarantined", "deferred", "escalated"]},
+    "evidence_status_refs": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "authority_ref": {"type": "string"},
+    "replay_seal": {"type": "string"},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "decision_rationale": {"type": "string"},
+    "affected_claim_ids": {"type": "array", "items": {"type": "string"}},
+    "non_claims": {"type": "array", "items": {"type": "string"}}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"decision_type": {"enum": ["claim_promote", "claim_retract", "tag_upgrade", "tag_downgrade"]}}},
+      "then": {
+        "required": ["decision_rationale", "affected_claim_ids"],
+        "properties": {
+          "decision_rationale": {"minLength": 10},
+          "affected_claim_ids": {"minItems": 1}
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "files": {
+    "composition/interpretability-harness-tier2-binding.v1.json": {
+      "bytes": 8773,
+      "sha256": "82db61892ffe3e3db0f8551e4700e8b7ed33340df27a23ecf7177ca79741838b"
+    },
+    "interpretability/artifact-source-lock.v0.json": {
+      "bytes": 4818,
+      "sha256": "469e0529df8125d9dd8ade25ef0a4a156fc0db7599e3b90cac90d48cb92cd2ae"
+    },
+    "interpretability/feature-registry-entry.v0.json": {
+      "bytes": 3724,
+      "sha256": "ebc9b71073ea1b387ce40c2536dfbbc23f39776a474582d0b8a91d94213d7b06"
+    },
+    "interpretability/intervention-spec.v0.json": {
+      "bytes": 5896,
+      "sha256": "b0cfd53f8c158e5795b50f4e6326c3dfdb959bacf06edbc85eaaec8f9be32cb3"
+    },
+    "interpretability/provider-binding.v0.json": {
+      "bytes": 4700,
+      "sha256": "617acf86db7e92371b7932c019e93b35d25597134b27e78f7c6d46dc30ff005b"
+    },
+    "lawful-learning/alignment-check.v1.json": {
+      "bytes": 2253,
+      "sha256": "cbb16d70d7cf5500c37c7d0abca418a45684eb075bcd3eb7914b849b944be222"
+    },
+    "lawful-learning/circuit-registry.v1.json": {
+      "bytes": 1709,
+      "sha256": "4e0deea6402a301c9fd94c741d99c456b4a627b2d34ca6391e117827cf92fc14"
+    },
+    "lawful-learning/claim-ledger-entry.v1.json": {
+      "bytes": 2436,
+      "sha256": "abeb9f5ff1e4e8b63b87ee18294d68dca806ff4507127ce09c64df9971371554"
+    },
+    "lawful-learning/decision-emission.v1.json": {
+      "bytes": 1899,
+      "sha256": "142c626b4578f7716f25ab9007689b752ee3d09be23938619028afc68ddedb2b"
+    },
+    "lawful-learning/evidence-status.v1.json": {
+      "bytes": 1281,
+      "sha256": "8f0af14a5fa3e5a3f6a755e8b1df878f4ef2e9652a080389fa73d1f2e58bfbcb"
+    },
+    "lawful-learning/forbidden-circuits.v1.json": {
+      "bytes": 1162,
+      "sha256": "948c0fdfe9ae096a72268ce11c6726c287d44c38fc97f3840cb4d32ee34ff8b2"
+    },
+    "lawful-learning/lawful-learning-invariants.v1.json": {
+      "bytes": 2198,
+      "sha256": "7543eed83eafd91e3ffbb74f735b2b27a91bac082e7bab84b25f78fa51513476"
+    }
+  },
+  "note": "Byte-identical copy. Drift is detectable: recompute sha256 per file and compare against this manifest. noetica-impair's conformance tests do exactly that and FAIL on divergence rather than silently validating against a stale copy.",
+  "upstream_commit": "921973094645c9223c22a1b9f52ecf75c2ccf785",
+  "upstream_path": "schemas",
+  "vendored_at": "2026-07-28T16:12:00Z",
+  "vendored_from": "https://github.com/SocioProphet/superconscious"
+}

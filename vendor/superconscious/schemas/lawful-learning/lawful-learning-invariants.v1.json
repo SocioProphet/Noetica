@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "schemas/lawful-learning/lawful-learning-invariants.v1.json",
+  "title": "LawfulLearningInvariantsDeclaration",
+  "description": "Declaration of which lawful-learning invariants apply to a given artifact or training run, with declared status.",
+  "type": "object",
+  "required": ["applies_to_ref", "invariant_declarations"],
+  "additionalProperties": false,
+  "properties": {
+    "applies_to_ref": {"type": "string"},
+    "declaration_status": {"type": "string", "enum": ["draft", "active", "superseded"], "default": "draft"},
+    "invariant_declarations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "adapter_dag_acyclic": {"$ref": "#/$defs/invariant_entry"},
+        "black_boxing_composes": {"$ref": "#/$defs/invariant_entry"},
+        "replay_seal_for_composed_trace": {"$ref": "#/$defs/invariant_entry"},
+        "may_wigner_monitor_declared": {"$ref": "#/$defs/invariant_entry"},
+        "control_data_plane_separation": {"$ref": "#/$defs/invariant_entry"},
+        "tail_audit_allocated": {"$ref": "#/$defs/invariant_entry"},
+        "emergent_discretization_logged": {"$ref": "#/$defs/invariant_entry"},
+        "composition_superposition_declared": {"$ref": "#/$defs/invariant_entry"},
+        "anti_satisficing_continuation": {"$ref": "#/$defs/invariant_entry"},
+        "epistemic_non_collapse": {"$ref": "#/$defs/invariant_entry"}
+      }
+    },
+    "tier2_binding_ref": {"type": "string"},
+    "non_claims": {"type": "array", "items": {"type": "string"}}
+  },
+  "$defs": {
+    "invariant_entry": {
+      "type": "object",
+      "required": ["applies", "status"],
+      "additionalProperties": true,
+      "properties": {
+        "applies": {"type": "boolean"},
+        "status": {
+          "type": "string",
+          "enum": [
+            "structurally_satisfied",
+            "declared_not_yet_checked",
+            "phase_example_stub",
+            "phase4_example_stub",
+            "enforced_by_claim_ledger",
+            "checker_verified",
+            "not_applicable"
+          ]
+        },
+        "failure_record_ref": {"type": "string"}
+      }
+    }
+  }
+}

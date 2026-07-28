@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "schemas/lawful-learning/forbidden-circuits.v1.json",
+  "title": "LawfulLearningForbiddenCircuitDeclaration",
+  "description": "A forbidden circuit declaration. Every forbidden circuit must specify its enforcement mode.",
+  "type": "object",
+  "required": [
+    "forbidden_circuit_id",
+    "circuit_pattern",
+    "prohibition_basis",
+    "enforcement_mode",
+    "detection_method"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "forbidden_circuit_id": {"type": "string", "pattern": "^forbidden\\.[a-z0-9_.-]+$"},
+    "circuit_pattern": {"type": "string", "minLength": 1},
+    "prohibition_basis": {"type": "string", "minLength": 1},
+    "enforcement_mode": {"type": "string", "enum": ["detection_only", "training_time_prevention", "post_training_audit", "deployment_gate"]},
+    "detection_method": {"type": "string", "minLength": 1},
+    "severity": {"type": "string", "enum": ["S1", "S2", "S3"]},
+    "evidence_refs": {"type": "array", "items": {"type": "string"}},
+    "escalation_path": {"type": "string"},
+    "non_claims": {"type": "array", "items": {"type": "string"}}
+  }
+}
