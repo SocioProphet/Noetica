@@ -1,0 +1,7 @@
+[noetica]
+name=Noetica
+baseurl=https://storage.googleapis.com/socioprophet-noetica-apt/rpm
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://storage.googleapis.com/socioprophet-noetica-apt/noetica-archive-keyring.asc

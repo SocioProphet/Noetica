@@ -34,7 +34,7 @@ Legend: ✅ live · 🟡 scaffold ready, needs a human/one-time step · 🔴 nee
 | Channel | State | Steps / blocker |
 |---|---|---|
 | Direct `.deb` / `.rpm` | ✅ live | Built + attached by `release.yml`. |
-| **apt/dnf repo** (`apt install noetica`) | 🔴 **top priority** | We already build the deb/rpm — the missing piece is *hosting them as a repo* (just static files over HTTP). **Recommended host: our own sovereign bucket behind `apt.socioprophet.ai`** (MinIO — matches the zot/MinIO registry work — or a GCS bucket), which is on-thesis, owned, and has no size cap. Alternatives: GitHub Pages (fastest, but Microsoft infra we're migrating off, and a 1 GB site cap) or Cloudsmith (best UX, but a SaaS dependency). Zero sandbox rework, no store approval either way. **Needs:** a GPG signing key (repo secret) + the chosen host/DNS. |
+| **apt/dnf repo** (`apt install noetica`) | 🟡 built, needs first run | Signed apt+dnf repo, published by `.github/workflows/linux-repo.yml` to the sovereign GCS bucket `gs://socioprophet-noetica-apt` (served at `https://storage.googleapis.com/socioprophet-noetica-apt/`). Keyless GCP auth via Workload Identity (publisher SA `noetica-apt-publisher`, bucket-scoped, no SA key); signed with the repo GPG key (`GPG_PRIVATE_KEY` secret, fpr `4913B0E7…A87DAA`). Stable releases only. **Remaining:** run it once (`gh workflow run linux-repo.yml -f tag=v0.4.24`) to populate, then optionally front it with `apt.socioprophet.ai` via a load balancer for a branded HTTPS URL. |
 | **AUR** (`noetica-bin`) | 🟡 ready | `packaging/linux/aur/PKGBUILD` installs from the release `.deb`. Fill the real `sha256sums` (`updpkgsums`), `makepkg --printsrcinfo > .SRCINFO`, then `git push` to `ssh://aur@aur.archlinux.org/noetica-bin.git`. **Needs:** an AUR account + SSH key. |
 
 ## Linux — app stores (harder; sandbox + approval)
@@ -62,3 +62,25 @@ Legend: ✅ live · 🟡 scaffold ready, needs a human/one-time step · 🔴 nee
 - [ ] AUR account + SSH key
 - [ ] `snapcraft register noetica` + classic-confinement review request
 - [ ] `socioprophet.ai` Flathub domain-verification token + a hosted screenshot
+
+---
+
+## Install on Linux (once `linux-repo.yml` has run)
+
+**Debian / Ubuntu (apt):**
+```sh
+curl -fsSL https://storage.googleapis.com/socioprophet-noetica-apt/noetica-archive-keyring.asc \
+  | sudo gpg --dearmor -o /usr/share/keyrings/noetica-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/noetica-archive-keyring.gpg] https://storage.googleapis.com/socioprophet-noetica-apt/deb stable main" \
+  | sudo tee /etc/apt/sources.list.d/noetica.list
+sudo apt update && sudo apt install noetica
+```
+
+**Fedora / RHEL (dnf):**
+```sh
+sudo curl -fsSL https://storage.googleapis.com/socioprophet-noetica-apt/noetica.repo \
+  -o /etc/yum.repos.d/noetica.repo
+sudo dnf install noetica
+```
+
+The repo is signed; the key fingerprint is `4913 B0E7 182A 8B62 F3B4  A11A 0166 C335 A3A8 7DAA`.
