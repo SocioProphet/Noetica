@@ -34,7 +34,7 @@ Legend: ✅ live · 🟡 scaffold ready, needs a human/one-time step · 🔴 nee
 | Channel | State | Steps / blocker |
 |---|---|---|
 | Direct `.deb` / `.rpm` | ✅ live | Built + attached by `release.yml`. |
-| **apt/dnf repo** (`apt install noetica`) | 🟡 built, needs first run | Signed apt+dnf repo, published by `.github/workflows/linux-repo.yml` to the sovereign GCS bucket `gs://socioprophet-noetica-apt` (served at `https://storage.googleapis.com/socioprophet-noetica-apt/`). Keyless GCP auth via Workload Identity (publisher SA `noetica-apt-publisher`, bucket-scoped, no SA key); signed with the repo GPG key (`GPG_PRIVATE_KEY` secret, fpr `4913B0E7…A87DAA`). Stable releases only. **Remaining:** run it once (`gh workflow run linux-repo.yml -f tag=v0.4.24`) to populate, then optionally front it with `apt.socioprophet.ai` via a load balancer for a branded HTTPS URL. |
+| **apt/dnf repo** (`apt install noetica`) | 🟡 built, first publish blocked by org policy | **Fully sovereign** (no GitHub): signed apt+dnf repo published by **Cloud Build** (`packaging/linux/repo/cloudbuild.yaml`) to `gs://socioprophet-noetica-apt` (served at `https://storage.googleapis.com/socioprophet-noetica-apt/`). Runs as the bucket-scoped `noetica-apt-publisher` SA; signs with the key in **Secret Manager** (`noetica-repo-gpg-private`, fpr `F2A5E76E…652CEAD9`). **BLOCKER:** submitting the build from a laptop is denied on `serviceusage.services.use` even with the role granted → an org control (VPC-SC perimeter or IAM Deny) on this project. **Run it from Cloud Shell / inside the perimeter instead:** `gcloud builds submit --no-source --config=packaging/linux/repo/cloudbuild.yaml --service-account=projects/socioprophet-platform/serviceAccounts/noetica-apt-publisher@socioprophet-platform.iam.gserviceaccount.com --substitutions=_TAG=v0.4.24,_VER=0.4.24`. Later: front with `apt.socioprophet.ai` via a LB for branded HTTPS. |
 | **AUR** (`noetica-bin`) | 🟡 ready | `packaging/linux/aur/PKGBUILD` installs from the release `.deb`. Fill the real `sha256sums` (`updpkgsums`), `makepkg --printsrcinfo > .SRCINFO`, then `git push` to `ssh://aur@aur.archlinux.org/noetica-bin.git`. **Needs:** an AUR account + SSH key. |
 
 ## Linux — app stores (harder; sandbox + approval)
@@ -83,4 +83,4 @@ sudo curl -fsSL https://storage.googleapis.com/socioprophet-noetica-apt/noetica.
 sudo dnf install noetica
 ```
 
-The repo is signed; the key fingerprint is `4913 B0E7 182A 8B62 F3B4  A11A 0166 C335 A3A8 7DAA`.
+The repo is signed; the key fingerprint is `F2A5 E76E 99D4 7731 2A8C  6293 ACDA E77B 652C EAD9`.
