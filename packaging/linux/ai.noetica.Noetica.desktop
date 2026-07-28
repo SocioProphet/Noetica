@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Noetica
+Comment=Governed, sovereign AI workstation
+Exec=noetica %U
+Icon=ai.noetica.Noetica
+Terminal=false
+Type=Application
+Categories=Office;Utility;Science;
+Keywords=AI;LLM;local;sovereign;knowledge graph;governance;
+StartupWMClass=Noetica

@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metainfo for the Linux app stores (Flathub, Snap Store, GNOME Software).
+  App ID is ai.noetica.Noetica — NOT the Tauri bundle id ai.noetica.app, because Flathub
+  forbids IDs ending in a generic ".app"/".desktop" component. The reverse-DNS root
+  (ai.noetica) must be a domain we control (noetica.ai) and be verified for Flathub via
+  https://noetica.ai/.well-known/org.flathub.VerifiedApps.txt.
+
+  TODO before Flathub submission:
+    - host at least one real screenshot at the URLs below (Flathub requires it)
+    - keep the <releases> list current (newest first)
+-->
+<component type="desktop-application">
+  <id>ai.noetica.Noetica</id>
+  <name>Noetica</name>
+  <summary>Governed, sovereign AI workstation</summary>
+
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+
+  <developer id="ai.noetica">
+    <name>SocioProphet, Inc.</name>
+  </developer>
+
+  <description>
+    <p>
+      Noetica is a local-first desktop workstation for governed AI. It runs models on your
+      own machine, grounds answers in your own knowledge graph, cites its sources, and
+      returns "insufficient evidence" instead of guessing — so an answer can be defended,
+      not just produced.
+    </p>
+    <p>Highlights:</p>
+    <ul>
+      <li>On-device inference — your data never has to leave the machine.</li>
+      <li>Verified compute: calculations are checked, not merely reasoned.</li>
+      <li>Provenance on every answer — a sealed, replay-exact receipt you can audit.</li>
+      <li>A sovereign knowledge graph that compounds as you work.</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">ai.noetica.Noetica.desktop</launchable>
+
+  <url type="homepage">https://noetica.ai</url>
+  <url type="bugtracker">https://github.com/SocioProphet/Noetica/issues</url>
+  <url type="vcs-browser">https://github.com/SocioProphet/Noetica</url>
+
+  <categories>
+    <category>Office</category>
+    <category>Utility</category>
+    <category>Science</category>
+  </categories>
+
+  <keywords>
+    <keyword>AI</keyword>
+    <keyword>LLM</keyword>
+    <keyword>local</keyword>
+    <keyword>sovereign</keyword>
+    <keyword>knowledge graph</keyword>
+    <keyword>governance</keyword>
+  </keywords>
+
+  <!-- Flathub requires >=1 screenshot with a reachable URL. Replace with real hosted assets. -->
+  <screenshots>
+    <screenshot type="default">
+      <caption>The Noetica workstation</caption>
+      <image>https://noetica.ai/screenshots/workstation.png</image>
+    </screenshot>
+  </screenshots>
+
+  <content_rating type="oars-1.1"/>
+
+  <provides>
+    <binary>noetica</binary>
+  </provides>
+
+  <releases>
+    <release version="0.4.24" date="2026-07-28">
+      <description>
+        <p>Verified-compute authority, Windows sidecar fixes, and field-report batches.</p>
+      </description>
+    </release>
+  </releases>
+</component>
