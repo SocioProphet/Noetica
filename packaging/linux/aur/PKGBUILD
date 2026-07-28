@@ -1,4 +1,4 @@
-# Maintainer: SocioProphet <dev@noetica.ai>
+# Maintainer: SocioProphet <dev@socioprophet.ai>
 # AUR binary package: installs Noetica from the official release .deb (no local Tauri build).
 # Publish by pushing this + .SRCINFO to ssh://aur@aur.archlinux.org/noetica-bin.git
 # (needs an AUR account with an SSH key). Regenerate .SRCINFO with `makepkg --printsrcinfo`.
@@ -7,7 +7,7 @@ pkgver=0.4.24
 pkgrel=1
 pkgdesc="Governed, sovereign AI workstation — local-first, cites its sources, abstains instead of guessing"
 arch=('x86_64')
-url="https://noetica.ai"
+url="https://socioprophet.ai"
 license=('MIT')
 depends=('webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator' 'librsvg')
 provides=('noetica')

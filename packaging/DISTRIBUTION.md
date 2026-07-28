@@ -5,8 +5,9 @@ to publish, and — importantly — **which steps need a human account/secret th
 
 App identity:
 - **Tauri bundle id:** `ai.noetica.app` (used inside the app; do not change lightly).
-- **Store app id (Flathub/AppStream/Snap):** `ai.noetica.Noetica` — Flathub forbids IDs ending
-  in `.app`, so the store id differs from the bundle id on purpose.
+- **Store app id (Flathub/AppStream/Snap):** `ai.socioprophet.Noetica` — the reverse-DNS of
+  `socioprophet.ai`, a domain we control. (We do NOT own `noetica.ai`, and Flathub forbids
+  IDs ending in `.app`, so the store id must differ from the bundle id `ai.noetica.app`.)
 - **License:** MIT (`/LICENSE`), declared in every manifest.
 
 Legend: ✅ live · 🟡 scaffold ready, needs a human/one-time step · 🔴 needs real build work.
@@ -33,7 +34,7 @@ Legend: ✅ live · 🟡 scaffold ready, needs a human/one-time step · 🔴 nee
 | Channel | State | Steps / blocker |
 |---|---|---|
 | Direct `.deb` / `.rpm` | ✅ live | Built + attached by `release.yml`. |
-| **apt/dnf repo** (`apt install noetica`) | 🔴 **top priority** | We already build the deb/rpm — the missing piece is *hosting them as a repo*. Recommended: a CI job that publishes a signed apt + dnf repo to GitHub Pages (or Cloudsmith free OSS tier) from each release's packages. Zero sandbox rework, no store approval. **Needs:** a GPG signing key (repo secret) and a `gh-pages`/hosting target. |
+| **apt/dnf repo** (`apt install noetica`) | 🔴 **top priority** | We already build the deb/rpm — the missing piece is *hosting them as a repo* (just static files over HTTP). **Recommended host: our own sovereign bucket behind `apt.socioprophet.ai`** (MinIO — matches the zot/MinIO registry work — or a GCS bucket), which is on-thesis, owned, and has no size cap. Alternatives: GitHub Pages (fastest, but Microsoft infra we're migrating off, and a 1 GB site cap) or Cloudsmith (best UX, but a SaaS dependency). Zero sandbox rework, no store approval either way. **Needs:** a GPG signing key (repo secret) + the chosen host/DNS. |
 | **AUR** (`noetica-bin`) | 🟡 ready | `packaging/linux/aur/PKGBUILD` installs from the release `.deb`. Fill the real `sha256sums` (`updpkgsums`), `makepkg --printsrcinfo > .SRCINFO`, then `git push` to `ssh://aur@aur.archlinux.org/noetica-bin.git`. **Needs:** an AUR account + SSH key. |
 
 ## Linux — app stores (harder; sandbox + approval)
@@ -41,7 +42,7 @@ Legend: ✅ live · 🟡 scaffold ready, needs a human/one-time step · 🔴 nee
 | Channel | State | Steps / blocker |
 |---|---|---|
 | **Snap Store** | 🟡 scaffold | `packaging/linux/snap/snapcraft.yaml` rewritten as the **desktop app** on `classic` confinement (strict can't run the downloaded model runtime / GPU). **Needs:** (1) `snapcraft register noetica` (name is globally unique — grab it), (2) a **manual classic-confinement review** request on forum.snapcraft.io, (3) a local `snapcraft --use-lxd` build to validate, (4) `snapcraft upload`. Not yet build-tested. |
-| **Flathub** | 🔴 real work | `metainfo` + `.desktop` are Flathub-compliant now (`ai.noetica.Noetica`). Remaining: (a) **verify `noetica.ai`** via `https://noetica.ai/.well-known/org.flathub.VerifiedApps.txt`; (b) rework the manifest so the **model-runtime-download + sidecar exec** works inside the Flatpak sandbox (bundle the runtime or ship as an extension) — this is the actual project; (c) host ≥1 real **screenshot**; (d) read the **Generative-AI policy** (Noetica is an AI app — real rejection risk); (e) PR to `flathub/flathub` (`new-pr` branch). |
+| **Flathub** | 🔴 real work | `metainfo` + `.desktop` are Flathub-compliant now (`ai.socioprophet.Noetica`). Remaining: (a) **verify `socioprophet.ai`** via `https://socioprophet.ai/.well-known/org.flathub.VerifiedApps.txt`; (b) rework the manifest so the **model-runtime-download + sidecar exec** works inside the Flatpak sandbox (bundle the runtime or ship as an extension) — this is the actual project; (c) host ≥1 real **screenshot**; (d) read the **Generative-AI policy** (Noetica is an AI app — real rejection risk); (e) PR to `flathub/flathub` (`new-pr` branch). |
 
 ---
 
@@ -60,4 +61,4 @@ Legend: ✅ live · 🟡 scaffold ready, needs a human/one-time step · 🔴 nee
 - [ ] GPG key for the apt/dnf repo + a hosting target (GH Pages / Cloudsmith)
 - [ ] AUR account + SSH key
 - [ ] `snapcraft register noetica` + classic-confinement review request
-- [ ] `noetica.ai` Flathub domain-verification token + a hosted screenshot
+- [ ] `socioprophet.ai` Flathub domain-verification token + a hosted screenshot

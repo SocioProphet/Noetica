@@ -21,7 +21,7 @@ description: |
   produced. On-device inference, verified compute, and a sealed provenance receipt on every
   answer.
 license: MIT
-website: https://noetica.ai
+website: https://socioprophet.ai
 source-code: https://github.com/SocioProphet/Noetica
 grade: stable
 confinement: classic
@@ -29,8 +29,8 @@ confinement: classic
 apps:
   noetica:
     command: bin/noetica
-    desktop: usr/share/applications/ai.noetica.Noetica.desktop
-    common-id: ai.noetica.Noetica
+    desktop: usr/share/applications/ai.socioprophet.Noetica.desktop
+    common-id: ai.socioprophet.Noetica
 
 parts:
   noetica:

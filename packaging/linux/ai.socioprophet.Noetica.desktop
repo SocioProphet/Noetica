@@ -2,7 +2,7 @@
 Name=Noetica
 Comment=Governed, sovereign AI workstation
 Exec=noetica %U
-Icon=ai.noetica.Noetica
+Icon=ai.socioprophet.Noetica
 Terminal=false
 Type=Application
 Categories=Office;Utility;Science;

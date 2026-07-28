@@ -1,24 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   AppStream metainfo for the Linux app stores (Flathub, Snap Store, GNOME Software).
-  App ID is ai.noetica.Noetica — NOT the Tauri bundle id ai.noetica.app, because Flathub
-  forbids IDs ending in a generic ".app"/".desktop" component. The reverse-DNS root
-  (ai.noetica) must be a domain we control (noetica.ai) and be verified for Flathub via
-  https://noetica.ai/.well-known/org.flathub.VerifiedApps.txt.
+  App ID is ai.socioprophet.Noetica — the reverse-DNS of socioprophet.ai, a domain we
+  control (we do NOT own noetica.ai, so the Tauri bundle id ai.noetica.app cannot be the
+  store id). Flathub verifies ownership via
+  https://socioprophet.ai/.well-known/org.flathub.VerifiedApps.txt.
 
   TODO before Flathub submission:
-    - host at least one real screenshot at the URLs below (Flathub requires it)
-    - keep the <releases> list current (newest first)
+    - host at least one real screenshot at the URL below (Flathub requires it)
+    - confirm the public web home (socioprophet.ai vs noetica.socioprophet.ai) and update <url>
 -->
 <component type="desktop-application">
-  <id>ai.noetica.Noetica</id>
+  <id>ai.socioprophet.Noetica</id>
   <name>Noetica</name>
   <summary>Governed, sovereign AI workstation</summary>
 
   <metadata_license>MIT</metadata_license>
   <project_license>MIT</project_license>
 
-  <developer id="ai.noetica">
+  <developer id="ai.socioprophet">
     <name>SocioProphet, Inc.</name>
   </developer>
 
@@ -38,9 +38,9 @@
     </ul>
   </description>
 
-  <launchable type="desktop-id">ai.noetica.Noetica.desktop</launchable>
+  <launchable type="desktop-id">ai.socioprophet.Noetica.desktop</launchable>
 
-  <url type="homepage">https://noetica.ai</url>
+  <url type="homepage">https://socioprophet.ai</url>
   <url type="bugtracker">https://github.com/SocioProphet/Noetica/issues</url>
   <url type="vcs-browser">https://github.com/SocioProphet/Noetica</url>
 
@@ -59,11 +59,11 @@
     <keyword>governance</keyword>
   </keywords>
 
-  <!-- Flathub requires >=1 screenshot with a reachable URL. Replace with real hosted assets. -->
+  <!-- Flathub requires >=1 screenshot with a reachable URL. Replace with a real hosted asset. -->
   <screenshots>
     <screenshot type="default">
       <caption>The Noetica workstation</caption>
-      <image>https://noetica.ai/screenshots/workstation.png</image>
+      <image>https://socioprophet.ai/screenshots/noetica-workstation.png</image>
     </screenshot>
   </screenshots>
 
