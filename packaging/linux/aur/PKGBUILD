@@ -14,9 +14,9 @@ provides=('noetica')
 conflicts=('noetica')
 options=('!strip')
 source=("https://github.com/SocioProphet/Noetica/releases/download/v${pkgver}/Noetica_${pkgver}_amd64.deb")
-# TODO: replace SKIP with the real sha256 of the release .deb
-#   updpkgsums   (or)   sha256sum Noetica_${pkgver}_amd64.deb
-sha256sums=('SKIP')
+# sha256 of the v0.4.24 release deb (verified against the published artifact).
+# On version bumps: updpkgsums  (or)  sha256sum Noetica_${pkgver}_amd64.deb
+sha256sums=('3971e337e623b540fdc4073f8f9cd4080e82473e3730f042c104cc51b51bcb25')
 
 package() {
   # Unpack the .deb payload into the package root.

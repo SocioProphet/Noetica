@@ -1,0 +1,75 @@
+# Flatpak manifest for Noetica — Flathub submission (app id ai.socioprophet.Noetica).
+#
+# Packaging model: `extra-data` over the released .deb (Flathub-accepted for prebuilt
+# binaries). At INSTALL time flatpak downloads the deb from our GitHub release, and
+# apply_extra unpacks it into the app prefix — so the Flathub build farm never has to
+# compile the Tauri/Rust/Node stack offline (vendoring ~3GB of deps), and the artifact
+# users run is byte-identical to the one on every other channel.
+#
+# Sandbox notes (why each finish-arg exists):
+#   --share=network            chat/graph services on localhost + model downloads
+#   --device=dri               GPU for the webview + local inference
+#   --socket=wayland/x11       the Tauri (WebKitGTK) window
+#   --socket=pulseaudio        voice input/read-aloud
+#   --env=WEBKIT_DISABLE_...   WebKitGTK DMA-BUF renderer crashes under the flatpak
+#                              sandbox on NVIDIA — standard Tauri-flatpak workaround
+# Model runtime: agent-machine provisions ~/.noetica at first boot; under flatpak HOME
+# is the app's private data dir, so downloads + exec of the managed runtime stay inside
+# the sandbox (no host filesystem access needed).
+#
+# UPDATE PER RELEASE: bump the two url/sha256/size blocks below (helper:
+# packaging/linux/flatpak/update-manifest.sh).
+app-id: ai.socioprophet.Noetica
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: noetica
+
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=dri
+  - --talk-name=org.kde.StatusNotifierWatcher   # tray icon
+  - --env=WEBKIT_DISABLE_DMABUF_RENDERER=1
+
+modules:
+  - name: noetica
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 apply_extra.sh /app/bin/apply_extra
+      - install -Dm755 noetica-run.sh /app/bin/noetica
+      - install -Dm644 ai.socioprophet.Noetica.desktop /app/share/applications/ai.socioprophet.Noetica.desktop
+      - install -Dm644 ai.socioprophet.Noetica.metainfo.xml /app/share/metainfo/ai.socioprophet.Noetica.metainfo.xml
+      - install -Dm644 icon-128.png /app/share/icons/hicolor/128x128/apps/ai.socioprophet.Noetica.png
+      - install -Dm644 icon-256.png /app/share/icons/hicolor/256x256/apps/ai.socioprophet.Noetica.png
+    sources:
+      # ── the released deb, fetched at install time (extra-data) ──
+      - type: extra-data
+        filename: noetica.deb
+        only-arches: [x86_64]
+        url: https://github.com/SocioProphet/Noetica/releases/download/v0.4.24/Noetica_0.4.24_amd64.deb
+        sha256: 3971e337e623b540fdc4073f8f9cd4080e82473e3730f042c104cc51b51bcb25
+        size: 74433932
+      - type: script
+        dest-filename: apply_extra.sh
+        commands:
+          - ar x noetica.deb data.tar.gz
+          - tar -xzf data.tar.gz
+          - rm -f noetica.deb data.tar.gz
+      - type: script
+        dest-filename: noetica-run.sh
+        commands:
+          - exec /app/extra/usr/bin/noetica "$@"
+      - type: file
+        path: ../ai.socioprophet.Noetica.desktop
+      - type: file
+        path: ../ai.socioprophet.Noetica.metainfo.xml
+      - type: file
+        path: ../../../src-tauri/icons/128x128.png
+        dest-filename: icon-128.png
+      - type: file
+        path: ../../../src-tauri/icons/128x128@2x.png
+        dest-filename: icon-256.png
