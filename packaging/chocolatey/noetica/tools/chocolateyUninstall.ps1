@@ -1,24 +1,20 @@
 $ErrorActionPreference = 'Stop'
 
-# Stop and remove service
-$svc = Get-Service -Name 'Noetica' -ErrorAction SilentlyContinue
-if ($svc) {
-  Stop-Service -Name 'Noetica' -Force -ErrorAction SilentlyContinue
-  $nssm = Get-Command nssm -ErrorAction SilentlyContinue
-  if ($nssm) {
-    & nssm remove Noetica confirm 2>&1 | Out-Null
-  } else {
-    sc.exe delete Noetica
+# Silently run the NSIS uninstaller registered by the desktop installer.
+[array]$key = Get-UninstallRegistryKey -SoftwareName 'Noetica*'
+
+if ($key.Count -eq 1) {
+  $key | ForEach-Object {
+    Uninstall-ChocolateyPackage -PackageName 'noetica' `
+      -FileType 'exe' `
+      -SilentArgs '/S' `
+      -ValidExitCodes @(0) `
+      -File "$($_.UninstallString.Trim('"'))"
   }
+} elseif ($key.Count -eq 0) {
+  Write-Warning "Noetica not found in the registry — nothing to uninstall."
+} else {
+  Write-Warning "Multiple 'Noetica*' entries found — uninstall manually from Apps & Features."
 }
 
-# Remove install dir
-$installDir = "$env:ProgramFiles\Noetica"
-if (Test-Path $installDir) {
-  Remove-Item -Recurse -Force $installDir
-}
-
-# Remove SOURCEOS_NOETICA_URL env var
-[Environment]::SetEnvironmentVariable('SOURCEOS_NOETICA_URL', $null, 'Machine')
-
-Write-Host "Noetica uninstalled. Config preserved at $env:APPDATA\noetica"
+Write-Host "User data is preserved (models/config under `$env:USERPROFILE\.noetica)."
