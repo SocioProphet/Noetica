@@ -2,6 +2,13 @@
   "name": "noetica",
   "version": "0.4.24",
   "private": true,
+  "description": "Governed, sovereign AI workstation — a local-first desktop shell that runs models on your machine, cites its sources, and abstains instead of guessing.",
+  "license": "MIT",
+  "homepage": "https://socioprophet.ai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SocioProphet/Noetica.git"
+  },
   "bin": {
     "noetica": "cli/noetica.mjs"
   },

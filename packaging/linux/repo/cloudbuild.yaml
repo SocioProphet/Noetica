@@ -1,0 +1,88 @@
+# Sovereign publisher for the Noetica apt/dnf repo — runs on Google Cloud Build (NOT GitHub
+# Actions). Signs with the key in Secret Manager (noetica-repo-gpg-private) and uploads the
+# signed repo to gs://socioprophet-noetica-apt. Self-contained (--no-source): it derives the
+# public keyring from the private key and writes the dnf .repo inline, so no repo checkout is
+# needed. The only GitHub touch is fetching the already-built .deb/.rpm release assets — that
+# artifact layer moves off GitHub when the Tauri build itself moves to sovereign runners.
+#
+# Run:
+#   gcloud builds submit --no-source \
+#     --config=packaging/linux/repo/cloudbuild.yaml \
+#     --service-account=projects/socioprophet-platform/serviceAccounts/noetica-apt-publisher@socioprophet-platform.iam.gserviceaccount.com \
+#     --substitutions=_TAG=v0.4.24,_VER=0.4.24
+substitutions:
+  _BUCKET: socioprophet-noetica-apt
+  _FPR: F2A5E76E99D477312A8C6293ACDAE77B652CEAD9
+  _TAG: ""        # release tag, e.g. v0.4.24
+  _VER: ""        # version, e.g. 0.4.24
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/socioprophet-platform/secrets/noetica-repo-gpg-private/versions/latest
+      env: GPG_KEY
+
+options:
+  logging: CLOUD_LOGGING_ONLY   # required when running as a custom (non-default) service account
+
+steps:
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    secretEnv: ['GPG_KEY']
+    env: ['GNUPGHOME=/workspace/gpg']
+    args:
+      - -ceu
+      - |
+        apt-get update -qq && apt-get install -y -qq apt-utils createrepo-c gnupg curl ca-certificates >/dev/null
+        mkdir -p /workspace/gpg && chmod 700 /workspace/gpg
+        printf '%s' "$$GPG_KEY" | gpg --batch --import
+        printf '%s:6:\n' "${_FPR}" | gpg --import-ownertrust
+
+        # fetch the already-built packages from the public GitHub release (artifact layer)
+        mkdir -p in
+        curl -fSL -o "in/noetica_${_VER}_amd64.deb"   "https://github.com/SocioProphet/Noetica/releases/download/${_TAG}/Noetica_${_VER}_amd64.deb"
+        curl -fSL -o "in/noetica-${_VER}.x86_64.rpm"  "https://github.com/SocioProphet/Noetica/releases/download/${_TAG}/Noetica-${_VER}-1.x86_64.rpm"
+
+        # preserve prior versions: sync the live bucket down first
+        mkdir -p repo/deb/pool/main repo/deb/dists/stable/main/binary-amd64 repo/rpm
+        gcloud storage rsync -r "gs://${_BUCKET}" repo || true
+        cp -f in/*.deb repo/deb/pool/main/
+        cp -f in/*.rpm repo/rpm/
+
+        # apt metadata + detached/inline signatures
+        cd repo/deb
+        apt-ftparchive packages pool > dists/stable/main/binary-amd64/Packages
+        gzip -kf dists/stable/main/binary-amd64/Packages
+        apt-ftparchive \
+          -o APT::FTPArchive::Release::Origin=Noetica \
+          -o APT::FTPArchive::Release::Label=Noetica \
+          -o APT::FTPArchive::Release::Suite=stable \
+          -o APT::FTPArchive::Release::Codename=stable \
+          -o APT::FTPArchive::Release::Architectures=amd64 \
+          -o APT::FTPArchive::Release::Components=main \
+          -o APT::FTPArchive::Release::Description="Noetica apt repository" \
+          release dists/stable > dists/stable/Release
+        gpg --batch --yes --default-key "${_FPR}" -abs -o dists/stable/Release.gpg dists/stable/Release
+        gpg --batch --yes --default-key "${_FPR}" --clearsign -o dists/stable/InRelease dists/stable/Release
+        cd /workspace
+
+        # dnf metadata + signature
+        cd repo/rpm
+        createrepo_c --update .
+        rm -f repodata/repomd.xml.asc
+        gpg --batch --yes --default-key "${_FPR}" --detach-sign --armor repodata/repomd.xml
+        cd /workspace
+
+        # publish the public key + a dnf .repo at the bucket root (derived, not checked out)
+        gpg --armor --export "${_FPR}" > repo/noetica-archive-keyring.asc
+        {
+          echo "[noetica]"
+          echo "name=Noetica"
+          echo "baseurl=https://storage.googleapis.com/socioprophet-noetica-apt/rpm"
+          echo "enabled=1"
+          echo "gpgcheck=1"
+          echo "repo_gpgcheck=1"
+          echo "gpgkey=https://storage.googleapis.com/socioprophet-noetica-apt/noetica-archive-keyring.asc"
+        } > repo/noetica.repo
+
+        gcloud storage rsync -r repo "gs://${_BUCKET}" --cache-control="public,max-age=300"
+        echo "Published ${_TAG} to https://storage.googleapis.com/${_BUCKET}/"

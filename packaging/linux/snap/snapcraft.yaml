@@ -1,79 +1,49 @@
+# Snap for the Noetica DESKTOP app (not the old headless agent-machine daemon).
+#
+# Confinement is `classic` deliberately: Noetica bundles sidecars (agent-machine, ollama,
+# noetica-embed, noetica-operator) and provisions a model runtime into ~/.noetica at first
+# boot — downloading and exec'ing binaries at runtime, plus GPU access, is exactly what
+# strict confinement blocks. Classic sidesteps that, at the cost of a one-time MANUAL review
+# by the Snap Store team (request in https://forum.snapcraft.io → "store-requests") before
+# `snapcraft upload` on a classic snap is accepted.
+#
+# NOT YET BUILD-TESTED — validate locally with `snapcraft --use-lxd` before the first upload.
+# The simplest build reuses the .deb the release workflow already produces (see the part).
 name: noetica
+title: Noetica
 base: core22
-version: '0.4.11'
-summary: Self-hosted AI dialogue management backend
+version: '0.4.24'
+summary: Governed, sovereign AI workstation
 description: |
-  Noetica's agent-machine is a 22-intent AI dialogue management service for
-  local, sovereign AI inference. Listens on NOETICA_AM_PORT (default 8080) and
-  requires a running Ollama instance (OLLAMA_HOST, default
-  http://127.0.0.1:11434). Integrates with TurtleTerm co-pilot as a local
-  backend.
+  Noetica is a local-first desktop workstation for governed AI. It runs models on your
+  own machine, grounds answers in your own knowledge graph, cites its sources, and returns
+  "insufficient evidence" instead of guessing — so an answer can be defended, not just
+  produced. On-device inference, verified compute, and a sealed provenance receipt on every
+  answer.
+license: MIT
+website: https://socioprophet.ai
+source-code: https://github.com/SocioProphet/Noetica
 grade: stable
-confinement: strict
+confinement: classic
 
 apps:
   noetica:
-    command: bin/noetica-launch
-    daemon: simple
-    plugs:
-      - network
-      - network-bind
-    environment:
-      NOETICA_AM_PORT: "8080"
-      OLLAMA_HOST: "http://127.0.0.1:11434"
-      NODE_ENV: production
+    command: bin/noetica
+    desktop: usr/share/applications/ai.socioprophet.Noetica.desktop
+    common-id: ai.socioprophet.Noetica
 
 parts:
   noetica:
-    plugin: nil
-    source: .
-    build-packages:
-      - nodejs
-      - npm
+    # Reuse the already-built Linux bundle rather than recompiling the whole Tauri app here:
+    # stage the release .deb (the CI job drops it beside this file), which already lays down
+    # /usr/bin/noetica + the bundled sidecars + the .desktop + icons.
+    plugin: dump
+    source: noetica_0.4.24_amd64.deb
+    source-type: deb
+    organize:
+      usr/bin/noetica: bin/noetica
     stage-packages:
-      - nodejs
-    override-build: |
-      set -e
-      mkdir -p $SNAPCRAFT_PART_INSTALL/lib/noetica
-      mkdir -p $SNAPCRAFT_PART_INSTALL/bin
-      RUNTIME_MODE="stub"
-
-      # Prefer the self-contained Bun binary (no Node runtime dependency).
-      if command -v bun >/dev/null 2>&1; then
-        npm install --no-audit --no-fund || true
-        if npm run agent-machine:build:binary:linux \
-            && [ -f src-tauri/binaries/agent-machine-x86_64-unknown-linux-gnu ]; then
-          install -Dm755 src-tauri/binaries/agent-machine-x86_64-unknown-linux-gnu \
-            $SNAPCRAFT_PART_INSTALL/lib/noetica/agent-machine
-          RUNTIME_MODE="binary"
-        fi
-      fi
-
-      # Fall back to the Node dist build.
-      if [ "$RUNTIME_MODE" = "stub" ]; then
-        ( cd agent-machine && npm install --no-audit --no-fund && npm run build ) || true
-        if [ -f agent-machine/dist/server.js ]; then
-          cp -r agent-machine/dist $SNAPCRAFT_PART_INSTALL/lib/noetica/dist
-          [ -d agent-machine/node_modules ] && \
-            cp -r agent-machine/node_modules $SNAPCRAFT_PART_INSTALL/lib/noetica/node_modules
-          RUNTIME_MODE="node"
-        fi
-      fi
-
-      echo "Noetica snap RUNTIME_MODE=$RUNTIME_MODE"
-
-      # Launcher mirrors the .deb launcher but uses $SNAP paths and staged node.
-      cat > $SNAPCRAFT_PART_INSTALL/bin/noetica-launch << 'LAUNCH'
-      #!/bin/sh
-      export NOETICA_AM_PORT="${NOETICA_AM_PORT:-8080}"
-      export OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
-      if [ -x "$SNAP/lib/noetica/agent-machine" ]; then
-        exec "$SNAP/lib/noetica/agent-machine"
-      elif [ -f "$SNAP/lib/noetica/dist/server.js" ]; then
-        exec "$SNAP/usr/bin/node" "$SNAP/lib/noetica/dist/server.js"
-      else
-        echo "Noetica agent-machine not built." >&2
-        exit 1
-      fi
-      LAUNCH
-      chmod 755 $SNAPCRAFT_PART_INSTALL/bin/noetica-launch
+      - libwebkit2gtk-4.1-0
+      - libgtk-3-0
+      - libayatana-appindicator3-1
+      - librsvg2-2
