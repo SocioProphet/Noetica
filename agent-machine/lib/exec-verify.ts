@@ -92,6 +92,7 @@ export const OPERATOR_API = `You have a verified Python library 'math_operators'
   definite_integral(expr_str, var, a, b)        # integral of expr d(var) from a to b; bounds may be 'oo'/'-oo'
   derivative_at(expr_str, var, x0)              # d/d(var) expr_str evaluated at var=x0
   limit_at(expr_str, var, point)                # limit of expr_str as var -> point; point may be 'oo'/'-oo'
+  count_sign_changes(expr_str, var, a, b)       # # times expr crosses zero on (a,b) — 'how many times reverse direction / change sign'
   determinant(matrix)                           # determinant of a square matrix (list-of-lists)
   eigenvalues(matrix)                           # eigenvalues of a square matrix (list-of-lists)
   solve_linear_system(A, b)                     # solve A x = b; A list-of-lists, b list -> x list
@@ -108,8 +109,17 @@ export const OPERATOR_API = `You have a verified Python library 'math_operators'
   dilution(M1,V1,M2,V2)                          # M1V1=M2V2; pass three, get the fourth (others None)
   ph_from_concentration(h_conc)  /  concentration_from_ph(ph)  /  percent_yield(actual, theoretical)
   expected_value(values, probs)  /  binomial_probability(n, k, p)  /  binomial_mean_sd(n, p)
+  binomial_at_least(n, k, p)  /  binomial_at_most(n, k, p)      # cumulative binomial tails, EXACT — for "at least/at most k of n"
+  one_sample_z_test(sample_mean, null_mean, sd, n, tail)        # tail 'greater'|'less'|'two-sided' -> (z, p_value); hypothesis testing
   sample_mean(values)  /  sample_sd(values, population)  /  combination_probability(fav_n, fav_k, total_n, total_k)
   correlation(xs, ys)  /  r_squared(xs, ys)  /  linear_regression(xs, ys)   # Pearson r, R^2 (variance explained), OLS -> (slope, intercept)
+SELECTION HINTS (common misreads — map the phrasing to the right operator):
+  • "factor P(x) into linear factors in Z_p" / "roots in Z_p" -> finite_field_zeros(coeffs, p) (linear factors are (x - root) per zero)
+  • "how many k make k! end in EXACTLY N zeros" -> factorial_trailing_zeros_count(N)
+  • "value of x - y" (or any combination) from a system -> solve_equations(...) then compute the asked combination
+  • "at least/at most k" of n independent trials -> binomial_at_least / binomial_at_most (NOT binomial_probability, which is exactly-k)
+  • hypothesis test H0 vs Ha with a sample -> one_sample_z_test(...); match the reported z OR p-value to the choice
+  • "how many times does it reverse direction / change sign / cross zero" (e.g. velocity v(t)) -> count_sign_changes(expr, var, a, b)
 Pick the operator, extract the arguments from the problem, and write a tiny program that imports from
 math_operators and prints ONLY the final answer value on the last line. If none fit, write a short correct program.`
 
@@ -149,9 +159,10 @@ export async function operatorProgramOfThought(
   question: string,
   libDir: string,
   deps: ExecVerifyDeps,
+  temp = 0.1,
 ): Promise<OperatorProgramOfThought | null> {
   let text: string
-  try { text = await deps.generate(operatorPrompt(question), 0.1) } catch { return null }
+  try { text = await deps.generate(operatorPrompt(question), temp) } catch { return null }
   const code = extractCode(text)
   if (!code) return null
   // Auto-repair the #1 compute-arm leak (measured on the prodphyschem0629b board): the model calls a
@@ -174,6 +185,40 @@ export async function operatorProgramOfThought(
   // Reject obvious execution failures surfaced in the output (same guard as cold PoT).
   if (/\b(Traceback|SyntaxError|NameError|ImportError|ModuleNotFoundError|Error:)\b/.test(output) && !/^-?\d/.test(answer)) return null
   return { answer, code: wrapped, output, usedOperator }
+}
+
+/**
+ * SELF-CONSISTENT operator PoT — ships the bench `verify` arm's operatorComputeSC safety into the
+ * product path. The single-shot lane commits a MISformalization (wrong operator/args that still
+ * executes to a clean wrong number) with false confidence — the exact residual regression the 686
+ * board caught (gold=A, operator exact-computed C). Here we sample K formalizations (one cold + K-1
+ * at temperature), execute each, and commit the answer ONLY on a strict-majority agreement among the
+ * VERIFIED-operator runs. A faithful setup is stable across samples; a misread scatters → abstain
+ * (null) → caller falls back to cold PoT / reason-lane, keeping the model's own answer instead of a
+ * confidently-wrong calculation. Runs the K samples in parallel, so latency ≈ single-shot.
+ */
+export async function operatorProgramOfThoughtSC(
+  question: string,
+  libDir: string,
+  deps: ExecVerifyDeps,
+  k = 3,
+): Promise<OperatorProgramOfThought | null> {
+  if (k <= 1) return operatorProgramOfThought(question, libDir, deps, 0.1)
+  const runs = await Promise.all(
+    Array.from({ length: k }, (_, s) => operatorProgramOfThought(question, libDir, deps, s === 0 ? 0.1 : 0.7)),
+  )
+  const tally = new Map<string, { count: number; run: OperatorProgramOfThought }>()
+  for (const r of runs) {
+    if (!r || !r.usedOperator) continue                                   // only VERIFIED-operator runs vote
+    const key = r.answer.trim()
+    const e = tally.get(key)
+    if (e) e.count++
+    else tally.set(key, { count: 1, run: r })
+  }
+  let best: { count: number; run: OperatorProgramOfThought } | null = null
+  for (const e of tally.values()) if (!best || e.count > best.count) best = e
+  if (!best || best.count < Math.ceil((k + 1) / 2)) return null           // no strict majority → abstain (misformalization scattered)
+  return best.run
 }
 
 /**

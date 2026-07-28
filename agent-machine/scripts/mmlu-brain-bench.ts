@@ -19,7 +19,9 @@
  *   MMLU_MODEL        answer model (default llama3.2:3b)
  *   MMLU_PER_SUBJECT  questions per subject (default 5; 0 = all)
  *   MMLU_K            retrieved chunks injected in the brain arm (default 4)
- *   MMLU_CLOUD_MODEL  Anthropic model for the cloud_* arms (default claude-opus-4-8; needs ANTHROPIC_API_KEY)\n *   MMLU_ARMS         comma list of arms to run (default "baseline,brain"); `refine` = AgentKB student→teacher trajectory-critique loop (Gap B); `tier` = tiered-ontology grounding (KKO upper→general→specific, PR #312)
+ *   MMLU_CLOUD_MODEL  Anthropic model for the cloud_* arms (default claude-opus-4-8; needs ANTHROPIC_API_KEY)\n *   MMLU_ARMS         comma list of arms to run (default "baseline,brain"); `refine` = AgentKB student→teacher trajectory-critique loop (Gap B); `tier` = tiered-ontology grounding (KKO upper→general→specific, PR #312);
+ *                     `verify` = COMPUTE-AUTHORITY: baseline's own answer, overridden ONLY by verified compute (hard sympy math:*/catalog + self-consistent verified-operator lib). verify = baseline + calculator-corrections ⇒ provably ≥ baseline. MEASURED: +1.2pp on the 686-question cloud math board (94.9→96.1%, Opus), operator overrides fixed 9 baseline errors / broke 1 (the misformalization the self-consistent operator, MMLU_OPSC_K, now rejects). This is the "verified compute makes the frontier model strictly better on math" arm — the fix for the old net-negative where `letter=compute` blindly OVERRODE correct reasoning.
+ *   MMLU_OPSC_K       verified-operator self-consistency: sample the operator formalization K times, commit only on strict-majority agreement (default 3; rejects misformalizations that scatter)
  *   MMLU_SUBJECTS     comma list to restrict subjects (default: all brain-ready)
  *   MMLU_MAX_CHUNKS   per-field memory cap on loaded chunks (default 150000)
  *   MMLU_SEED         shuffle seed for the per-subject sample (default time-based)
@@ -34,7 +36,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { ensureOperatorImport, extractCode } from '../lib/exec-verify.js'
+import { ensureOperatorImport, extractCode, OPERATOR_API } from '../lib/exec-verify.js'
 import { embedText } from '../lib/ollama.js'
 import { sanitizeRetrieved } from '../lib/rag-trust.js'
 import { councilVote, learnedCouncilVote } from '../lib/council.js'
@@ -63,6 +65,12 @@ const API_BASE = (process.env['MMLU_API_BASE'] || BASE).replace(/\/$/, '')
 const API_KEY = process.env['MMLU_API_KEY'] || ''
 const AUTH: Record<string, string> = API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {}
 const MODEL = process.env['MMLU_MODEL'] || 'llama3.2:3b'
+// MMLU_ANSWERER=cloud — the 3-layer complementarity board: every arm keeps its OWN retrieval /
+// gating / deterministic-compute machinery, but the ANSWER model (and every LLM sub-call: query
+// gen, rerank, verdicts, formalization) is the cloud frontier model instead of the local one.
+// Answers the question "what does each harness layer add ON TOP OF a frontier model", where the
+// local boards answer "what does each layer add to a small sovereign model".
+const ANSWERER = process.env['MMLU_ANSWERER'] || 'local'
 const PER = Number(process.env['MMLU_PER_SUBJECT'] ?? 5)
 const K = Number(process.env['MMLU_K'] || 4)
 const SHOT_K = Number(process.env['MMLU_SHOT_K'] || 8)      // chunks injected after multi-shot union
@@ -310,10 +318,16 @@ function topK(qVec: number[], pools: Chunk[][], k: number): Chunk[] {
 // embedCached — brain, qgen, champion and verify all re-embed the SAME per-choice queries.
 // Memoize so each distinct query embeds once per run (cuts ollama calls ~half).
 const _embCache = new Map<string, Promise<number[]>>()
+// Set once pools load: the corpus's vector space. embedText treats it as a contract —
+// an embedder answering in a different space (e.g. the 384-dim Rust sidecar vs a 768-dim
+// nomic corpus) is rejected and the Ollama corpus-matched model is used instead. This is
+// the fix for the ST026 silent failure where every retrieval came back empty.
+let CORPUS_DIMS = 0
+let _emptyRetrievalStreak = 0
 function embedCached(text: string): Promise<number[]> {
   const k = text.slice(0, 240)
   let p = _embCache.get(k)
-  if (!p) { p = embedText(text); _embCache.set(k, p) }
+  if (!p) { p = embedText(text, CORPUS_DIMS ? { dims: CORPUS_DIMS } : undefined); _embCache.set(k, p) }
   return p
 }
 
@@ -539,6 +553,9 @@ const MAXTOK = Number(process.env['MMLU_MAX_TOKENS'] || 220)
 // false ✗? abstain. Only a genuinely-empty reply after ASK_RETRIES tries is a real abstain.
 const ASK_RETRIES = Number(process.env['MMLU_ASK_RETRIES'] || 2)
 async function ask(prompt: string, temperature = 0): Promise<string> {
+  // cloud answerer: one funnel, so EVERY arm's LLM sub-call rides the frontier model.
+  // (temperature is dropped — current Claude models reject it; determinism noted in board output.)
+  if (ANSWERER === 'cloud') return askCloud(prompt)
   const tries = Math.max(1, ASK_RETRIES)
   for (let attempt = 0; attempt < tries; attempt++) {
     try {
@@ -571,7 +588,7 @@ async function ask(prompt: string, temperature = 0): Promise<string> {
 // ADAPTIVE thinking — flag it in the board notes if MMLU_CLOUD_MODEL is swapped to Sonnet.
 const CLOUD_MODEL = process.env['MMLU_CLOUD_MODEL'] || 'claude-opus-4-8'
 const CLOUD_URL = (process.env['ANTHROPIC_BASE_URL'] || 'https://api.anthropic.com').replace(/\/$/, '')
-if (ARMS.some((a) => a.startsWith('cloud_')) && !process.env['ANTHROPIC_API_KEY'] && !process.env['ANTHROPIC_AUTH_TOKEN']) {
+if ((ARMS.some((a) => a.startsWith('cloud_')) || ANSWERER === 'cloud') && !process.env['ANTHROPIC_API_KEY'] && !process.env['ANTHROPIC_AUTH_TOKEN']) {
   console.error('cloud_* arms requested but neither ANTHROPIC_API_KEY nor ANTHROPIC_AUTH_TOKEN is set — refusing to run a board that would silently abstain every cloud answer')
   process.exit(1)
 }
@@ -623,7 +640,10 @@ function extractConf(raw: string): number {
   return Math.min(1, Math.max(0.1, c || 0.6))
 }
 async function askVote(prompt: string, k: number): Promise<{ letter: string; agree: number }> {
-  if (k <= 1) return { letter: extractLetter(await ask(prompt)), agree: 1 }
+  // Cloud answerer is temperature-free (deterministic-ish): K identical samples cannot vote.
+  // Collapse to a single call — choice-shuffle ensembles still vary the PROMPT, so they survive.
+  if (ANSWERER === 'cloud') k = 1
+  if (k <= 1) return { letter: await askLetter(prompt), agree: 1 }
   // The voting kernel now lives in lib/crag-gate.ts (cragVote) so the bench exercises the SAME code production
   // uses — same Adaptive-SC early-stop + agreement metric. CISC weighting and the temp-0 empty-fallback are
   // wired in via the sampler/options closures, preserving the original behavior exactly.
@@ -686,6 +706,18 @@ async function verifyArm(question: string, choices: string[], pools: Chunk[][]):
   let best = 0; for (let i = 1; i < scores.length; i++) if (scores[i]! > scores[best]!) best = i
   return { letter: LETTERS[best]!, scores }
 }
+// askLetter — extraction with a strict-format retry. The ST026 abstention forensics: with a
+// large injected context the model reasons longer, blows the MAXTOK budget before emitting
+// "FINAL: X", and the un-parseable reply was silently scored as a wrong answer ('?'). Baseline
+// (short prompt) never abstained — 0/117 vs 13/49 on brain regressions — so this artifact
+// systematically penalized every context-bearing arm. One cheap retry with a letter-only
+// instruction converts a parse failure back into an answer; true abstains still return ''.
+async function askLetter(prompt: string): Promise<string> {
+  const first = extractLetter(await ask(prompt))
+  if (first) return first
+  return extractLetter(await ask(prompt + '\n\nIMPORTANT: reply with ONLY the single letter of your answer (A, B, C, or D) — no reasoning, no other text.'))
+}
+
 function extractLetter(raw: string): string {
   // Thinking models (qwen3/r1) emit <think>…</think> before the answer. Strip closed blocks,
   // and if max_tokens truncated mid-think (unclosed <think>), drop everything after it → '' (a
@@ -746,47 +778,12 @@ function nearestChoice(choices: string[], val: number): string {
 // complex roots for finite fields, unevaluated ODEs → 1/6). So OFFER it a verified library to CALL: the model
 // extracts args + picks the operator, the tested library does the math. Measured 4/5→5/5 recovery on the losses.
 const LIBDIR = path.join(__dirname, '..', 'lib')
-const OPERATOR_API = `You have a verified Python library 'math_operators' (already correct — CALL it, never reimplement):
-  permutation_index(cycle_str, n)               # index of <p> in S_n; cycle_str like '(1,2,5,4)(2,3)'
-  finite_field_zeros(coeffs, p)                 # zeros over Z_p; coeffs highest-degree-first (x^2+1 -> [1,0,1])
-  mod_pow(base, exponent, modulus)              # INTEGER modular exponentiation only (base**exponent % modulus) — NOT a general power/exponent operator
-  linear_ode_eval(ode_lhs, x0, y0, x_eval)      # solve 'expr=0' in x and y(x); use Derivative(y,x); y(x0)=y0
-  factorial_trailing_zeros_count(target)        # how many k have EXACTLY target trailing zeros in k!
-  ring_char_product(component_chars)            # characteristic of a product ring; 0 for an infinite component
-  count_real_intersections(eq_strs, var_names)  # # real solutions of a system of 'lhs=0' equations
-  gcd(a,b)  /  lcm(a,b)
-  slope(p1,p2)  /  distance_2d(p1,p2)           # p = (x,y) tuples
-  solve_equations(eq_strs, var_names)           # solve a system 'lhs=0' (sympy syntax), e.g. word problems
-  z_score(x, mean, sd)  /  normal_prob_less_than(z)   # P(Z<z) standard normal
-  confidence_interval_mean(mean, sd, n, confidence)
-  confidence_interval_proportion(phat, n, confidence)
-  definite_integral(expr_str, var, a, b)        # integral of expr d(var) from a to b; bounds may be 'oo'/'-oo'
-  derivative_at(expr_str, var, x0)              # d/d(var) expr_str evaluated at var=x0
-  limit_at(expr_str, var, point)                # limit of expr_str as var -> point; point may be 'oo'/'-oo'
-  determinant(matrix)                           # determinant of a square matrix (list-of-lists)
-  eigenvalues(matrix)                           # eigenvalues of a square matrix (list-of-lists)
-  solve_linear_system(A, b)                     # solve A x = b; A list-of-lists, b list -> x list
-  n_choose_k(n, k)  /  n_permute_k(n, k)        # combinations C(n,k) / permutations P(n,k), exact integers
-  kinematic_velocity(v0,a,t)  /  kinematic_displacement(v0,a,t)  /  kinematic_velocity_from_distance(v0,a,d)
-  newtons_second_law(mass,accel,force)          # F=ma; pass two, get the third (others None)
-  kinetic_energy(mass,velocity)  /  gravitational_pe(mass,height,g)  /  momentum(mass,velocity)
-  work_done(force,distance,angle_deg)  /  power(work,time)
-  ohms_law(voltage,current,resistance)          # V=IR; pass two, get the third (others None)
-  density(mass,volume,density_val)              # rho=m/V; pass two, get the third (others None)
-  molarity(moles,liters,molarity_val)           # M=mol/L; pass two, get the third (others None)
-  moles_from_mass(mass_g, molar_mass)
-  ideal_gas(P,V,n,T,R)                           # PV=nRT (R=0.082057 default); pass three, get the fourth (others None)
-  dilution(M1,V1,M2,V2)                          # M1V1=M2V2; pass three, get the fourth (others None)
-  ph_from_concentration(h_conc)  /  concentration_from_ph(ph)  /  percent_yield(actual, theoretical)
-  expected_value(values, probs)  /  binomial_probability(n, k, p)  /  binomial_mean_sd(n, p)
-  sample_mean(values)  /  sample_sd(values, population)  /  combination_probability(fav_n, fav_k, total_n, total_k)
-  correlation(xs, ys)  /  r_squared(xs, ys)  /  linear_regression(xs, ys)   # Pearson r, R^2 (variance explained), OLS -> (slope, intercept)
-Pick the operator, extract the arguments from the problem, and write a tiny program that imports from
-math_operators and prints ONLY the final answer value on the last line. If none fit, write a short correct program.`
+// OPERATOR_API: SINGLE SOURCE OF TRUTH — imported from ../lib/exec-verify.js (the prod compute lane), so the
+// bench can never grade a different operator menu than what ships. Add operators there, not here.
 
-async function operatorCompute(question: string, choices: string[]): Promise<string> {
+async function operatorCompute(question: string, choices: string[], temp = 0): Promise<string> {
   const prompt = `${OPERATOR_API}\n\nProblem: ${question}\nChoices: ${choices.map((c, i) => `${LETTERS[i]}. ${c}`).join(' | ')}\n\nReturn ONLY a \`\`\`python code block.`
-  const raw = await ask(prompt, 0)
+  const raw = await ask(prompt, temp)
   // was a naive local regex whose "no closing fence" fallback returned the RAW text — including the literal
   // leading '```python' marker on truncated generations (measured: 11/14 SyntaxErrors in one run were exactly
   // this). extractCode strips that marker even in the unclosed-fence case; reuse it instead of duplicating.
@@ -813,6 +810,21 @@ async function operatorCompute(question: string, choices: string[]): Promise<str
   const t = norm(lastLine)
   for (let i = 0; i < choices.length; i++) if (norm(choices[i]!) === t) return LETTERS[i]!
   return ''
+}
+// SELF-CONSISTENT verified-operator: the operator lane is single-shot, so a MISformalization (wrong operator/args
+// that nonetheless executes to a clean wrong number) commits confidently — the one residual regression on the 686
+// board (college_math gold=A, operator exact-computed C). Fix = sample the formalization K times at temperature and
+// commit ONLY on a strict-majority agreement. A faithful setup is stable across samples; a misread scatters → abstain
+// → the caller keeps the model's own answer. Turns the operator overrides from 9/10 toward ~10/10 (provably ≥ baseline).
+const OPSC_K = Number(process.env['MMLU_OPSC_K'] || 3)
+async function operatorComputeSC(question: string, choices: string[], k = OPSC_K): Promise<string> {
+  if (k <= 1) return operatorCompute(question, choices, 0)
+  const votes = await Promise.all(Array.from({ length: k }, (_, s) => operatorCompute(question, choices, s === 0 ? 0 : 0.7)))
+  const tally = new Map<string, number>()
+  for (const v of votes) if (v) tally.set(v, (tally.get(v) ?? 0) + 1)
+  let best = '', bc = 0
+  for (const [l, c] of tally) if (c > bc) { bc = c; best = l }
+  return bc >= Math.ceil((k + 1) / 2) ? best : ''   // strict majority of K (≥2 of 3) required, else abstain
 }
 interface CompRes { answer: string | null; mode: string }
 /** Score the whole compute arm for a subject in ONE python call (one sympy import). Each result
@@ -914,6 +926,40 @@ const KTYPE_PY = path.join(__dirname, 'knowledge_type.py')
 interface KType { types: string[]; solver: string }
 /** Classify each question's knowledge type (one python call) so the CHAMPION arm understands the
  *  problem BEFORE approaching: compute the computational, verify the conceptual, retrieve the factual. */
+// ktypeLLM — frontier-labeled knowledge-type routing (MMLU_KTYPE=llm). The regex v0 under-fires
+// badly: on the ST026 miss review it caught only 14/49 compute-typed questions (missed coin-toss,
+// counting, doubling, rationalize — all phrased without trigger words), and the router built on it
+// couldn't beat baseline. gate/champion/groundgate/learned all consult this classification, so a
+// better classifier upgrades the PROVEN arms in place. Cached to disk by question hash — one cloud
+// call per uncached batch, pennies per subject. Falls back to the regex on any failure.
+const KTYPE_CACHE = path.join(HOME, '.noetica', 'ktype-llm-cache.json')
+async function ktypeLLM(qs: Q[]): Promise<KType[] | null> {
+  try {
+    const crypto = await import('node:crypto')
+    const keyOf = (q: Q) => crypto.createHash('sha1').update(q.question).digest('hex').slice(0, 16)
+    let cache: Record<string, KType> = {}
+    try { cache = JSON.parse(fs.readFileSync(KTYPE_CACHE, 'utf8')) } catch { /* first run */ }
+    const missing = qs.filter((q) => !cache[keyOf(q)])
+    if (missing.length > 0) {
+      const listing = missing.map((q, i) => `${i}: ${q.question.slice(0, 400)}`).join('\n')
+      const raw = await askCloud(
+        `Classify each exam question by the SOLVER that decides it:\n` +
+        `- compute: performing an arithmetic/algebraic calculation or symbolic derivation produces the answer (even if no word like "calculate" appears — counting, probability arithmetic, growth/doubling, simplification, unit-digit, rate problems are all compute)\n` +
+        `- retrieve: a specific factual/definitional lookup decides it\n` +
+        `- reason: multi-step conceptual reasoning with neither a calculation nor a single lookup\n\n` +
+        `Questions:\n${listing}\n\nOutput ONLY one line per question: <index>: <solver>`)
+      for (const line of raw.split('\n')) {
+        const m = /^\s*(\d+)\s*:\s*(compute|retrieve|reason)/i.exec(line)
+        if (m) { const q = missing[Number(m[1])]; if (q) cache[keyOf(q)] = { types: [m[2]!.toLowerCase()], solver: m[2]!.toLowerCase() } }
+      }
+      fs.writeFileSync(KTYPE_CACHE, JSON.stringify(cache), { mode: 0o600 })
+    }
+    const out = qs.map((q) => cache[keyOf(q)])
+    if (out.some((x) => !x)) return null   // incomplete labeling → let the caller fall back
+    return out as KType[]
+  } catch { return null }
+}
+
 function ktypeBatch(qs: Q[]): KType[] {
   const res: KType[] = qs.map(() => ({ types: ['BasicFacts'], solver: 'retrieve' }))
   if (!qs.length) return res
@@ -977,6 +1023,7 @@ async function main() {
     if (done.size) console.log(`# RESUMED — ${done.size} questions already in the checkpoint; skipping them`)
   }
   let scored = done.size
+  const abstains: Record<string, number> = {}   // arm → '?' count: parse failures are VISIBLE, never silently 'wrong'
   const grandTotal = subjects.reduce((a, s) => a + (PER > 0 ? Math.min(PER, mmlu[s]!.length) : mmlu[s]!.length), 0)
   const writeStatus = (subject: string): void => {
     if (!STATUS) return
@@ -986,6 +1033,7 @@ async function main() {
   for (const subject of subjects) {
     const fields = SUBJECT_FIELDS[subject]!.filter(fieldReady)
     const pools = fields.map(loadField)
+    if (!CORPUS_DIMS) CORPUS_DIMS = pools.flat().find((c) => c.vec.length)?.vec.length ?? 0
     const widerPools = (ARMS.includes('elim') || ARMS.includes('fiftyfifty'))
       ? [...new Set(fields.flatMap((f) => FIELD_ADJ[f] ?? []).filter((f) => !fields.includes(f) && fieldReady(f)))].map(loadField)
       : []
@@ -1005,7 +1053,10 @@ async function main() {
     const computeCtx: string[] = (wantCompute && COMPUTE_GROUND) ? await Promise.all(sample.map((q) => goldContext(q, pools, ncard))) : []
     const comp: CompRes[] = wantCompute ? computeBatch(sample, computeCtx) : []
     // knowledge-type per question (the 'understand first' step) — used by the champion router
-    const kt: KType[] = (ARMS.includes('champion') || ARMS.includes('gate') || ARMS.includes('groundgate') || ARMS.includes('learned')) ? ktypeBatch(sample) : []
+    const wantKt = ARMS.includes('champion') || ARMS.includes('gate') || ARMS.includes('groundgate') || ARMS.includes('learned')
+    const kt: KType[] = wantKt
+      ? (process.env['MMLU_KTYPE'] === 'llm' ? (await ktypeLLM(sample)) ?? ktypeBatch(sample) : ktypeBatch(sample))
+      : []
     const af: CompRes[] = ARMS.includes('autoform') ? await autoformBatch(sample) : []   // LLM-formalize → sympy-execute → vote
     const kgbertCtx: string[] = ARMS.includes('ground_kgbert') ? kgbertGroundBatch(sample) : []   // KG-BERT entity-kNN grounding
 
@@ -1030,7 +1081,25 @@ async function main() {
         const hits = await retrieveMulti(q.question, q.choices, pools, PER_SHOT, SHOT_K, [], slugHints)
         context = hits.map((h, n) => `[${n + 1}] ${h.text.slice(0, 500)}`).join('\n\n')
         row['sources'] = hits.map((h) => `${h.slug}:${h.material}`)
+        // CONTEXT CAPTURE (the missing evidence): store the ACTUAL chunk text fed to the model,
+        // per question, so a misses review can show exactly what context produced a wrong answer —
+        // and whether retrieval was question-PRECISE or merely subject-TOPICAL. Gated on
+        // MMLU_CAPTURE_CTX=1 (default on for the review runs) to keep transcripts small otherwise.
+        if (process.env['MMLU_CAPTURE_CTX'] !== '0') {
+          row['brain_ctx'] = hits.map((h) => ({ slug: h.slug, material: h.material, score: Number((h.score ?? 0).toFixed(3)), text: h.text.slice(0, 600) }))
+        }
         row['brain_conf'] = Number((hits[0]?.score ?? 0).toFixed(3))   // retrieval confidence (top cosine) — the council's grounding signal
+        // VALIDITY GATE (ST026 lesson): a brain arm that retrieves nothing is not "degraded",
+        // it is a DIFFERENT experiment silently mislabeled. 8 consecutive empty retrievals with
+        // 100k+ chunks loaded means the embedder is broken (down, wrong port, or wrong vector
+        // space) — abort loudly instead of completing a brainless board with a green exit code.
+        _emptyRetrievalStreak = hits.length === 0 ? _emptyRetrievalStreak + 1 : 0
+        if (_emptyRetrievalStreak >= 8 && process.env['MMLU_ALLOW_EMPTY_RETRIEVAL'] !== '1') {
+          throw new Error(
+            `retrieval returned 0 sources for ${_emptyRetrievalStreak} consecutive questions — the brain arm would run BLIND. ` +
+            `Check the embedder (OLLAMA_HOST reachable? NOETICA_EMBED_RUST vector space vs corpus dims=${CORPUS_DIMS}?) ` +
+            `or set MMLU_ALLOW_EMPTY_RETRIEVAL=1 to knowingly run lexical-only.`)
+        }
       }
 
       // queryGen arm: identical retriever + model, but with HyDE + step-back query shots added.
@@ -1051,10 +1120,12 @@ async function main() {
       const ANSWER_RULE = '\n\nReason in ONE short sentence, then output exactly one final line: "FINAL: X" (X = A, B, C, or D).'
       const brainPrompt = `Relevant MIT course notes (use only what helps; ignore noise and fragments):\n\n${context}\n\nExam question:\n${base}${ANSWER_RULE}`
       let brainLetter: string | undefined // memoize so brain + route don't double-ask the model
-      const askBrain = async (): Promise<string> => (brainLetter ??= extractLetter(await ask(brainPrompt)))
+      const askBrain = async (): Promise<string> => (brainLetter ??= await askLetter(brainPrompt))
       const qgenPrompt = `Relevant MIT course notes (use only what helps; ignore noise and fragments):\n\n${qgenContext}\n\nExam question:\n${base}${ANSWER_RULE}`
       let qgenLetter: string | undefined
-      const askQgen = async (): Promise<string> => (qgenLetter ??= extractLetter(await ask(qgenPrompt)))
+      const askQgen = async (): Promise<string> => (qgenLetter ??= await askLetter(qgenPrompt))
+      let baseLetter: string | undefined // memoize the closed-book baseline answer so `verify` reuses it (no double-ask, no SC noise)
+      const askBase = async (): Promise<string> => (baseLetter ??= await askLetter(`${base}${ANSWER_RULE}`))
       const ci = comp[i]
       const marks: string[] = []
       const results: Array<{ arm: string; ok: boolean; attempted: boolean }> = []
@@ -1071,7 +1142,7 @@ async function main() {
           const wide = await retrieveMulti(q.question, q.choices, pools, PER_SHOT, RERANK_N, [], slugHints)
           const top = await rerankLLM(q.question, q.choices, wide, SHOT_K)
           const ctx = top.map((h, n) => `[${n + 1}] ${h.text.slice(0, 500)}`).join('\n\n')
-          letter = extractLetter(await ask(`Relevant MIT course notes (use only what helps; ignore noise and fragments):\n\n${ctx}\n\nExam question:\n${base}${ANSWER_RULE}`)); mode = `rerank:${top.length}`
+          letter = await askLetter(`Relevant MIT course notes (use only what helps; ignore noise and fragments):\n\n${ctx}\n\nExam question:\n${base}${ANSWER_RULE}`); mode = `rerank:${top.length}`
         } else if (arm === 'inline') {            // Phase 0.4: inline evidence binding — model cites which chunk it's grounding on
           // Forces explicit {letter, reasoning, cited:[{id,span}]} output so faithfulness is measurable per-answer,
           // not just post-hoc over the whole run. Feeds Metric 2 (inline fidelity) in provenance_eval.py.
@@ -1090,10 +1161,10 @@ async function main() {
           row['inline_grounded_rate'] = Number(stats.grounded_rate.toFixed(3))
         } else if (arm === 'ground') {            // CANON GROUNDING: the question's entities → glossary defs + related equations/models + prereq decomposition + bridges
           const g = canonGround(`${q.question} ${q.choices.join(' ')}`)
-          letter = extractLetter(await ask(`${g ? g + '\n\n' : ''}Exam question:\n${base}${ANSWER_RULE}`)); mode = g ? 'ground' : 'no-canon'
+          letter = await askLetter(`${g ? g + '\n\n' : ''}Exam question:\n${base}${ANSWER_RULE}`); mode = g ? 'ground' : 'no-canon'
         } else if (arm === 'ground_kgbert') {     // KG-BERT GROUNDING: structurally-nearest concepts (entity-vector kNN) — the decorrelated retriever
           const g = kgbertCtx[i] ?? ''
-          letter = extractLetter(await ask(`${g ? g + '\n\n' : ''}Exam question:\n${base}${ANSWER_RULE}`)); mode = g ? 'kgbert' : 'no-kgbert'
+          letter = await askLetter(`${g ? g + '\n\n' : ''}Exam question:\n${base}${ANSWER_RULE}`); mode = g ? 'kgbert' : 'no-kgbert'
         } else if (arm === 'cohere') {            // Choice-Coherence Elimination. EMITS the RAW per-choice feature
           // matrix (cohesion, uniqueness, set-incl) into the row — NOT just the argmax pick — so the transcript is
           // training data for the n-furcated combiner (no aggregation that loses the points). The letter is still
@@ -1155,14 +1226,14 @@ async function main() {
             if (def === undefined) { def = (await fetchConceptDef(t, field))?.definition ?? null; defsCache.set(key, def) }
             if (def) defs.push(`- ${t}: ${def}`)
           }
-          if (defs.length) { letter = extractLetter(await ask(`Relevant definitions:\n${defs.join('\n')}\n\n${base}${ANSWER_RULE}`)); mode = `defs:${defs.length}/${terms.length}` }
-          else { letter = extractLetter(await ask(`${base}${ANSWER_RULE}`)); mode = 'defs:miss' }   // no clean def → closed-book (never worse than baseline for lack of grounding)
+          if (defs.length) { letter = await askLetter(`Relevant definitions:\n${defs.join('\n')}\n\n${base}${ANSWER_RULE}`); mode = `defs:${defs.length}/${terms.length}` }
+          else { letter = await askLetter(`${base}${ANSWER_RULE}`); mode = 'defs:miss' }   // no clean def → closed-book (never worse than baseline for lack of grounding)
         } else if (arm === 'notecard') {          // OPEN-BOOK exam: answer with the domain's curated FORMULA SHEET
           // What a student actually brings into the test — the canonical equations for the field, all in context
           // (not top-k retrieved, not noisy prose). Only useful post-v4 (the formulas have to be in the brain).
           const card = loadNotecard(fields)
-          if (card) { letter = extractLetter(await ask(`Exam formula sheet — these are the canonical formulas you may use:\n${card}\n\n${base}${ANSWER_RULE}`)); mode = `notecard:${fields.join('+')}` }
-          else { letter = extractLetter(await ask(`${base}${ANSWER_RULE}`)); mode = 'notecard:none' }   // not mined yet → closed-book
+          if (card) { letter = await askLetter(`Exam formula sheet — these are the canonical formulas you may use:\n${card}\n\n${base}${ANSWER_RULE}`); mode = `notecard:${fields.join('+')}` }
+          else { letter = await askLetter(`${base}${ANSWER_RULE}`); mode = 'notecard:none' }   // not mined yet → closed-book
         } else if (arm === 'hop') {               // HippoRAG ITERATIVE query-graph expansion (#14): uncertain → graph-hop → re-retrieve
           // Each hop: answer with the current context (SC vote = confidence); if uncertain, build a local
           // concept graph from those chunks and PPR-expand on the query → the associatively-bridged concepts
@@ -1205,6 +1276,29 @@ async function main() {
             const sc = await askVote(`${base}${REASON_RULE}`, SC_K)   // self-consistency over explicit step-by-step chains
             letter = sc.letter; mode = `reason:sc${SC_K}`; row['reason_conf'] = Number(sc.agree.toFixed(2))
           }
+        } else if (arm === 'verify') {            // COMPUTE-AUTHORITY complementarity (Michael): verified compute, when it
+          // CALCULATES, is right ~100% — its ONLY failure mode is an unfaithful FORMALIZATION, and compute_arm.py already
+          // ABSTAINS unless its own check passes (exact math solver, or a law whose UNITS verify the extraction, or ≥2-of-K
+          // prog consensus). So a HARD-verified answer (math:*/catalog*/chain/free — exact + unit-checked) WINS over even
+          // its reasoning: those are the saves the layer exists for (Opus slips on arithmetic, the calculator catches it).
+          // The FALLBACK is baseline's OWN answer (memoized askBase) — NOT a fresh self-consistency vote — so verify differs
+          // from baseline ONLY when a verified computation fires: verify = baseline + calculator-corrections ⇒ provably
+          // ≥ baseline (given compute-when-it-fires is right; the n=200 board showed the operator overrides 2/2 correct).
+          // An earlier cut used an independent SC vote as the fallback, which added pure sampling noise (2 wins, 2 losses)
+          // and no lift, since SC-reasoning ≈ single-shot at the frontier. Soft `prog` compute is accepted only if it AGREES
+          // with baseline (else keep baseline) — the reason arm already distrusts prog for its misread risk.
+          const computational = classifyComplexity(q.question).posture === 'compute'
+            || /\b(find|compute|remainder|zeros|index|characteristic|how many|value of|solve|order of|divided by|intersection|slope|distance|gcd|lcm|least common|greatest common|probability|correlation|proportion|confidence|standard deviation|z-?score|the mean|how (much|far|fast|long)|what is the (value|slope|probability|mean|distance))\b/i.test(q.question)
+          const oc = ci?.answer ?? ''
+          const cmode = ci?.mode ?? ''
+          const hardVerified = /^(math|catalog|chain|free)/.test(cmode)                   // exact solver / unit-verified ⇒ ~100%
+          let ocOp = ''
+          if (!oc && computational) ocOp = await operatorComputeSC(q.question, q.choices)   // verified-operator lib, self-consistent (K-sample majority) to reject misformalizations
+          if (oc && hardVerified) { letter = oc; mode = `verify:compute:${cmode.split(':')[0]}` }   // verified calc wins outright
+          else if (ocOp) { letter = ocOp; mode = 'verify:operator' }                      // verified-operator lib ⇒ trust
+          else if (oc && oc === await askBase()) { letter = oc; mode = `verify:agree:${cmode.split(':')[0]}` }  // soft prog CONFIRMED by baseline
+          else { letter = await askBase(); mode = oc ? `verify:base(soft-disagree:${cmode})` : 'verify:base' }  // no reliable compute ⇒ baseline
+          row['verify_compute'] = oc || ocOp || ''; row['verify_hardverified'] = hardVerified
         } else if (arm === 'opcompute') {         // reason lane + VERIFIED-OPERATOR compute (the proven +7 fix): route computational
           // questions to lib/math_operators.py (model picks operator + args; tested library does the math), else CoT+SC.
           const computational = classifyComplexity(q.question).posture === 'compute'
@@ -1318,7 +1412,7 @@ async function main() {
             let manipLetter: string | undefined
             if (process.env['MMLU_MANIP'] !== '0') {   // manipulation-layer voter (Self-Discover): compose a plan, then execute
               const sdPlan = await ask(`Name the 2-3 reasoning steps that best fit this problem (governing principle / sub-steps / eliminate options / compute / recall definition). Short numbered plan only.\n\n${q.question}`)
-              manipLetter = extractLetter(await ask(`Execute this plan:\n${sdPlan}\n\n${base}${ANSWER_RULE}`))
+              manipLetter = await askLetter(`Execute this plan:\n${sdPlan}\n\n${base}${ANSWER_RULE}`)
             }
             const sc = await askVote(`${base}${ANSWER_RULE}`, SC_K)   // diverse reasoning vote (no retrieval noise)
             row['sc_agree'] = Number(sc.agree.toFixed(2))
@@ -1357,7 +1451,7 @@ async function main() {
             const order = Array.from({ length: n }, (_, j) => (j + m) % n)   // rotation m: each choice visits each position across the ensemble
             const shuffled = order.map((oi) => q.choices[oi]!)
             const pr = `${q.question}\n\n${shuffled.map((c, j) => `${LETTERS[j]}. ${c}`).join('\n')}${ANSWER_RULE}`
-            const p = LETTERS.indexOf(extractLetter(await ask(pr)))
+            const p = LETTERS.indexOf(await askLetter(pr))
             if (p >= 0 && p < n) { const orig = order[p]!; votes.set(orig, (votes.get(orig) ?? 0) + 1) }
           }
           let best = -1, bn = -1
@@ -1365,26 +1459,26 @@ async function main() {
           letter = best >= 0 ? LETTERS[best]! : ''; mode = `medprompt×${M}`
         } else if (arm === 'l2m') {               // Least-to-Most (Google): decompose into sub-questions, solve in order
           const sub = await ask(`Break this exam question into 2–3 simpler sub-questions whose answers build to the solution. List them only, no answers.\n\n${q.question}`)
-          letter = extractLetter(await ask(`Work through these sub-questions first, then the main question:\n${sub}\n\n${base}${ANSWER_RULE}`))
+          letter = await askLetter(`Work through these sub-questions first, then the main question:\n${sub}\n\n${base}${ANSWER_RULE}`)
           mode = 'l2m'
         } else if (arm === 'selfdiscover') {      // Self-Discover (DeepMind): compose a reasoning structure, then follow it
           const plan = await ask(`Pick the 2–3 reasoning steps that best fit this problem (from: identify the governing principle/law, break into sub-steps, eliminate wrong options, compute/derive, recall the definition). Output a short numbered plan.\n\n${q.question}`)
-          letter = extractLetter(await ask(`Execute this reasoning plan:\n${plan}\n\nOn:\n${base}${ANSWER_RULE}`))
+          letter = await askLetter(`Execute this reasoning plan:\n${plan}\n\nOn:\n${base}${ANSWER_RULE}`)
           mode = 'selfdiscover'
         } else if (arm === 'tot') {               // Tree-of-Thoughts (Princeton/DeepMind): propose approaches, self-evaluate, solve with the best
           const appr = await ask(`List 3 distinct approaches to solve this question, one short line each.\n\n${q.question}`)
-          letter = extractLetter(await ask(`Candidate approaches:\n${appr}\n\nPick the single most promising approach (one line on why), then carry it out on:\n${base}${ANSWER_RULE}`))
+          letter = await askLetter(`Candidate approaches:\n${appr}\n\nPick the single most promising approach (one line on why), then carry it out on:\n${base}${ANSWER_RULE}`)
           mode = 'tot'
         } else if (arm === 'reflect') {           // process-supervision-lite (OpenAI PRM): self-verify the reasoning, revise a flawed step
           const first = await ask(`${base}${ANSWER_RULE}`)
-          letter = extractLetter(await ask(`A student proposed this solution:\n${first}\n\nQuestion:\n${base}\n\nCheck each reasoning step for an error. If any step is wrong, correct it and give the right answer; otherwise confirm.${ANSWER_RULE}`))
+          letter = await askLetter(`A student proposed this solution:\n${first}\n\nQuestion:\n${base}\n\nCheck each reasoning step for an error. If any step is wrong, correct it and give the right answer; otherwise confirm.${ANSWER_RULE}`)
           mode = 'reflect'
         } else if (arm === 'cloud_baseline') {    // ST026: cloud-scale model, closed book — IDENTICAL prompt to baseline
           letter = extractLetter(await askCloud(`${base}${ANSWER_RULE}`)); mode = CLOUD_MODEL
         } else if (arm === 'cloud_brain') {        // ST026: cloud-scale model + the SAME brain retrieval context as `brain`
           letter = extractLetter(await askCloud(brainPrompt)); mode = CLOUD_MODEL
         } else {                                  // baseline (closed book)
-          letter = extractLetter(await ask(`${base}${ANSWER_RULE}`))
+          letter = await askBase()
         }
         } catch (e) { letter = ''; mode = `ERR:${String((e as Error)?.message ?? e).slice(0, 50)}`; attempted = false }   // arm abstains on failure; the run goes on
         const ok = letter === gold
@@ -1471,6 +1565,7 @@ async function main() {
             r.row['gate_typical'] = g.typical
           }
         } catch { /* gate is best-effort; never block the checkpoint */ }
+        for (const a of ARMS) if (r.row[`${a}_pred`] === '?') (abstains[a] = (abstains[a] ?? 0) + 1)
         fs.appendFileSync(TRANSCRIPT, JSON.stringify(r.row) + '\n')   // durable per-question checkpoint
         scored++
         console.log(`  ${String(r.i + 1).padStart(3)}. ${r.marks.join('  ')}  /${r.gold}`)
@@ -1480,7 +1575,8 @@ async function main() {
   }
 
   // ── summary ──
-  console.log(`\n# ════════ results (model ${MODEL}) ════════`)
+  const MODEL_LABEL = ANSWERER === 'cloud' ? `${CLOUD_MODEL} (cloud answerer)` : MODEL
+  console.log(`\n# ════════ results (model ${MODEL_LABEL}) ════════`)
   const header = `  ${'subject'.padEnd(26)}` + ARMS.map((a) => a.padStart(10)).join('') + (ARMS.length === 2 ? '     Δ' : '')
   console.log(header)
   const totals: Record<string, { c: number; n: number; a: number }> = {}
@@ -1502,6 +1598,8 @@ async function main() {
     totDelta = `  ${d >= 0 ? '+' : ''}${d.toFixed(1)}`
   }
   console.log(`  ${'── OVERALL'.padEnd(26)}${totLine}${totDelta}`)
+  const abLine = ARMS.filter((a) => abstains[a]).map((a) => `${a}=${abstains[a]}`).join(' ')
+  if (abLine) console.log(`  ⚠ abstentions (unparseable / no answer, scored wrong): ${abLine}`)
   if (totals['compute']) {
     const cv = totals['compute']!
     console.log(`  ${'   ↳ compute'.padEnd(26)}  fired on ${cv.a}/${cv.n} (${pct(cv.a, cv.n)}%) · accuracy-on-fired ${pct(cv.c, cv.a)}%  (the verified-compute moat; rest abstain${ARMS.includes('route') ? ' → routed to brain' : ''})`)
@@ -1514,7 +1612,10 @@ async function main() {
   // Best-effort — a benchmark-emit failure must NOT break the board.
   try {
     const bm = emitReasoningBenchmark({
-      totals, arms: ARMS, subjects, model: MODEL, seed: SEED, perSubject: PER, k: K,
+      totals, arms: ARMS, subjects, model: MODEL_LABEL, seed: SEED, perSubject: PER, k: K,
+      // full per-domain breakdown, signed into the receipt as domain:{subject}:{arm} assertions
+      domains: Object.fromEntries(subjects.map((s2) => [s2,
+        Object.fromEntries(ARMS.map((a) => [a, { c: tally[a]![s2]!.c, n: tally[a]![s2]!.n }]))])),
     })
     if (bm) console.log(`# reasoning-benchmark: ${bm.id} (runRef ${bm.runRef})`)
   } catch (e) {

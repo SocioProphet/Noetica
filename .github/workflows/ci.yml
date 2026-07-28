@@ -67,3 +67,16 @@ jobs:
       - name: Test agent-machine
         working-directory: agent-machine
         run: npm test
+
+      # The verified-operator library is the ground truth the compute lane trusts blindly; a wrong
+      # operator = confident wrong answers (the moat inverts). Guard it in CI — point tests + property
+      # invariants. Previously the self-test only ran manually, so an edit could break an operator silently.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test verified operators
+        working-directory: agent-machine
+        run: |
+          python -m pip install --quiet sympy pytest
+          python -m pytest lib/test_math_operators.py -q

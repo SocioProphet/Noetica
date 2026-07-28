@@ -114,7 +114,7 @@ import { validateToolCall, type ToolSchema, type ArgSpec } from './lib/constrain
 import { appendJsonl as appendEncrypted, readJsonl as readEncrypted, writeJson as writeEncryptedJson, readJson as readEncryptedJson } from './lib/at-rest.js'
 import { listRuns, getRun, upsertRun, loadRoutines, upsertRoutine, deleteRoutine, computeNextRun, dueRoutines, type AgentRun, type Routine } from './lib/agent-runs.js'
 import { critique, bestOfTemps, type Candidate as CriticCandidate } from './lib/critic.js'
-import { programOfThought, operatorProgramOfThought, codeVerifyRepair } from './lib/exec-verify.js'
+import { programOfThought, operatorProgramOfThought, operatorProgramOfThoughtSC, codeVerifyRepair } from './lib/exec-verify.js'
 import { isReasonLaneIntent, reasonLaneEnabled, reasonSCK, runReasonLane, REASON_RULE, REASON_RULE_MCQ, looksLikeMCQ } from './lib/reason-lane.js'
 import { decideGrounding, type GroundingStatus } from './lib/grounding-signal.js'
 import { applyPreset, summarize as summarizePreset } from './lib/presets.js'
@@ -4668,8 +4668,12 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
           const libDir = mathOperatorLibDir()
           if (libDir) {
             try {
-              const op = await operatorProgramOfThought(latestUserContent, libDir, potDeps)
-              if (op && op.usedOperator) { pot = op; verifiedMethod = 'operator-compute'; console.log(`[critic] verified-operator routed answer=${op.answer}`) }
+              // Self-consistent operator (ships the bench `verify` arm's operatorComputeSC safety): K parallel
+              // formalizations, commit only on strict-majority agreement → rejects misformalizations that would
+              // otherwise execute to a confident wrong number. NOETICA_OPERATOR_SC_K=1 reverts to single-shot.
+              const opK = Number(process.env['NOETICA_OPERATOR_SC_K'] ?? 3)
+              const op = await operatorProgramOfThoughtSC(latestUserContent, libDir, potDeps, opK)
+              if (op && op.usedOperator) { pot = op; verifiedMethod = 'operator-compute'; console.log(`[critic] verified-operator routed answer=${op.answer} (sc k=${opK})`) }
             } catch { /* operator routing best-effort — fall through to cold PoT */ }
           }
           if (!pot) pot = await programOfThought(latestUserContent, potDeps)

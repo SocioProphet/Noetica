@@ -331,6 +331,34 @@ def binomial_mean_sd(n: int, p: float) -> tuple:
     return (n * p, math.sqrt(n * p * (1 - p)))
 
 
+def binomial_at_least(n: int, k: int, p: float) -> float:
+    """P(X >= k) for X ~ Binomial(n, p) — the cumulative upper tail. Exact sum, no normal
+    approximation. Use for 'at least k of n' word problems (e.g. 'at least 3 of 12 jurors are women')."""
+    return sum(math.comb(n, i) * (p ** i) * ((1 - p) ** (n - i)) for i in range(k, n + 1))
+
+
+def binomial_at_most(n: int, k: int, p: float) -> float:
+    """P(X <= k) for X ~ Binomial(n, p) — the cumulative lower tail (exact)."""
+    return sum(math.comb(n, i) * (p ** i) * ((1 - p) ** (n - i)) for i in range(0, k + 1))
+
+
+def one_sample_z_test(sample_mean: float, null_mean: float, sd: float, n: int, tail: str = 'greater') -> tuple:
+    """One-sample z-test. Returns (z_statistic, p_value). `tail` in 'greater' (Ha: mu>mu0),
+    'less' (Ha: mu<mu0), or 'two-sided' (Ha: mu!=mu0). `sd` is the population/known SD (or a large-n
+    sample SD). Composes z_score + the normal CDF so a hypothesis-test MCQ can match either the
+    reported statistic or the p-value directly instead of the model hand-deriving it."""
+    from statistics import NormalDist
+    z = (sample_mean - null_mean) / (sd / math.sqrt(n))
+    cdf = NormalDist().cdf(z)
+    if tail == 'greater':
+        p = 1 - cdf
+    elif tail == 'less':
+        p = cdf
+    else:  # two-sided
+        p = 2 * (1 - NormalDist().cdf(abs(z)))
+    return (z, p)
+
+
 def sample_mean(values: list) -> float:
     """Arithmetic mean of a sample."""
     return sum(values) / len(values)
@@ -341,6 +369,31 @@ def sample_sd(values: list, population: bool = False) -> float:
     m = sum(values) / len(values)
     denom = len(values) if population else len(values) - 1
     return math.sqrt(sum((x - m) ** 2 for x in values) / denom)
+
+
+def count_sign_changes(expr_str: str, var: str = 'x', a: float = 0.0, b: float = 1.0, samples: int = 20000) -> int:
+    """How many times expr(var) CHANGES SIGN on the open interval (a, b) — i.e. how many times a
+    continuous quantity crosses zero. Use for 'how many times does it reverse direction / change
+    sign / cross zero' (e.g. velocity v(t) -> direction reversals). Dense numerical scan (like the
+    finely-sampled sign check a person would do), correct for continuous functions with isolated
+    roots. Not exact-symbolic (handles transcendental expressions sympy can't solve in closed form)."""
+    import sympy as _sp
+    _x = _sp.Symbol(var)
+    _f = _sp.lambdify(_x, _sp.sympify(expr_str), 'math')
+    changes = 0
+    prev = 0  # sign of the last NON-zero sample (0 = none yet)
+    for i in range(samples + 1):
+        t = a + (b - a) * i / samples
+        try:
+            y = _f(t)
+        except Exception:
+            continue  # domain gap (e.g. log of <=0) — skip without corrupting the sign run
+        s = 1 if y > 0 else (-1 if y < 0 else 0)
+        if s != 0:
+            if prev != 0 and s != prev:
+                changes += 1
+            prev = s
+    return changes
 
 
 def combination_probability(favorable_n: int, favorable_k: int, total_n: int, total_k: int) -> float:
@@ -394,6 +447,15 @@ if __name__ == '__main__':
     assert abs(normal_prob_less_than(1.96) - 0.975) < 0.001
     lo, hi = confidence_interval_mean(100, 15, 36, 0.95)
     assert abs(lo - 95.1) < 0.2 and abs(hi - 104.9) < 0.2
+    assert abs(binomial_at_least(12, 3, 0.30) - 0.7472) < 0.001   # >=3 of 12 jurors women
+    assert abs(binomial_at_most(12, 2, 0.30) - 0.2528) < 0.001
+    assert abs(binomial_at_least(12, 3, 0.30) + binomial_at_most(12, 2, 0.30) - 1.0) < 1e-9  # tails partition
+    _z, _p = one_sample_z_test(510, 500, 100, 100, 'two-sided')
+    assert abs(_z - 1.0) < 1e-9 and abs(_p - 0.3173) < 0.001
+    assert abs(one_sample_z_test(3.6, 3.5, 0.35, 50, 'greater')[1] - 0.0217) < 0.002  # botanist Ha: mu>3.5
+    assert count_sign_changes('sin(x)', 'x', 0, 3 * math.pi) == 2   # crosses 0 at pi, 2pi in (0,3pi)
+    assert count_sign_changes('x - 3', 'x', 0, 10) == 1             # one crossing at x=3
+    assert count_sign_changes('x**2 + 1', 'x', -5, 5) == 0          # never zero -> no reversals
     # calculus
     assert Fraction(definite_integral('x**2', 'x', 0, 1)).limit_denominator() == Fraction(1, 3)
     assert abs(definite_integral('x**2', 'x', 0, 1) - 0.3333) < 0.001
@@ -442,4 +504,4 @@ if __name__ == '__main__':
     # common re-exports the model reaches for even off-menu (leak-audit finding: pi/factorial were genuine gaps)
     assert abs(pi - 3.14159265) < 1e-6
     assert factorial(5) == 120
-    print('all math_operators unit tests PASS (', 43 + 6 + 3 + 2, 'operators )')
+    print('all math_operators unit tests PASS (', 43 + 6 + 3 + 3, 'operators )')
