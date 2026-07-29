@@ -154,6 +154,48 @@ test('gate: a REFUTED or INCONCLUSIVE counter-test does not certify', () => {
   }
 })
 
+test('gate: conflicting outcomes for one counter-test do NOT certify', () => {
+  // A confirmed entry must not certify past a refuted one for the same
+  // (claim, ctestId). Conflicting evidence is not evidence of soundness.
+  const v = reason({
+    claims: ['c1'],
+    detectorFirings: firings('c1', 'LOGFALL.STRAWMAN.V2', 0.9, 3),
+    counterTests: [
+      { ctestId: 'CTEST.STEELMAN.CONFIRM.V2', targetClaim: 'c1', outcome: 'confirmed' },
+      { ctestId: 'CTEST.STEELMAN.CONFIRM.V2', targetClaim: 'c1', outcome: 'refuted' },
+    ],
+  })
+  assert.equal(v.verdicts[0]!.severity, 'info', 'conflicting evidence must not certify a block')
+  assert.equal(v.verdicts[0]!.counterTestGate.satisfied, false)
+  assert.deepEqual(v.verdicts[0]!.counterTestGate.missing, ['CTEST.STEELMAN.CONFIRM.V2'])
+})
+
+test('gate: duplicate CONFIRMED entries still certify (agreement, not conflict)', () => {
+  const v = reason({
+    claims: ['c1'],
+    detectorFirings: firings('c1', 'LOGFALL.STRAWMAN.V2', 0.9, 3),
+    counterTests: [
+      { ctestId: 'CTEST.STEELMAN.CONFIRM.V2', targetClaim: 'c1', outcome: 'confirmed' },
+      { ctestId: 'CTEST.STEELMAN.CONFIRM.V2', targetClaim: 'c1', outcome: 'confirmed' },
+    ],
+  })
+  assert.equal(v.verdicts[0]!.severity, 'block')
+  assert.equal(v.verdicts[0]!.counterTestGate.satisfied, true)
+})
+
+test('gate: required and missing lists are de-duplicated', () => {
+  const v = reason({
+    claims: ['c1'],
+    detectorFirings: [
+      ...firings('c1', 'LOGFALL.STRAWMAN.V2', 0.9, 2),
+      ...firings('c1', 'LOGFALL.STRAWMAN.V2', 0.8, 2),
+    ],
+  })
+  const gate = v.verdicts[0]!.counterTestGate
+  assert.deepEqual(gate.required, ['CTEST.STEELMAN.CONFIRM.V2'])
+  assert.deepEqual(gate.missing, ['CTEST.STEELMAN.CONFIRM.V2'])
+})
+
 test('gate: a counter-test confirmed for a DIFFERENT claim does not certify this one', () => {
   const v = reason({
     claims: ['c1'],

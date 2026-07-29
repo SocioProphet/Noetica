@@ -245,14 +245,28 @@ function evaluateCounterTestGate(
   if (provisional !== 'warn' && provisional !== 'block') return { satisfied: true, required: [], missing: [] }
 
   const map = input.requiredCounterTests ?? REQUIRED_COUNTER_TESTS
-  const confirmed = new Set(
-    (input.counterTests ?? [])
-      .filter((t) => t.targetClaim === claim && t.outcome === 'confirmed')
-      .map((t) => t.ctestId),
-  )
 
-  const required: string[] = []
-  const missing: string[] = []
+  // Certification is CONFLICT-INTOLERANT: a counter-test counts as confirmed only
+  // when every result for that (claim, ctestId) says so. Taking "any confirmed"
+  // would let a single confirmed entry certify past a refuted one — an unearned
+  // certification, which is exactly what this gate exists to prevent. Conflicting
+  // evidence is not evidence of soundness.
+  const outcomes = new Map<string, Set<CounterTestOutcome>>()
+  for (const t of input.counterTests ?? []) {
+    if (t.targetClaim !== claim) continue
+    const seen = outcomes.get(t.ctestId) ?? new Set<CounterTestOutcome>()
+    seen.add(t.outcome)
+    outcomes.set(t.ctestId, seen)
+  }
+  const isConfirmed = (ctestId: string): boolean => {
+    const seen = outcomes.get(ctestId)
+    return seen !== undefined && seen.size === 1 && seen.has('confirmed')
+  }
+
+  // Group firings by claim once: the gate is called per claim and would otherwise
+  // rescan every firing for each one.
+  const requiredSet = new Set<string>()
+  const missingSet = new Set<string>()
   const seenRules = new Set<string>()
 
   for (const f of input.detectorFirings) {
@@ -261,15 +275,17 @@ function evaluateCounterTestGate(
 
     const needed = map[f.ruleId]
     if (needed === undefined) {
-      missing.push(undeclaredRequirement(f.ruleId))   // cannot certify what the ruleset never specified
+      missingSet.add(undeclaredRequirement(f.ruleId))   // cannot certify what the ruleset never specified
       continue
     }
     for (const ctestId of needed) {
-      if (!required.includes(ctestId)) required.push(ctestId)
-      if (!confirmed.has(ctestId) && !missing.includes(ctestId)) missing.push(ctestId)
+      requiredSet.add(ctestId)
+      if (!isConfirmed(ctestId)) missingSet.add(ctestId)
     }
   }
 
+  const required = [...requiredSet]
+  const missing = [...missingSet]
   if (missing.length === 0) return { satisfied: true, required, missing }
   return { satisfied: false, required, missing, downgradedFrom: provisional }
 }
