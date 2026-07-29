@@ -190,11 +190,11 @@ async function drain(): Promise<void> {
       if (!job) continue
       try {
         job.status = 'parsing'; job.startedAt = Date.now()
-        const { extractText, ingestDocument } = await import('./doc-store.js')
-        const text = await extractText(job.filename, next.mimeType, next.buf)
+        const { extractTextWithPages, ingestDocument } = await import('./doc-store.js')
+        const { text, pageBreaks } = await extractTextWithPages(job.filename, next.mimeType, next.buf)
         if (!text.trim()) throw new Error('no extractable text in file (scanned image? try OCR)')
         job.status = 'ingesting'
-        const r = await ingestDocument(job.filename, text)
+        const r = await ingestDocument(job.filename, text, { pageBreaks })
         job.chunks = r.chunks; job.entities = r.entities; job.documentId = r.documentId
         job.status = 'done'; job.doneAt = Date.now()
         console.log(`[ingest-queue] done ${job.filename} (${r.chunks} chunks, ${r.entities} entities)`.replace(/[\r\n]/g, ''))

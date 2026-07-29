@@ -42,6 +42,8 @@ import * as path from 'node:path'
 import * as os from 'node:os'
 import * as dns from 'node:dns'
 import * as net from 'node:net'
+import { configReport, refresh as refreshConfig } from './lib/config-plane.js'
+import { migrate as migrateLocalState, recordUsage, usageSnapshot } from './lib/local-state.js'
 import { originAllowed } from './lib/origin-guard.js'
 import { isConfinedToHomeOrTmp } from './lib/path-confine.js'
 import { buildAdaptiveBrief } from './lib/progress.js'
@@ -330,6 +332,11 @@ interface GovernanceRun {
   task?: string
   session_id?: string
   error?: string   // set on failed runs — enables error-rate visibility in GovernSurface
+  // Where the inference actually ran. The router classifies every request as
+  // local/open/hosted, but nothing read routeType, so the local-vs-hosted
+  // decision was computed and discarded on every turn. Sovereignty is not
+  // auditable from provider+model alone, so the classification is recorded here.
+  route_type?: 'local_model' | 'open_model' | 'hosted_balanced' | 'hosted_frontier'
 }
 const _governanceRuns: GovernanceRun[] = []
 const GOVERNANCE_RING_SIZE = 100
@@ -5289,6 +5296,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
       output_tokens: outputTokens,
       cost_usd: costUsd,
       tokens_egressed: egressed,
+      route_type: routerDecision.routeType,
       task: routerDecision.task,
       session_id: sessionId,
     }, (valueJudgment?.worth ?? 1) < 0.35)
@@ -5537,6 +5545,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
       memory_written: false,
       timestamp,
       latency_ms: Date.now() - started,
+      route_type: routerDecision.routeType,
       task: routerDecision.task,
       session_id: sessionId,
       error: errMsg,
@@ -6815,7 +6824,31 @@ const server = http.createServer((req, res) => {
   }
 
   // GET /api/status
+  // ── sovereign config plane ────────────────────────────────────────────────────
+  // GET  /api/config          → every flag WITH the layer that decided it + snapshot age
+  // POST /api/config/refresh  → best-effort pull from our own admin plane (never blocks)
+  // GET  /api/config/usage    → the local usage ledger (never leaves the machine)
+  if (req.method === 'GET' && url.pathname === '/api/config') {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ...configReport(), localState: migrateLocalState() }))
+    return
+  }
+  if (req.method === 'POST' && url.pathname === '/api/config/refresh') {
+    void (async () => {
+      const snapshot = await refreshConfig({ scope: { app: 'noetica' } })
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ refreshed: !!snapshot, ...configReport() }))
+    })()
+    return
+  }
+  if (req.method === 'GET' && url.pathname === '/api/config/usage') {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ usage: usageSnapshot(Number(url.searchParams.get('limit')) || 20) }))
+    return
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/status') {
+    recordUsage('api:status')
     void (async () => {
       const ollamaUp = await isOllamaRunning()
       const localModels = ollamaUp ? await listLocalModels() : []
@@ -9268,13 +9301,13 @@ Question: ${question}`
           const { filename, mimeType, dataBase64, collection } = JSON.parse(Buffer.concat(chunks).toString()) as { filename: string; mimeType?: string; dataBase64: string; collection?: string }
           if (!filename || !dataBase64) throw new Error('filename and dataBase64 required')
           const buf = Buffer.from(dataBase64, 'base64')
-          const { extractText, ingestDocument } = await import('./lib/doc-store.js')
-          const text = await extractText(filename, mimeType ?? '', buf)
+          const { extractTextWithPages, ingestDocument } = await import('./lib/doc-store.js')
+          const { text, pageBreaks } = await extractTextWithPages(filename, mimeType ?? '', buf)
           if (!text.trim()) throw new Error('no extractable text in file')
           // Bind the upload to a collection (the active project's KB or the current chat) so retrieval can
           // scope to it; unscoped uploads keep their bare filename (global inbox), unchanged.
           const storedName = collection ? (await import('./lib/doc-scope.js')).collectionPath(collection, filename) : filename
-          const result = await ingestDocument(storedName, text)
+          const result = await ingestDocument(storedName, text, { pageBreaks })
           res.writeHead(200, { 'content-type': 'application/json' })
           res.end(JSON.stringify(result))
         } catch (err) {
@@ -9924,12 +9957,12 @@ Question: ${question}`
           const fs = await import('node:fs')
           const buf = fs.readFileSync(resolved)
           const filename = path.basename(resolved)
-          const { extractText, ingestDocument } = await import('./lib/doc-store.js')
-          const text = await extractText(filename, '', buf)
+          const { extractTextWithPages, ingestDocument } = await import('./lib/doc-store.js')
+          const { text, pageBreaks } = await extractTextWithPages(filename, '', buf)
           if (!text.trim()) throw new Error('no extractable text in file')
           // Bind to the active project's / chat's collection when provided (scoped retrieval); else global.
           const storedName = collection ? (await import('./lib/doc-scope.js')).collectionPath(collection, filename) : filename
-          const result = await ingestDocument(storedName, text)
+          const result = await ingestDocument(storedName, text, { pageBreaks })
           res.writeHead(200, { 'content-type': 'application/json' })
           res.end(JSON.stringify(result))
         } catch (err) {

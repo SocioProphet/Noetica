@@ -46,8 +46,14 @@ export interface RouterDecision {
   specialistAgents: string[]
   policyDecision: PolicyDecision
   rationale: string
-  evidenceRef: string
-  auditRef: string
+  // Set ONLY when a persisted artifact actually exists to point at. These were
+  // previously always populated with `evidence:${requestId}` / `audit:${requestId}`,
+  // which resolved to nothing — no store is keyed by requestId, and nothing read
+  // either field. A reference that looks resolvable but is not is worse than an
+  // absent one, so absence is the honest default and a value here is a claim
+  // that the target exists.
+  evidenceRef?: string
+  auditRef?: string
   // Set only on the security-research path. Carries the self-attestation state and
   // which rung of the security lane was selected — recorded for the Govern audit.
   securityLane?: {
@@ -281,8 +287,6 @@ export function buildRouterDecision(opts: {
         rationale: explicitModelId
           ? `Switched to ${visionModel}: the selected model (${explicitModelId}) can\u2019t process images.`
           : `Vision request \u2014 routing to ${visionModel} for image understanding.`,
-        evidenceRef: `evidence:${requestId}`,
-        auditRef: `audit:${requestId}`,
         controls: FULL_CONTROLS,
         resolvedModel: visionModel,
         resolvedProvider: 'ollama',
@@ -312,8 +316,6 @@ export function buildRouterDecision(opts: {
         specialistAgents: ['governance-sentinel'],
         policyDecision: 'allow',
         rationale: `SECURITY_RESEARCHER profile requested WITHOUT self-attestation — security lane DISARMED; routing to standard local model (${safe}). Accept the attestation in Settings → Policy to arm the uncensored lane.`,
-        evidenceRef: `evidence:${requestId}`,
-        auditRef: `audit:${requestId}`,
         controls: FULL_CONTROLS,
         securityLane: { armed: false, attested: false, rung: 'disarmed', model: safe },
         resolvedModel: safe,
@@ -333,8 +335,6 @@ export function buildRouterDecision(opts: {
       specialistAgents: ['security-agent', 'governance-sentinel'],
       policyDecision: 'allow',
       rationale: `CITIZEN_FOG / SECURITY_RESEARCHER profile (self-attested) — armed ${rung} security lane → ${secModel}. Sovereign local compute; CBRN/CSAM/explosives content floor still enforced upstream.`,
-      evidenceRef: `evidence:${requestId}`,
-      auditRef: `audit:${requestId}`,
       controls: FULL_CONTROLS,
       securityLane: { armed: true, attested: true, rung, model: secModel },
       resolvedModel: secModel,
@@ -357,8 +357,6 @@ export function buildRouterDecision(opts: {
       specialistAgents: route.specialistAgents,
       policyDecision: route.policyDecision,
       rationale: `Explicit model override: ${explicitModelId}${baseUrl ? ` (via ${provider})` : ''}`,
-      evidenceRef: `evidence:${requestId}`,
-      auditRef: `audit:${requestId}`,
       controls: FULL_CONTROLS,
       resolvedModel: bareModel,
       resolvedProvider: provider,
@@ -409,8 +407,6 @@ export function buildRouterDecision(opts: {
       specialistAgents: route.specialistAgents,
       policyDecision: route.policyDecision,
       rationale: route.rationale,
-      evidenceRef: `evidence:${requestId}`,
-      auditRef: `audit:${requestId}`,
       controls: FULL_CONTROLS,
       resolvedModel: modelToUse,
       resolvedProvider: 'ollama',
@@ -433,8 +429,6 @@ export function buildRouterDecision(opts: {
         specialistAgents: route.specialistAgents,
         policyDecision: route.policyDecision,
         rationale: `Local Ollama unavailable — routing to cloud augmentation (${provider}/${model}).`,
-        evidenceRef: `evidence:${requestId}`,
-        auditRef: `audit:${requestId}`,
         controls: FULL_CONTROLS,
         resolvedModel: model,
         resolvedProvider: provider,
@@ -455,8 +449,6 @@ export function buildRouterDecision(opts: {
       specialistAgents: route.specialistAgents,
       policyDecision: route.policyDecision,
       rationale: 'Local Ollama unavailable — routing to Anthropic Claude.',
-      evidenceRef: `evidence:${requestId}`,
-      auditRef: `audit:${requestId}`,
       controls: FULL_CONTROLS,
       resolvedModel: 'claude-sonnet-4-6',
       resolvedProvider: 'anthropic',
@@ -475,8 +467,6 @@ export function buildRouterDecision(opts: {
       specialistAgents: route.specialistAgents,
       policyDecision: route.policyDecision,
       rationale: 'Local Ollama unavailable — routing to OpenAI GPT-5.5.',
-      evidenceRef: `evidence:${requestId}`,
-      auditRef: `audit:${requestId}`,
       controls: FULL_CONTROLS,
       resolvedModel: 'gpt-5.5',
       resolvedProvider: 'openai',

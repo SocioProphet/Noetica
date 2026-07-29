@@ -23,7 +23,8 @@
     "verify:audit": "tsx scripts/verify-audit.mts",
     "broker:start": "node dist/lib/sovereign-broker-main.js",
     "broker:dev": "tsx lib/sovereign-broker-main.ts",
-    "broker:build": "esbuild lib/sovereign-broker-main.ts --bundle --platform=node --target=node18 --outfile=dist/lib/sovereign-broker-main.js --external:node:*"
+    "broker:build": "esbuild lib/sovereign-broker-main.ts --bundle --platform=node --target=node18 --outfile=dist/lib/sovereign-broker-main.js --external:node:*",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
