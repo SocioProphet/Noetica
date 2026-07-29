@@ -4,14 +4,20 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  reason, routeCtest, CTEST_ROUTING, DEFAULT_THRESHOLDS,
-  type ReasonerInput, type DetectorFiring,
+  reason, routeCtest, CTEST_ROUTING, DEFAULT_THRESHOLDS, REQUIRED_COUNTER_TESTS, undeclaredRequirement,
+  type ReasonerInput, type DetectorFiring, type CounterTestResult,
 } from './reasoner.js'
 
 // helper: N detector firings against one claim, so the small-N gate can be exercised
 function firings(claim: string, ruleId: string, score: number, n: number): DetectorFiring[] {
   return Array.from({ length: n }, () => ({ ruleId, targetClaim: claim, score }))
 }
+
+/** LOGFALL.STRAWMAN.V2's ruleset-required counter-test, CONFIRMED. Supplied by the composition tests so
+ *  they exercise the §9 severity math rather than the counter-test gate — the gate has its own tests. */
+const steelmanConfirmed = (claim: string): CounterTestResult[] => [
+  { ctestId: 'CTEST.STEELMAN.CONFIRM.V2', targetClaim: claim, outcome: 'confirmed' },
+]
 
 test('a clean claim with no firings is pass and clear', () => {
   const v = reason({ claims: ['c1'], detectorFirings: [] })
@@ -23,7 +29,11 @@ test('a clean claim with no firings is pass and clear', () => {
 test('§9 SEV-1 composition: three sub-warn detections jointly cross into block, none would alone', () => {
   // 30 firings so the FULL MAP regime applies (small-N gate satisfied). Each modest negative weight;
   // they SUM on the same IsSound atom, driving pSound down past θ_block.
-  const input: ReasonerInput = { claims: ['c1'], detectorFirings: firings('c1', 'LOGFALL.STRAWMAN.V2', 0.3, 30) }
+  const input: ReasonerInput = {
+    claims: ['c1'],
+    detectorFirings: firings('c1', 'LOGFALL.STRAWMAN.V2', 0.3, 30),
+    counterTests: steelmanConfirmed('c1'),
+  }
   const v = reason(input)
   assert.equal(v.verdicts[0]!.measurementQuality, 'full')
   assert.ok(v.verdicts[0]!.pSound < DEFAULT_THRESHOLDS.block, 'summed negative weights push pSound below θ_block')
@@ -44,7 +54,11 @@ test('contradiction tolerance: strong grounded evidence offsets a detection rath
 })
 
 test('§9 SEV-3 small-N gate: ≤10 firings falls back to deterministic per-detector severity (measurementQuality=fallback)', () => {
-  const input: ReasonerInput = { claims: ['c1'], detectorFirings: firings('c1', 'LOGFALL.STRAWMAN.V2', 0.9, 3) }
+  const input: ReasonerInput = {
+    claims: ['c1'],
+    detectorFirings: firings('c1', 'LOGFALL.STRAWMAN.V2', 0.9, 3),
+    counterTests: steelmanConfirmed('c1'),
+  }
   const v = reason(input)
   assert.equal(v.verdicts[0]!.measurementQuality, 'fallback')
   assert.equal(v.verdicts[0]!.contributingFirings, 3)
@@ -93,10 +107,96 @@ test('multiple claims are judged independently; the set is clear only if none bl
   const input: ReasonerInput = {
     claims: ['c1', 'c2'],
     detectorFirings: firings('c1', 'LOGFALL.STRAWMAN.V2', 0.9, 3),   // c1 blocks (fallback)
+    counterTests: steelmanConfirmed('c1'),
   }
   const v = reason(input)
   assert.equal(v.verdicts.find((x) => x.claim === 'c2')!.severity, 'pass')
   assert.equal(v.clear, false)   // c1's block fails the whole set
+})
+
+
+// ─── the counter-test gate (counter_tests_required_for_warn_or_block) ─────────────────────────────────
+
+test('gate: a block with NO counter-test run is downgraded to info, not asserted', () => {
+  const input: ReasonerInput = { claims: ['c1'], detectorFirings: firings('c1', 'LOGFALL.STRAWMAN.V2', 0.9, 3) }
+  const v = reason(input)
+  const verdict = v.verdicts[0]!
+  assert.equal(verdict.provisionalSeverity, 'block', 'composition still computes block')
+  assert.equal(verdict.severity, 'info', 'but an un-counter-tested block may not stand')
+  assert.equal(verdict.counterTestGate.satisfied, false)
+  assert.equal(verdict.counterTestGate.downgradedFrom, 'block')
+  assert.deepEqual(verdict.counterTestGate.missing, ['CTEST.STEELMAN.CONFIRM.V2'])
+  assert.equal(v.gatedDowngrades, 1)
+  assert.equal(v.clear, true, 'an uncertified block does not fail the set')
+})
+
+test('gate: the same block STANDS once its required counter-test confirms', () => {
+  const input: ReasonerInput = {
+    claims: ['c1'],
+    detectorFirings: firings('c1', 'LOGFALL.STRAWMAN.V2', 0.9, 3),
+    counterTests: steelmanConfirmed('c1'),
+  }
+  const v = reason(input)
+  assert.equal(v.verdicts[0]!.severity, 'block')
+  assert.equal(v.verdicts[0]!.counterTestGate.satisfied, true)
+  assert.equal(v.gatedDowngrades, 0)
+  assert.equal(v.clear, false)
+})
+
+test('gate: a REFUTED or INCONCLUSIVE counter-test does not certify', () => {
+  for (const outcome of ['refuted', 'inconclusive'] as const) {
+    const v = reason({
+      claims: ['c1'],
+      detectorFirings: firings('c1', 'LOGFALL.STRAWMAN.V2', 0.9, 3),
+      counterTests: [{ ctestId: 'CTEST.STEELMAN.CONFIRM.V2', targetClaim: 'c1', outcome }],
+    })
+    assert.equal(v.verdicts[0]!.severity, 'info', `${outcome} must not certify a block`)
+  }
+})
+
+test('gate: a counter-test confirmed for a DIFFERENT claim does not certify this one', () => {
+  const v = reason({
+    claims: ['c1'],
+    detectorFirings: firings('c1', 'LOGFALL.STRAWMAN.V2', 0.9, 3),
+    counterTests: steelmanConfirmed('other-claim'),
+  })
+  assert.equal(v.verdicts[0]!.severity, 'info')
+  assert.equal(v.verdicts[0]!.counterTestGate.satisfied, false)
+})
+
+test('gate: a detector with an UNDECLARED requirement cannot certify (unknown is not satisfied)', () => {
+  // LOGFALL.ADHOMINEM.V1 is the id debate-detectors.ts implements; the 1.3.0 ruleset declares
+  // LOGFALL.ADHOM.V2. The namespaces diverge, so the requirement is undeclared and cannot be certified.
+  assert.equal(REQUIRED_COUNTER_TESTS['LOGFALL.ADHOMINEM.V1'], undefined)
+  const v = reason({ claims: ['c1'], detectorFirings: firings('c1', 'LOGFALL.ADHOMINEM.V1', 0.9, 3) })
+  assert.equal(v.verdicts[0]!.provisionalSeverity, 'block')
+  assert.equal(v.verdicts[0]!.severity, 'info')
+  assert.deepEqual(v.verdicts[0]!.counterTestGate.missing, [undeclaredRequirement('LOGFALL.ADHOMINEM.V1')])
+})
+
+test('gate: info and pass severities are never gated (nothing to certify)', () => {
+  const v = reason({ claims: ['c1'], detectorFirings: [] })
+  assert.equal(v.verdicts[0]!.severity, 'pass')
+  assert.equal(v.verdicts[0]!.counterTestGate.satisfied, true)
+  assert.equal(v.verdicts[0]!.counterTestGate.required.length, 0)
+})
+
+test('gate: a §5 POLICY hard block is NOT gated — independent authority', () => {
+  const v = reason({
+    claims: ['c1'],
+    detectorFirings: [],
+    policyConstraints: [{ claim: 'c1', reason: 'POLICY.CSAM.V1' }],
+  })
+  assert.equal(v.verdicts[0]!.severity, 'block', 'policy authority does not need a counter-test')
+  assert.equal(v.verdicts[0]!.counterTestGate.satisfied, true)
+  assert.equal(v.clear, false)
+})
+
+test('gate: every counter-test named in the map is a CTEST id', () => {
+  for (const [ruleId, ctests] of Object.entries(REQUIRED_COUNTER_TESTS)) {
+    assert.ok(ctests.length > 0, `${ruleId} declares no counter-test`)
+    for (const id of ctests) assert.match(id, /^CTEST\./)
+  }
 })
 
 // ─── §6 counter-test routing ───────────────────────────────────────────────────────────────────────────
