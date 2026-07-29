@@ -9275,13 +9275,13 @@ Question: ${question}`
           const { filename, mimeType, dataBase64, collection } = JSON.parse(Buffer.concat(chunks).toString()) as { filename: string; mimeType?: string; dataBase64: string; collection?: string }
           if (!filename || !dataBase64) throw new Error('filename and dataBase64 required')
           const buf = Buffer.from(dataBase64, 'base64')
-          const { extractText, ingestDocument } = await import('./lib/doc-store.js')
-          const text = await extractText(filename, mimeType ?? '', buf)
+          const { extractTextWithPages, ingestDocument } = await import('./lib/doc-store.js')
+          const { text, pageBreaks } = await extractTextWithPages(filename, mimeType ?? '', buf)
           if (!text.trim()) throw new Error('no extractable text in file')
           // Bind the upload to a collection (the active project's KB or the current chat) so retrieval can
           // scope to it; unscoped uploads keep their bare filename (global inbox), unchanged.
           const storedName = collection ? (await import('./lib/doc-scope.js')).collectionPath(collection, filename) : filename
-          const result = await ingestDocument(storedName, text)
+          const result = await ingestDocument(storedName, text, { pageBreaks })
           res.writeHead(200, { 'content-type': 'application/json' })
           res.end(JSON.stringify(result))
         } catch (err) {
@@ -9931,12 +9931,12 @@ Question: ${question}`
           const fs = await import('node:fs')
           const buf = fs.readFileSync(resolved)
           const filename = path.basename(resolved)
-          const { extractText, ingestDocument } = await import('./lib/doc-store.js')
-          const text = await extractText(filename, '', buf)
+          const { extractTextWithPages, ingestDocument } = await import('./lib/doc-store.js')
+          const { text, pageBreaks } = await extractTextWithPages(filename, '', buf)
           if (!text.trim()) throw new Error('no extractable text in file')
           // Bind to the active project's / chat's collection when provided (scoped retrieval); else global.
           const storedName = collection ? (await import('./lib/doc-scope.js')).collectionPath(collection, filename) : filename
-          const result = await ingestDocument(storedName, text)
+          const result = await ingestDocument(storedName, text, { pageBreaks })
           res.writeHead(200, { 'content-type': 'application/json' })
           res.end(JSON.stringify(result))
         } catch (err) {

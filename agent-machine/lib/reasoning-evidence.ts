@@ -441,6 +441,15 @@ export interface Citation {
   ref: string
   score: number
   grounding_status?: string
+  /** Where in the source this citation points. `ref` names the document; without these a
+   *  reader can only be told WHICH file to go read, never WHERE to look in it.
+   *  `provenance_version` states the grade actually carried — documents ingested before
+   *  spans were recorded resolve to 'chunk-ordinal' and must not be read as located. */
+  provenance_version?: 'document-only' | 'chunk-ordinal' | 'character-span'
+  start?: number
+  end?: number
+  page?: number
+  extraction_digest?: string
 }
 
 /** Build numbered inline citations from the retrieved chunks already used for the turn.
@@ -448,7 +457,11 @@ export interface Citation {
  *  text. Numbered [1],[2],… in retrieval order. Returns [] when no retrieval ran, or on
  *  any error. PURE + exception-safe. */
 export function buildCitations(
-  hits: ReadonlyArray<{ docId?: string | null; filename?: string | null; title?: string | null; score?: number | null }> | null | undefined,
+  hits: ReadonlyArray<{
+    docId?: string | null; filename?: string | null; title?: string | null; score?: number | null
+    start?: number | null; end?: number | null; page?: number | null
+    provenanceVersion?: string | null; extractionDigest?: string | null
+  }> | null | undefined,
   groundingStatus?: string | null,
 ): Citation[] {
   try {
@@ -457,11 +470,19 @@ export function buildCitations(
       const source = String(h?.title ?? h?.filename ?? h?.docId ?? 'source').slice(0, 200)
       const ref = String(h?.docId ?? h?.filename ?? '').slice(0, 200)
       const score = typeof h?.score === 'number' && Number.isFinite(h.score) ? h.score : 0
+      // Offsets only accompany a locator grade that justifies them. A start/end emitted
+      // without 'character-span' would read as located when it is not.
+      const located = h?.provenanceVersion === 'character-span'
+        && typeof h?.start === 'number' && typeof h?.end === 'number'
       return {
         n: i + 1,
         source,
         ref,
         score,
+        ...(h?.provenanceVersion ? { provenance_version: h.provenanceVersion as Citation['provenance_version'] } : {}),
+        ...(located ? { start: h.start as number, end: h.end as number } : {}),
+        ...(located && typeof h?.page === 'number' ? { page: h.page } : {}),
+        ...(located && h?.extractionDigest ? { extraction_digest: String(h.extractionDigest) } : {}),
         ...(groundingStatus ? { grounding_status: String(groundingStatus) } : {}),
       }
     })

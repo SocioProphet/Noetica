@@ -28,11 +28,19 @@ const CHUNK_LABEL = 'DocumentChunk'
  * yaml, code, Claude memory markdown) treated as UTF-8. Async because of the imports.
  */
 export async function extractText(filename: string, mimeType: string, buf: Buffer): Promise<string> {
+  return (await extractTextWithPages(filename, mimeType, buf)).text
+}
+
+/** Extraction result carrying page boundaries when the format has pages.
+ *  `pageBreaks[n]` is the offset into `normalizeForOffsets(text)` at which page n+2 begins. */
+export interface Extraction { text: string; pageBreaks: number[] }
+
+export async function extractTextWithPages(filename: string, mimeType: string, buf: Buffer): Promise<Extraction> {
   const lower = filename.toLowerCase()
   if (lower.endsWith('.docx') || mimeType.includes('officedocument.wordprocessingml')) {
     const mammoth = await import('mammoth')
     const { value } = await mammoth.extractRawText({ buffer: buf })
-    return value.replace(/\n{3,}/g, '\n\n').trim()
+    return { text: value.replace(/\n{3,}/g, '\n\n').trim(), pageBreaks: [] }
   }
   if (lower.endsWith('.pdf') || mimeType === 'application/pdf') {
     // unpdf — pure-JS pdfjs built for bundled/serverless runtimes (zero deps, NO canvas/DOMMatrix). pdf-parse v2
@@ -41,10 +49,26 @@ export async function extractText(filename: string, mimeType: string, buf: Buffe
     // bun-compiled standalone, so every PDF ingest failed with internal_error. unpdf bundles cleanly.
     const { extractText: pdfExtract, getDocumentProxy } = await import('unpdf')
     const doc = await getDocumentProxy(new Uint8Array(buf))
-    const { text } = await pdfExtract(doc, { mergePages: true })
-    const out = (typeof text === 'string' ? text : (text as string[]).join('\n')).replace(/\n{3,}/g, '\n\n').trim()
+    // mergePages:false — the previous `true` collapsed the page array into one string and
+    // destroyed page numbers at ingest, permanently: no amount of downstream work can
+    // recover which page a passage came from once the boundaries are gone.
+    const { text } = await pdfExtract(doc, { mergePages: false })
+    const pages = (typeof text === 'string' ? [text] : (text as string[]))
+      // Strip \r and collapse blank runs PER PAGE, so the page lengths measured below are
+      // the lengths in the final string. normalizeForOffsets then only has to trim.
+      .map((p) => String(p ?? '').replace(/\r/g, '').replace(/\n{3,}/g, '\n\n'))
+    const joined = pages.join('\n')
+    const out = joined.trim()
     if (!out) throw new Error('PDF has no extractable text (scanned image?) — paste the text or run OCR')
-    return out
+    // Leading whitespace removed by trim() shifts every offset left by the same amount.
+    const leadTrim = joined.length - joined.trimStart().length
+    const pageBreaks: number[] = []
+    let off = 0
+    for (let i = 0; i < pages.length; i++) {
+      if (i > 0) pageBreaks.push(Math.max(0, off - leadTrim))
+      off += pages[i]!.length + 1        // +1 for the '\n' joiner
+    }
+    return { text: out, pageBreaks }
   }
   if (/\.(png|jpe?g|gif|webp|bmp|tiff?|heic|heif)$/.test(lower) || mimeType.startsWith('image/')) {
     // Images → OCR (macOS Vision framework / Linux tesseract, via lib/ocr.ts). Write to a temp file
@@ -59,7 +83,7 @@ export async function extractText(filename: string, mimeType: string, buf: Buffe
       const { runOcr } = await import('./ocr.js')
       const text = (await runOcr(tmp)).trim()
       if (!text || /^OCR unavailable/.test(text)) throw new Error(text || 'no text recognized in image')
-      return text
+      return { text, pageBreaks: [] }
     } finally {
       try { fs.unlinkSync(tmp) } catch { /* best-effort cleanup */ }
     }
@@ -68,19 +92,20 @@ export async function extractText(filename: string, mimeType: string, buf: Buffe
     // Pretty-print so keys/values chunk on line boundaries instead of one giant line; fall back to
     // raw text if it isn't valid JSON (e.g. JSONL / trailing-comma configs).
     const raw = buf.toString('utf8')
-    try { return JSON.stringify(JSON.parse(raw), null, 2) } catch { return raw }
+    try { return { text: JSON.stringify(JSON.parse(raw), null, 2), pageBreaks: [] } } catch { return { text: raw, pageBreaks: [] } }
   }
   if (lower.endsWith('.html') || lower.endsWith('.htm') || mimeType === 'text/html') {
     // Strip scripts/styles/tags → readable text.
-    return buf.toString('utf8')
+    const text = buf.toString('utf8')
       .replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ')
       .replace(/<!--[\s\S]*?-->/g, ' ')
       .replace(/<[^>]+>/g, ' ')
       .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&quot;/g, '"')
       .replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim()
+    return { text, pageBreaks: [] }
   }
   // Everything else: treat as UTF-8 text (txt, md, csv, tsv, yaml, code, Claude memory markdown, …).
-  return buf.toString('utf8')
+  return { text: buf.toString('utf8'), pageBreaks: [] }
 }
 
 // ─── Chunking ─────────────────────────────────────────────────────────────────
@@ -88,10 +113,31 @@ export async function extractText(filename: string, mimeType: string, buf: Buffe
 const CHUNK_SIZE = 1100
 const CHUNK_OVERLAP = 150
 
-export function chunkText(text: string): string[] {
-  const clean = text.replace(/\r/g, '').trim()
-  if (clean.length <= CHUNK_SIZE) return clean ? [clean] : []
-  const chunks: string[] = []
+/** A chunk plus its half-open [start,end) range over the normalized extraction. */
+export interface TextSpan { text: string; start: number; end: number }
+
+/** The exact text that offsets index into. Offsets are meaningless without a fixed
+ *  normalization, so it is applied once here rather than re-derived per call site. */
+export function normalizeForOffsets(text: string): string {
+  return text.replace(/\r/g, '').trim()
+}
+
+/** Digest of the normalized extraction. A verifier holding a different extraction of
+ *  the same document has different offsets; this is what lets them detect that. */
+export function extractionDigestOf(text: string): string {
+  return 'sha256:' + createHash('sha256').update(normalizeForOffsets(text)).digest('hex')
+}
+
+/** Chunk while KEEPING the offsets the windowing already computes.
+ *
+ *  The previous implementation calculated `i` and `end` for every chunk and discarded
+ *  both, returning bare strings. That left `filename#chunkIndex` as the finest provenance
+ *  the system could express — a pointer into a derived artifact that only resolves if the
+ *  chunker is re-run identically. The offsets were always there; they were thrown away. */
+export function chunkTextWithSpans(text: string): TextSpan[] {
+  const clean = normalizeForOffsets(text)
+  if (clean.length <= CHUNK_SIZE) return clean ? [{ text: clean, start: 0, end: clean.length }] : []
+  const spans: TextSpan[] = []
   let i = 0
   while (i < clean.length) {
     let end = Math.min(i + CHUNK_SIZE, clean.length)
@@ -101,12 +147,33 @@ export function chunkText(text: string): string[] {
       const br = Math.max(slice.lastIndexOf('\n\n'), slice.lastIndexOf('. '))
       if (br > CHUNK_SIZE * 0.5) end = i + br + 1
     }
-    chunks.push(clean.slice(i, end).trim())
+    const raw = clean.slice(i, end)
+    // Trimming shifts the true start, so recover it: a span must resolve to the stored
+    // text character-for-character, not approximately.
+    const lead = raw.length - raw.trimStart().length
+    const body = raw.trim()
+    if (body.length) spans.push({ text: body, start: i + lead, end: i + lead + body.length })
     if (end >= clean.length) break          // reached the end — terminate (else i loops on the tail)
     const next = end - CHUNK_OVERLAP
     i = next > i ? next : end                // never move backward or stall
   }
-  return chunks.filter((c) => c.length > 0)
+  return spans
+}
+
+export function chunkText(text: string): string[] {
+  return chunkTextWithSpans(text).map((s) => s.text)
+}
+
+/** Resolve a character offset to a 1-based page number.
+ *  `pageBreaks[n]` is the offset at which page n+2 begins. */
+export function pageOfOffset(pageBreaks: number[] | undefined, offset: number): number | undefined {
+  if (!pageBreaks || !pageBreaks.length) return undefined
+  let page = 1
+  for (const brk of pageBreaks) {
+    if (offset < brk) break
+    page++
+  }
+  return page
 }
 
 // ─── Ingest ─────────────────────────────────────────────────────────────────
@@ -198,7 +265,7 @@ function linkProjections(g: ReturnType<typeof getHellGraph>, docId: string): { c
 /** Chunk → embed → store as DocumentChunk atoms (text + vector + provenance).
  *  Content-addressed + idempotent: re-uploading identical content is a no-op
  *  (no duplicate chunks skewing retrieval). */
-export async function ingestDocument(filename: string, text: string): Promise<IngestResult> {
+export async function ingestDocument(filename: string, text: string, opts?: { pageBreaks?: number[] }): Promise<IngestResult> {
   const g = getHellGraph()
   const hash = createHash('sha1').update(text).digest('hex').slice(0, 12)
   const docId = `urn:noetica:doc:${slug(filename)}-${hash}`
@@ -210,14 +277,17 @@ export async function ingestDocument(filename: string, text: string): Promise<In
     linkProjections(g, docId)   // backfill projection edges on re-ingest of older docs
     return { documentId: docId, filename, chunks: existing.length, embedded: existing.filter((n) => String(n.properties['embedding'] ?? '')).length, preview: previewOf(existing.map((n) => String(n.properties['text'] ?? ''))), entities: gr.entities, grounding: { confirmed: gr.confirmed, residual: gr.residual } }
   }
-  const chunks = chunkText(text)
+  const spans = chunkTextWithSpans(text)
+  const chunks = spans.map((s) => s.text)
   let embedded = 0
   const tierItems: Array<{ id: string; vec: number[]; meta: Record<string, unknown> }> = []
-  for (let idx = 0; idx < chunks.length; idx++) {
-    const chunk = chunks[idx]!
+  for (let idx = 0; idx < spans.length; idx++) {
+    const { text: chunk, start, end } = spans[idx]!
     const vec = await embedText(chunk)
-    if (vec.length) { embedded++; tierItems.push({ id: `${docId}#${idx}`, vec, meta: { docId, filename, idx, text: chunk } }) }
+    if (vec.length) { embedded++; tierItems.push({ id: `${docId}#${idx}`, vec, meta: { docId, filename, idx, text: chunk, start, end } }) }
     // Store via HellGraph's canonical vector pipeline (one chunk representation everywhere).
+    // putChunk is HellGraph's contract and is not extended here — the spans ride on the
+    // Document atom below, which this module owns.
     hgPutChunk({ docId, idx, text: chunk, vec, filename })
   }
   // Dual-write to the extracted vector tier (per-collection ANN in the sidecar). Retrieval prefers it; the graph
@@ -229,7 +299,20 @@ export async function ingestDocument(filename: string, text: string): Promise<In
   // audited later) and stamp the Document atom with the hash that points to it.
   let rawHash = ''
   try { const { putBlob } = await import('./blob-store.js'); rawHash = putBlob(text).hash } catch { /* blob store best-effort */ }
-  g.addNode(docId, ['Document'], { filename, chunk_count: chunks.length, created_at: new Date().toISOString(), ...(rawHash ? { raw_hash: rawHash, raw_bytes: Buffer.byteLength(text) } : {}) })
+  // Provenance carried on the Document atom: the spans each chunk occupies, the digest of
+  // the extraction those offsets index into, and page boundaries when the format had pages.
+  // provenance_version states the grade actually stored — documents ingested before this
+  // existed carry no spans, and must not be read as though they do.
+  g.addNode(docId, ['Document'], {
+    filename,
+    chunk_count: chunks.length,
+    created_at: new Date().toISOString(),
+    provenance_version: 'character-span',
+    extraction_digest: extractionDigestOf(text),
+    chunk_spans: JSON.stringify(spans.map((s) => [s.start, s.end])),
+    ...(opts?.pageBreaks?.length ? { page_breaks: JSON.stringify(opts.pageBreaks) } : {}),
+    ...(rawHash ? { raw_hash: rawHash, raw_bytes: Buffer.byteLength(text) } : {}),
+  })
   // Ground the doc through the ontology (perception → epistemic substrate).
   const gr = groundThroughOntology(docId, text)
   // Link the source doc to ALL its projections as explicit edges (chunks + entities).
@@ -243,7 +326,47 @@ export async function ingestDocument(filename: string, text: string): Promise<In
 // (CPU-variant aware) and the NOETICA_DEMO_DOC scope — so there is ONE vector store and
 // ONE search implementation. Brain injection: see scripts/inject-brain.ts → importBrainShard.
 
-export interface ChunkHit { text: string; filename: string; score: number; docId: string; idx?: number }
+export interface ChunkHit {
+  text: string; filename: string; score: number; docId: string; idx?: number
+  /** Half-open [start,end) over the normalized extraction. Present only for documents
+   *  ingested with span provenance; `provenanceVersion` says which grade this hit carries. */
+  start?: number
+  end?: number
+  page?: number
+  provenanceVersion?: 'document-only' | 'chunk-ordinal' | 'character-span'
+  /** Digest of the extraction the offsets index into — offsets against a different
+   *  extraction of the same document are wrong, and this is how a reader detects that. */
+  extractionDigest?: string
+}
+
+/** Locator metadata for a chunk, read from the Document atom.
+ *
+ *  Returns `chunk-ordinal` for documents ingested before spans were recorded: they are
+ *  resolvable only by re-running the chunker identically, which is a weaker claim, and
+ *  the difference has to stay visible rather than being smoothed over. */
+export function resolveChunkLocator(docId: string, idx: number): {
+  provenanceVersion: 'chunk-ordinal' | 'character-span'
+  start?: number; end?: number; page?: number; extractionDigest?: string
+} {
+  try {
+    const doc = getHellGraph().getNode(docId)
+    const props = doc?.properties ?? {}
+    if (String(props['provenance_version'] ?? '') !== 'character-span') return { provenanceVersion: 'chunk-ordinal' }
+    const spans = JSON.parse(String(props['chunk_spans'] ?? '[]')) as Array<[number, number]>
+    const span = spans[idx]
+    if (!span) return { provenanceVersion: 'chunk-ordinal' }
+    const breaks = props['page_breaks'] ? (JSON.parse(String(props['page_breaks'])) as number[]) : undefined
+    return {
+      provenanceVersion: 'character-span',
+      start: span[0],
+      end: span[1],
+      page: pageOfOffset(breaks, span[0]),
+      extractionDigest: String(props['extraction_digest'] ?? '') || undefined,
+    }
+  } catch {
+    return { provenanceVersion: 'chunk-ordinal' }
+  }
+}
 
 /**
  * Retrieval scope (Projects). Confines document retrieval to a set of collections so a chat reads only
@@ -295,7 +418,9 @@ export function lexicalSearch(query: string, k = 15, docScope?: DocScope): Chunk
   for (const r of bm25(query, docs)) {
     if (r.score <= 0) break   // bm25() returns sorted desc; the rest are non-matches
     const n = nodes[Number(r.id)]!
-    out.push({ text: String(n.properties['text'] ?? ''), filename: String(n.properties['filename'] ?? ''), score: r.score, docId: String(n.properties['doc_id'] ?? ''), idx: Number(n.properties['idx'] ?? 0) })
+    const _docId = String(n.properties['doc_id'] ?? '')
+    const _idx = Number(n.properties['idx'] ?? 0)
+    out.push({ text: String(n.properties['text'] ?? ''), filename: String(n.properties['filename'] ?? ''), score: r.score, docId: _docId, idx: _idx, ...resolveChunkLocator(_docId, _idx) })
     if (out.length >= k) break
   }
   return out
@@ -354,7 +479,11 @@ async function tierSemanticSearch(query: string, k: number, docScope?: DocScope)
     const merged = (await Promise.all(cols.map((c) => vecQuery(c, { text: query, k })))).flat()
     if (merged.length === 0) return scopedGraph(k)
     const hits: ChunkHit[] = merged
-      .map((h) => ({ text: String(h.meta['text'] ?? ''), filename: String(h.meta['filename'] ?? ''), score: h.score, docId: String(h.meta['docId'] ?? ''), idx: Number(h.meta['idx'] ?? 0) }))
+      .map((h) => {
+        const docId = String(h.meta['docId'] ?? '')
+        const idx = Number(h.meta['idx'] ?? 0)
+        return { text: String(h.meta['text'] ?? ''), filename: String(h.meta['filename'] ?? ''), score: h.score, docId, idx, ...resolveChunkLocator(docId, idx) }
+      })
       .filter((h) => h.text && chunkInScope(h.filename, docScope))
       .sort((a, b) => b.score - a.score)
       .slice(0, k)

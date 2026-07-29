@@ -12,6 +12,58 @@
 
 export interface EvidenceChunk { id: string; text: string }
 export interface EvidenceCitation { id: string; span: string }
+
+/** A citation whose quoted excerpt has been LOCATED in the source, not merely matched.
+ *
+ *  `span` is a verbatim excerpt the model emitted, and it was previously only ever checked
+ *  for string presence — enough to say "this text appears in that passage", never "this
+ *  claim rests on characters 4120-4197 of that document". `resolution` records which of
+ *  those two the record actually supports. */
+export interface ResolvedCitation extends EvidenceCitation {
+  /** Half-open [start,end) over the source document's normalized extraction. */
+  start?: number
+  end?: number
+  resolution: 'exact' | 'whitespace-normalized' | 'unlocated' | 'no-offset-available'
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** Resolve each quoted excerpt to real document offsets.
+ *
+ *  Matching is whitespace-tolerant because models reflow quoted text, but the offsets
+ *  returned are those of what was actually FOUND, never of what was asked for. A citation
+ *  that cannot be located says so rather than being dropped or guessed at — an unlocated
+ *  citation is a faithfulness signal, and silently discarding it would destroy the very
+ *  measurement this module exists to produce. */
+export function resolveCitationSpans(
+  cited: readonly EvidenceCitation[],
+  evidence: ReadonlyArray<{ id: string; text: string; docStart?: number }>,
+): ResolvedCitation[] {
+  const byId = new Map(evidence.map((e) => [e.id, e]))
+  return cited.map((c) => {
+    const src = byId.get(c.id)
+    const quoted = String(c.span ?? '').trim()
+    if (!src || typeof src.docStart !== 'number') return { ...c, resolution: 'no-offset-available' }
+    if (!quoted) return { ...c, resolution: 'unlocated' }
+
+    let idx = src.text.indexOf(quoted)
+    let matched = quoted
+    let resolution: ResolvedCitation['resolution'] = 'exact'
+    if (idx < 0) {
+      // The model reflowed the whitespace; match token-wise and take what was found.
+      const pattern = quoted.split(/\s+/).filter(Boolean).map(escapeRegExp).join('\\s+')
+      const m = pattern ? new RegExp(pattern).exec(src.text) : null
+      if (!m) return { ...c, resolution: 'unlocated' }
+      idx = m.index
+      matched = m[0]
+      resolution = 'whitespace-normalized'
+    }
+    return { ...c, start: src.docStart + idx, end: src.docStart + idx + matched.length, resolution }
+  })
+}
+
 export interface InlineBoundAnswer {
   letter: string
   reasoning: string
