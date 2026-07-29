@@ -58,6 +58,11 @@ export interface ReasoningRun {
   completedAt?: string
   // bookkeeping (additionalProperties allowed by the schema)
   _runHex: string
+  // Rolling hash chain over the exact NDJSON bytes appended for each event:
+  // h_0 = '', h_n = sha256(h_{n-1} + line_n). Committing to event ids alone
+  // would let two runs with the same event sequence but different content
+  // collide, so the chain covers content and order together.
+  _traceChain: string
 }
 
 export interface ReasoningEvent {
@@ -81,6 +86,10 @@ export interface ReasoningReceipt {
   taskRef: string
   status: ReceiptStatus
   traceHash: string
+  // States what traceHash actually commits to. 'event-content-chain' covers the
+  // appended event bytes; 'event-id-sequence' covers only the ids and is what
+  // receipts written before this field existed carry implicitly.
+  traceHashMethod: 'event-content-chain' | 'event-id-sequence'
   replayClass: ReplayClass
   capturedAt: string
   [k: string]: unknown
@@ -122,6 +131,7 @@ export function openReasoningRun(taskTitle: string, opts?: { objectiveHash?: str
     artifactRefs: [],
     startedAt: nowIso(),
     _runHex: runHex,
+    _traceChain: '',
   }
   return run
 }
@@ -148,7 +158,11 @@ export function emitReasoningEvent(
       ...(args.extra ?? {}),
     }
     mkdirSync(sink(), { recursive: true })
-    appendFileSync(eventsLog(), JSON.stringify(event) + '\n')
+    const line = JSON.stringify(event) + '\n'
+    appendFileSync(eventsLog(), line)
+    // Extend the chain only after the bytes are durably appended, so the hash
+    // never commits to an event that failed to land.
+    run._traceChain = sha256(run._traceChain + line)
     run.eventRefs.push(id)
     run.safeTrace.eventCount = run.eventRefs.length
     return id
@@ -159,13 +173,15 @@ export function emitReasoningEvent(
 }
 
 /** Close the run: write run.json + receipt.json under <sink>/<runHex>/. traceHash =
- *  "sha256:" + sha256(joined event ids). References the dispatch-ledger attestation /
+ *  "sha256:" + the rolling content chain over appended event bytes. References the dispatch-ledger attestation /
  *  crystallized artifact when present. Returns the receipt (or a best-effort stub on failure). */
 export function closeReasoningRun(
   run: ReasoningRun,
   args: { status: ReceiptStatus; replayClass: ReplayClass; taskRef?: string; ledgerRef?: string; coordination?: Record<string, unknown> },
 ): ReasoningReceipt {
-  const traceHash = 'sha256:' + sha256(run.eventRefs.join('|'))
+  // Commit to the event bytes, not the event ids. An id-only hash is invariant
+  // under any change to what the events actually said.
+  const traceHash = 'sha256:' + (run._traceChain || sha256(''))
   const receipt: ReasoningReceipt = {
     id: RECEIPT_PREFIX + run._runHex,
     type: 'ReasoningReceipt',
@@ -174,6 +190,7 @@ export function closeReasoningRun(
     taskRef: args.taskRef ?? run.task.id,
     status: args.status,
     traceHash,
+    traceHashMethod: 'event-content-chain',
     replayClass: args.replayClass,
     capturedAt: nowIso(),
     ...(args.coordination ? { coordination: args.coordination } : {}),
@@ -188,8 +205,8 @@ export function closeReasoningRun(
     run.completedAt = receipt.capturedAt
     const dir = join(sink(), run._runHex)
     mkdirSync(dir, { recursive: true })
-    // Persist the run WITHOUT the private bookkeeping field.
-    const { _runHex, ...runOut } = run
+    // Persist the run WITHOUT the private bookkeeping fields.
+    const { _runHex, _traceChain, ...runOut } = run
     writeFileSync(join(dir, 'run.json'), JSON.stringify(runOut, null, 2))
     writeFileSync(join(dir, 'receipt.json'), JSON.stringify(receipt, null, 2))
   } catch (err) {

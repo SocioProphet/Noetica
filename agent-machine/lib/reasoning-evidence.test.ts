@@ -85,6 +85,8 @@ test('openReasoningRun → emit (computed+generated) → close conforms to canon
   const receiptOut = JSON.parse(readFileSync(join(SINK, runHex, 'receipt.json'), 'utf8'))
   assert.equal(runOut.status, 'completed')
   assert.equal(runOut._runHex, undefined, 'private bookkeeping field must not be persisted')
+  assert.equal(runOut._traceChain, undefined, 'private bookkeeping field must not be persisted')
+  assert.equal(receiptOut.traceHashMethod, 'event-content-chain', 'receipt must state what traceHash commits to')
 
   if (runSchema && eventSchema && receiptSchema) {
     structuralCheck(runOut, runSchema, 'ReasoningRun')
@@ -93,6 +95,29 @@ test('openReasoningRun → emit (computed+generated) → close conforms to canon
   } else {
     console.warn('[reasoning-evidence.test] spec dir absent — schema-file validation skipped (structural inline asserts still ran)')
   }
+})
+
+test('traceHash commits to event CONTENT, not just event ids', () => {
+  // The negative control for the trace hash. Hashing the concatenated event ids
+  // is invariant under any change to what the events actually said: two runs
+  // that emit the same number of events collide however different their content.
+  // These runs differ only in a summary string, so an id-based hash would tie.
+  const runA = re.openReasoningRun('turn:chain')
+  re.emitReasoningEvent(runA, { eventType: 'noetica.turn', summary: 'grounded answer from handbook', trustLevel: 'trusted-workspace-source' })
+  const receiptA = re.closeReasoningRun(runA, { status: 'completed', replayClass: 'exact' })
+
+  const runB = re.openReasoningRun('turn:chain')
+  re.emitReasoningEvent(runB, { eventType: 'noetica.turn', summary: 'UNGROUNDED answer, no source', trustLevel: 'trusted-workspace-source' })
+  const receiptB = re.closeReasoningRun(runB, { status: 'completed', replayClass: 'exact' })
+
+  assert.equal(runA.eventRefs.length, runB.eventRefs.length, 'same event count — an id-count hash could not tell these apart')
+  assert.notEqual(receiptA.traceHash, receiptB.traceHash, 'differing event content must yield a differing traceHash')
+  assert.match(receiptA.traceHash, /^sha256:[0-9a-f]{64}$/)
+  assert.equal(receiptA.traceHashMethod, 'event-content-chain')
+
+  // A run with no events still produces a well-formed hash rather than an empty one.
+  const empty = re.closeReasoningRun(re.openReasoningRun('turn:empty'), { status: 'completed', replayClass: 'evidence-only' })
+  assert.match(empty.traceHash, /^sha256:[0-9a-f]{64}$/)
 })
 
 test('classifyReplay: computed → exact, generated → best-effort', () => {
