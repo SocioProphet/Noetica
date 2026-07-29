@@ -8220,13 +8220,31 @@ Question: ${question}`
           return
         }
         const reward = f.rating === 'up' ? 1 : 0
-        // Feed bandit with explicit user signal (task=general since message context unavailable here)
-        recordReward({ task: 'general', provider: 'ollama', model: 'unknown', reward })
-        // Persist as an eval capture for the learning loop replay
+        // This previously called recordReward with task/provider/model hardcoded to
+        // 'general'/'ollama'/'unknown', so every thumb landed on a bandit arm that had not
+        // answered anything. That is worse than discarding the signal: it rewards or
+        // penalises whichever arm keys to 'unknown' on evidence about a different model.
+        // The governance ring already records what actually ran — attribute from it, and
+        // when it cannot be resolved, decline to attribute rather than invent.
+        const attributed = f.sessionId
+          ? [..._governanceRuns].reverse().find((r) => r.session_id === f.sessionId)
+          : undefined
+        if (attributed) {
+          recordReward({ task: attributed.task, provider: attributed.provider, model: attributed.model_routed, reward })
+        }
+        // Persist as an eval capture for the learning loop replay. `attributed` records
+        // whether the reward reached the bandit, so an unattributed thumb is visibly absent
+        // from training rather than silently miscounted against the wrong model.
         try {
           const captureDir = path.join(os.homedir(), '.noetica', 'eval-captures')
           fs.mkdirSync(captureDir, { recursive: true })
-          const record = { ts: new Date().toISOString(), messageId: f.messageId, sessionId: f.sessionId, rating: f.rating, reward }
+          const record = {
+            ts: new Date().toISOString(), messageId: f.messageId, sessionId: f.sessionId, rating: f.rating, reward,
+            attributed: Boolean(attributed),
+            ...(attributed
+              ? { task: attributed.task, provider: attributed.provider, model: attributed.model_routed, route_type: attributed.route_type }
+              : { unattributed_reason: f.sessionId ? 'no governance run matched this session' : 'no sessionId supplied' }),
+          }
           fs.appendFileSync(path.join(captureDir, 'user-feedback.jsonl'), JSON.stringify(record) + '\n')
         } catch { /* persistence best-effort */ }
         res.writeHead(200, { 'content-type': 'application/json' })

@@ -1,3 +1,4 @@
+import type { LimitReceipt } from '@/lib/governance/budget'
 import type { ExternalModelProviderRouteEvidence } from '@/lib/types/agentplane'
 import type { Provider, SteeringCapability } from '@/lib/types/model'
 
@@ -22,7 +23,11 @@ export interface ModelRouteRequest {
   tool_grant_refs?: string[]
   steering_required?: SteeringCapability
   policy_ref?: string
+  /** Reference to a declared spend ceiling. Consulted by the router BEFORE any hosted
+   *  route is returned; an unresolvable ref is refused rather than treated as unlimited. */
   budget_ref?: string
+  /** Estimated USD this request would add to the budget, used for the pre-egress check. */
+  projected_cost_usd?: number
   privacy_ref?: string
 }
 
@@ -47,6 +52,10 @@ export interface ModelRouteDecision {
   route_evidence_ref?: string
   provider_route_evidence?: ExternalModelProviderRouteEvidence
   blocked_reason?: string
+  /** Present when the refusal was caused by a spend ceiling. Conforms to
+   *  config/schemas/limit-receipt.schema.json, whose executionPerformed is pinned
+   *  false: a limit receipt records that something did NOT run. */
+  limit_receipt?: LimitReceipt
   degradation_reason?: string
   notes: string[]
 }

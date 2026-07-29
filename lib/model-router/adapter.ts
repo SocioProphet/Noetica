@@ -2,6 +2,7 @@ import { defaultModelId, models } from '@/config/models'
 import type { ModelConfig } from '@/lib/types/model'
 import type { Provider } from '@/lib/types/model'
 import type { ModelRouteDecision, ModelRouteCostClass, ModelRouteRequest, ModelRouteTarget } from '@/lib/types/model-router'
+import { consultBudget, type BudgetConsult } from '@/lib/governance/budget'
 
 // Noetica-local routing. When the external SocioProphet/model-router authority is
 // unavailable, this adapter performs best-effort local routing: it verifies the
@@ -13,6 +14,17 @@ export async function routeModel(request: ModelRouteRequest): Promise<ModelRoute
   const hasAvailability = available.length > 0
 
   const preferred = selectPreferredModel(request.model_hint, request.provider_hint)
+
+  // budget_ref used to be copied from request to decision and read by nothing, so a
+  // caller could set a ceiling, see it echoed back, and reasonably believe it was
+  // being enforced. It is consulted here, ahead of any hosted route, because a
+  // spend ceiling checked after egress governs nothing that has already left.
+  if (inferRouteTarget(preferred) === 'hosted' && request.budget_ref) {
+    const consult = consultBudget(request.budget_ref, request.projected_cost_usd ?? 0, {
+      engagementRef: request.request_id,
+    })
+    if (!consult.allowed) return blockedByBudget(request, preferred, consult)
+  }
 
   // Provider is available — route directly
   if (!hasAvailability || available.includes(preferred.provider)) {
@@ -83,6 +95,38 @@ function buildDecision(
     notes: liveRoute
       ? ['Local routing performed — provider key verified.']
       : ['Provider key availability unknown — routing on model hint alone.']
+  }
+}
+
+/** A refusal caused by a spend ceiling, carrying the LimitReceipt that records it.
+ *  The receipt's `executionPerformed` is pinned false by its schema: a limit receipt
+ *  exists to attest that something did NOT happen. */
+function blockedByBudget(
+  request: ModelRouteRequest,
+  model: ModelConfig,
+  consult: BudgetConsult,
+): ModelRouteDecision {
+  return {
+    schema_version: 'noetica.model_route.v0.1',
+    status: 'blocked',
+    request_id: request.request_id,
+    route_decided_at: new Date().toISOString(),
+    authority: 'SocioProphet/model-router',
+    live_route_performed: false,
+    model_hint: request.model_hint,
+    model_routed: model.id,
+    provider: model.provider,
+    model_overridden: false,
+    route_target: 'deny',
+    cost_class: inferCostClass(model),
+    prompt_egress: 'deny',
+    policy_ref: request.policy_ref ?? 'guardrail-fabric://noetica/local-default',
+    budget_ref: request.budget_ref,
+    privacy_ref: request.privacy_ref,
+    evidence_required: ['ModelRouteDecision', 'LimitReceipt'],
+    blocked_reason: `Budget refused: ${consult.reason}`,
+    ...(consult.receipt ? { limit_receipt: consult.receipt } : {}),
+    notes: ['No prompt left the device — the ceiling was consulted before routing, not after.'],
   }
 }
 
