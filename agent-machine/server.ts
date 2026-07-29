@@ -42,6 +42,8 @@ import * as path from 'node:path'
 import * as os from 'node:os'
 import * as dns from 'node:dns'
 import * as net from 'node:net'
+import { configReport, refresh as refreshConfig } from './lib/config-plane.js'
+import { migrate as migrateLocalState, recordUsage, usageSnapshot } from './lib/local-state.js'
 import { originAllowed } from './lib/origin-guard.js'
 import { isConfinedToHomeOrTmp } from './lib/path-confine.js'
 import { buildAdaptiveBrief } from './lib/progress.js'
@@ -6822,7 +6824,31 @@ const server = http.createServer((req, res) => {
   }
 
   // GET /api/status
+  // ── sovereign config plane ────────────────────────────────────────────────────
+  // GET  /api/config          → every flag WITH the layer that decided it + snapshot age
+  // POST /api/config/refresh  → best-effort pull from our own admin plane (never blocks)
+  // GET  /api/config/usage    → the local usage ledger (never leaves the machine)
+  if (req.method === 'GET' && url.pathname === '/api/config') {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ...configReport(), localState: migrateLocalState() }))
+    return
+  }
+  if (req.method === 'POST' && url.pathname === '/api/config/refresh') {
+    void (async () => {
+      const snapshot = await refreshConfig({ scope: { app: 'noetica' } })
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ refreshed: !!snapshot, ...configReport() }))
+    })()
+    return
+  }
+  if (req.method === 'GET' && url.pathname === '/api/config/usage') {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ usage: usageSnapshot(Number(url.searchParams.get('limit')) || 20) }))
+    return
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/status') {
+    recordUsage('api:status')
     void (async () => {
       const ollamaUp = await isOllamaRunning()
       const localModels = ollamaUp ? await listLocalModels() : []
