@@ -43,6 +43,7 @@ import * as os from 'node:os'
 import * as dns from 'node:dns'
 import * as net from 'node:net'
 import { configReport, refresh as refreshConfig } from './lib/config-plane.js'
+import { exhaustReport } from './lib/exhaust.js'
 import { fsMemoryStore } from './lib/fs-memory-store.js'
 import { migrate as migrateLocalState, recordUsage, usageSnapshot } from './lib/local-state.js'
 import { bandCounts, bandOf, sweepBands, verdict as bandVerdict, type BandedDoc } from './lib/memory-bands.js'
@@ -7083,6 +7084,22 @@ const server = http.createServer((req, res) => {
         tiers: { tier1_memoryd: memorydHealth !== null, tier2_hellgraph: true, tier3_map: true },
       }))
     })()
+    return
+  }
+
+  // GET /api/exhaust — the discard ledger and what it taught us (W6.1). compressionRatio is
+  // the v1 entropy proxy; discardMisses are items retrieval threw away and later needed —
+  // ranked by repeats, so the worst-drawn cut is the first one to fix. This is the
+  // exhaust→intake loop made observable: waste as a tuning signal, not just accounting.
+  if (req.method === 'GET' && url.pathname === '/api/exhaust') {
+    const r = exhaustReport()
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({
+      records: r.records, itemsDiscarded: r.itemsDiscarded, needsObserved: r.needsObserved,
+      compressionRatio: Number(r.compressionRatio.toFixed(4)),
+      discardMissRate: Number(r.discardMissRate.toFixed(4)),
+      topMisses: r.discardMisses.slice(0, 20),
+    }))
     return
   }
 

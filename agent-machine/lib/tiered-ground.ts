@@ -28,6 +28,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { groundTiered, type TierTopic, type TierGrounding } from './topic-tier.js'
 import { canonTopics } from './canon-lookup.js'
+import { recordExhaust, exhaustFromSelection, noteNeeded } from './exhaust.js'
 import { retrieveExperiences, renderExperiences, type ReasoningExperience } from './procedural-memory.js'
 
 const CANON = process.env['CANON_DIR'] || join(__dirname, '..', 'canon')
@@ -154,6 +155,21 @@ export async function tieredGround(question: string, opts: TieredGroundOpts = {}
   let experiences: Array<ReasoningExperience & { relevance: number }> = []
   if (opts.experiences?.length && opts.expMatch) {
     experiences = retrieveExperiences(question, opts.experiences, opts.expMatch, { topK: opts.expTopK ?? 3 })
+  }
+
+  // W6.1 exhaust: the candidates this tier cut REJECTED, recorded by hash only (never
+  // payloads). A later `noteNeeded` on something we dropped surfaces as a discard miss —
+  // direct evidence the cut was drawn wrongly, ranked by how often it bites. Fail-soft by
+  // construction: recordExhaust swallows its own errors, so observability can never fail a
+  // retrieval.
+  const keptIds = [grounding.anchor, grounding.general, grounding.specific].filter((x): x is string => !!x)
+  if (cands.length) {
+    recordExhaust(exhaustFromSelection(
+      cands, cands.filter((c) => keptIds.includes(c.id)), (c) => c.id,
+      { source: 'retrieval', kind: 'candidate' },
+    ))
+    // what we DID ground on is, by definition, needed — the other half of the loop
+    if (keptIds.length) noteNeeded(keptIds)
   }
 
   const block = `${renderTiers(grounding)}${renderExperiences(experiences)}`
