@@ -7,9 +7,23 @@
 
 export type ActionClass = 'read' | 'write' | 'exec' | 'net' | 'memory'
 
+/** A ValueType-algebra term. Composable: `optional(array(scalar 'person'))` is one term, not a
+ *  scalar name plus a sibling boolean. Mirrors sourceos-spec's ValueType — the estate's authoritative
+ *  type language, with 12 scalar leaves and 8 composites — so an action's parameter shape can carry
+ *  the same guarantees an entity field carries. Kept as `unknown` in the TS layer to avoid pulling
+ *  the spec's TypeBox at this layer; the JSON schema validates the actual structure at test time. */
+export type ValueType = unknown
+
 export interface ActionParam {
   name: string
-  type: 'string' | 'number' | 'boolean'
+  /** Legacy scalar type marker. Retained because existing entries carry it; prefer `valueType` for
+   *  new entries — flat strings cannot express `array of person` or `optional dateTime`, the exact
+   *  gap ValueType exists to close. Every ActionParam MUST carry at least one of `type` or `valueType`;
+   *  the JSON schema asserts this. */
+  type?: 'string' | 'number' | 'boolean'
+  /** Structural type — the composable Apple-parity algebra (see ../schemas/action-catalog-entry.schema.json).
+   *  Authoritative when present. */
+  valueType?: ValueType
   required: boolean
   description: string
 }
@@ -21,6 +35,13 @@ export interface ActionDef {
   actionClass: ActionClass
   /** Can the effect be undone (backup kept / inverse exists)? Drives the confirm UX weight. */
   reversible: boolean
+  /** Whether a signed consent record must be presented before execution — the client-side echo of
+   *  the agent-machine consent-before-fetch discipline (ArtifactConsentRecord). Defaults to false
+   *  so opt-in is deliberate. */
+  consentRequired?: boolean
+  /** URN of the capability-ledger entry gating this action, when the action is behind a runtime
+   *  capability gate. Present means `assertEnabled(capabilityRef)` fires before execution. */
+  capabilityRef?: string
   /** The underlying built-in tool this typed action maps to. */
   tool: string
   params: ActionParam[]
@@ -72,6 +93,53 @@ export const ACTION_CATALOG: ActionDef[] = [
     actionClass: 'read', reversible: true, tool: 'read_file',
     params: [{ name: 'path', type: 'string', required: true, description: 'File path' }],
     preview: (p) => `Read ${s(p, 'path') || '(path)'}.`,
+  },
+  // ── ValueType-typed actions — the four below exercise a composite the legacy
+  // `type: 'string'|'number'|'boolean'` cannot express. Kept alongside the legacy
+  // entries so the migration is one entry at a time, not one big rewrite.
+  {
+    id: 'schedule_reminder', label: 'Schedule reminder',
+    description: 'Enqueue a reminder for a specific moment. Reversible (the entry can be cancelled).',
+    actionClass: 'memory', reversible: true, tool: 'schedule_reminder',
+    params: [
+      { name: 'text', valueType: { kind: 'scalar', scalar: 'string' }, required: true, description: 'What the reminder says' },
+      { name: 'when', valueType: { kind: 'scalar', scalar: 'dateTime' }, required: true, description: 'When the reminder fires (ISO-8601 with timezone)' },
+      { name: 'note', valueType: { kind: 'optional', of: { kind: 'scalar', scalar: 'attributedString' } }, required: false, description: 'Optional attributed-text note carried alongside — attributedString keeps rich text marks that would silently die as plain string.' },
+    ],
+    preview: (p) => `Reminder "${s(p,'text').slice(0,60)}" scheduled for ${s(p,'when') || '(time)'}.`,
+  },
+  {
+    id: 'invite_people', label: 'Invite people',
+    description: 'Send an invite to one or more people. Not reversible — invites can be withdrawn but the recipient sees them.',
+    actionClass: 'net', reversible: false, tool: 'invite_people',
+    consentRequired: true,
+    params: [
+      { name: 'recipients', valueType: { kind: 'array', of: { kind: 'scalar', scalar: 'person' }, minItems: 1 }, required: true, description: 'People to invite. `array of person` is exactly the shape Apple\'s bare `dataType` cannot express.' },
+      { name: 'occasion', valueType: { kind: 'scalar', scalar: 'string' }, required: true, description: 'What they are being invited to' },
+      { name: 'starts_at', valueType: { kind: 'scalar', scalar: 'dateTime' }, required: true, description: 'When it starts' },
+    ],
+    preview: (p) => `Invite ${Array.isArray(p['recipients']) ? (p['recipients'] as unknown[]).length : 0} people to "${s(p,'occasion')}" at ${s(p,'starts_at')}.`,
+  },
+  {
+    id: 'set_severity', label: 'Set severity',
+    description: 'Set the severity level of an item. Reversible.',
+    actionClass: 'write', reversible: true, tool: 'set_severity',
+    params: [
+      { name: 'item_id', valueType: { kind: 'scalar', scalar: 'string' }, required: true, description: 'Identifier of the item' },
+      { name: 'level', valueType: { kind: 'enumeration', cases: ['info', 'low', 'medium', 'high', 'critical'] }, required: true, description: 'Enumeration — the cases ARE the type, so widening them is visible as a type change.' },
+    ],
+    preview: (p) => `Set severity of ${s(p,'item_id') || '(id)'} → ${s(p,'level') || '(level)'}.`,
+  },
+  {
+    id: 'record_measurement', label: 'Record measurement',
+    description: 'Record a physical measurement with its dimension. Reversible.',
+    actionClass: 'memory', reversible: true, tool: 'record_measurement',
+    params: [
+      { name: 'value', valueType: { kind: 'scalar', scalar: 'double' }, required: true, description: 'The numeric value' },
+      { name: 'quantity', valueType: { kind: 'measurement', dimension: 'information', unit: 'byte' }, required: true, description: '`measurement` carries its dimension so a bare number for a physical quantity is not representable — the exact confusion this constructor exists to prevent.' },
+      { name: 'note', valueType: { kind: 'optional', of: { kind: 'scalar', scalar: 'string' } }, required: false, description: 'Optional annotation' },
+    ],
+    preview: (p) => `Record ${s(p,'value') || '(value)'} (${s(p,'quantity') || '(qty)'}).`,
   },
 ]
 
