@@ -94,8 +94,18 @@ export interface DreamDeps {
   resolveConflict?: (a: TopicDoc, b: TopicDoc) => TopicDoc
   /** Phase 4: drop predicate (default: score <= 0 — low-value/derivable). Real impl wires decay/curation. */
   prune?: (doc: TopicDoc) => boolean
+  /**
+   * Phase 4b (optional): time-scale band sweep — promote/demote/prune by proven need rather
+   * than by score alone. Injected from memory-bands-wiring so this module stays unaware of
+   * bands. Absent = unchanged legacy behaviour.
+   */
+  bandSweep?: (docs: TopicDoc[]) => { survivors: TopicDoc[]; report: unknown }
 }
-export interface DreamReport { forked: number; merged: number; conflicts: number; pruned: number; indexed: number }
+export interface DreamReport {
+  forked: number; merged: number; conflicts: number; pruned: number; indexed: number
+  /** Present only when a bandSweep phase ran; shape is memory-bands' BandSweepReport. */
+  bands?: unknown
+}
 
 export const defaultDistill = (docs: TopicDoc[]): TopicDoc[] => {
   const byName = new Map<string, TopicDoc>()
@@ -137,15 +147,28 @@ export function autoDream(store: MemoryStore, deps: DreamDeps = {}): Promise<Dre
     const prune = deps.prune ?? ((d: TopicDoc) => (d.score ?? 1) <= 0)
     const beforePrune = work.length
     work = work.filter((d) => !prune(d))
-    const pruned = beforePrune - work.length
+    let pruned = beforePrune - work.length
+
+    // Phase 4b — band sweep (optional): survival by proven need, on a timescale. Runs after
+    // score-pruning so the two compose — score removes the worthless, bands retire the unused.
+    let bands: unknown
+    if (deps.bandSweep) {
+      const beforeBands = work.length
+      const swept = deps.bandSweep(work)
+      work = swept.survivors
+      pruned += beforeBands - work.length
+      bands = swept.report
+    }
 
     // Commit the fork back atomically-ish: replace topics with survivors, then Phase 5.
+    // NB band bookkeeping (band/bandSince/reinforcements) rides on the doc and is preserved
+    // by the spread — only `updatedAt` is stamped here.
     for (const n of names) await store.deleteTopic(n)
     for (const d of work) await store.writeTopic({ ...d, updatedAt: Date.now() })
 
     // Phase 5 — index sync: rebuild L1 pointers from survivors.
     const ptrs = await syncIndex(store)
-    return { forked, merged, conflicts: conflicts.length, pruned, indexed: ptrs.length }
+    return { forked, merged, conflicts: conflicts.length, pruned, indexed: ptrs.length, ...(bands ? { bands } : {}) }
   })
 }
 

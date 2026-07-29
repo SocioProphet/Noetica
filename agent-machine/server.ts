@@ -43,7 +43,9 @@ import * as os from 'node:os'
 import * as dns from 'node:dns'
 import * as net from 'node:net'
 import { configReport, refresh as refreshConfig } from './lib/config-plane.js'
+import { fsMemoryStore } from './lib/fs-memory-store.js'
 import { migrate as migrateLocalState, recordUsage, usageSnapshot } from './lib/local-state.js'
+import { bandCounts, bandOf, sweepBands, verdict as bandVerdict, type BandedDoc } from './lib/memory-bands.js'
 import { originAllowed } from './lib/origin-guard.js'
 import { isConfinedToHomeOrTmp } from './lib/path-confine.js'
 import { buildAdaptiveBrief } from './lib/progress.js'
@@ -7080,6 +7082,39 @@ const server = http.createServer((req, res) => {
         hellgraph: { feature_atoms: atoms, total_nodes: g.allNodes().length, total_edges: g.allEdges().length },
         tiers: { tier1_memoryd: memorydHealth !== null, tier2_hellgraph: true, tier3_map: true },
       }))
+    })()
+    return
+  }
+
+  // GET /api/memory/bands — memory population by TIME-SCALE band (session→daily→weekly→
+  // permanent) plus each topic's standing verdict and its reason. Survival here tracks proven
+  // need (recalls inside a band's window), not recency: this is the read model for the band
+  // sweep that runs as a phase of autoDream. `?sweep=1` previews the decisions WITHOUT
+  // committing them — a dry run, so an operator can see what a consolidation would retire.
+  if (req.method === 'GET' && url.pathname === '/api/memory/bands') {
+    setCORSHeaders(res)
+    void (async () => {
+      try {
+        const store = fsMemoryStore(url.searchParams.get('namespace') || 'default')
+        const names = await store.listTopics()
+        const docs: BandedDoc[] = []
+        for (const n of names) { const t = await store.readTopic(n); if (t) docs.push(t as BandedDoc) }
+        const now = Date.now()
+        const body: Record<string, unknown> = {
+          counts: bandCounts(docs),
+          total: docs.length,
+          topics: docs.map((d) => {
+            const v = bandVerdict(d, now)
+            return { name: d.name, band: bandOf(d), reinforcements: d.reinforcements ?? 0, pinned: !!d.pinned, verdict: v.action, why: v.why }
+          }),
+        }
+        if (url.searchParams.get('sweep') === '1') body['preview'] = sweepBands(docs, now).report
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(body))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: (e as Error).message }))
+      }
     })()
     return
   }
