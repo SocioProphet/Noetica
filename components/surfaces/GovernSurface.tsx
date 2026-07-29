@@ -12,6 +12,20 @@ type PolicyMode = 'default' | 'strict' | 'permissive'
 type EvidenceLevel = 'standard' | 'full_hash' | 'minimal'
 type PolicyVerdict = 'admitted' | 'flagged' | 'blocked'
 
+interface ExhaustSummary {
+  records: number
+  itemsDiscarded: number
+  needsObserved: number
+  compressionRatio: number
+  discardMissRate: number
+  topMisses: Array<{ sha256: string; repeats: number }>
+}
+
+interface BandSummary {
+  total: number
+  counts: { session: number; daily: number; weekly: number; permanent: number }
+}
+
 interface AuditEvent {
   id: string
   ts: string
@@ -226,6 +240,11 @@ export function GovernSurface({ recentTraces = [] }: { recentTraces?: RunTrace[]
   const [evidenceLevel, setEvidenceLevel] = useState<EvidenceLevel>(
     (settings.defaultEvidenceLevel === 'full' ? 'full_hash' : settings.defaultEvidenceLevel) as EvidenceLevel ?? 'standard'
   )
+  // W6.1/W6.2 — what the system DISCARDED, and how its memory is banded. These let the
+  // Proof act answer "what did you throw away, and was that a mistake?" rather than only
+  // "what did you keep".
+  const [exhaust, setExhaust] = useState<ExhaustSummary | null>(null)
+  const [bands, setBands] = useState<BandSummary | null>(null)
   const [ledgerEntries, setLedgerEntries] = useState<LedgerEntry[]>([])
   const [ledgerLoading, setLedgerLoading] = useState(true)
   const [expandedId, setExpandedId]       = useState<string | null>(null)
@@ -326,6 +345,16 @@ export function GovernSurface({ recentTraces = [] }: { recentTraces?: RunTrace[]
     fetch(amUrl('/api/identity/pseudonym'), { signal: AbortSignal.timeout(3000) })
       .then(r => r.ok ? r.json() : null)
       .then((d: { pseudonym?: string } | null) => { if (d?.pseudonym) setPseudonym(d.pseudonym) })
+      .catch(() => { /* not running — skip */ })
+    // Exhaust ledger — compression + whether discarding was a mistake (W6.1)
+    fetch(amUrl('/api/exhaust'), { signal: AbortSignal.timeout(3000) })
+      .then(r => r.ok ? r.json() : null)
+      .then((d: ExhaustSummary | null) => { if (d) setExhaust(d) })
+      .catch(() => { /* not running — skip */ })
+    // Memory bands — population by timescale (W6.2)
+    fetch(amUrl('/api/memory/bands'), { signal: AbortSignal.timeout(3000) })
+      .then(r => r.ok ? r.json() : null)
+      .then((d: BandSummary | null) => { if (d) setBands(d) })
       .catch(() => { /* not running — skip */ })
     // SRS — skills due for spaced-repetition practice
     fetch(amUrl('/api/learning/srs/due'), { signal: AbortSignal.timeout(3000) })
@@ -1327,6 +1356,66 @@ export function GovernSurface({ recentTraces = [] }: { recentTraces?: RunTrace[]
           <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">Proof</span>
           <span className="h-px flex-1 bg-[var(--color-border-tertiary)]" />
         </div>
+
+        {/* Exhaust — the discard ledger (W6.1). An honest Proof act reports what was thrown
+            away, not only what was kept: discardMissRate is how often discarding turned out
+            to be a mistake, which is the retrieval cut's own error signal. */}
+        {exhaust && exhaust.records > 0 && (
+          <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] shadow-sm">
+            <div className="border-b border-[var(--color-border-tertiary)] px-5 py-3">
+              <div className="text-xs font-semibold text-[#1d4ed8]">Exhaust — what was discarded</div>
+            </div>
+            <div className="grid grid-cols-3 gap-3 px-5 py-4">
+              <div>
+                <div className="text-[11px] uppercase tracking-wide text-[var(--color-text-tertiary)]">Compression</div>
+                <div className="mt-0.5 text-sm font-semibold text-[var(--color-text-primary)]">
+                  {(exhaust.compressionRatio * 100).toFixed(0)}%
+                </div>
+                <div className="text-[11px] text-[var(--color-text-tertiary)]">kept of what entered</div>
+              </div>
+              <div>
+                <div className="text-[11px] uppercase tracking-wide text-[var(--color-text-tertiary)]">Discard misses</div>
+                <div className={`mt-0.5 text-sm font-semibold ${exhaust.discardMissRate > 0.1 ? 'text-amber-600' : 'text-[var(--color-text-primary)]'}`}>
+                  {(exhaust.discardMissRate * 100).toFixed(1)}%
+                </div>
+                <div className="text-[11px] text-[var(--color-text-tertiary)]">thrown away, later needed</div>
+              </div>
+              <div>
+                <div className="text-[11px] uppercase tracking-wide text-[var(--color-text-tertiary)]">Ledger</div>
+                <div className="mt-0.5 text-sm font-semibold text-[var(--color-text-primary)]">{exhaust.itemsDiscarded}</div>
+                <div className="text-[11px] text-[var(--color-text-tertiary)]">items over {exhaust.records} cuts</div>
+              </div>
+            </div>
+            {exhaust.topMisses.length > 0 && (
+              <div className="border-t border-[var(--color-border-tertiary)] px-5 py-3">
+                <div className="text-[11px] text-[var(--color-text-tertiary)]">
+                  Most-repeated bad cut: <span className="font-mono">{exhaust.topMisses[0]!.sha256.slice(0, 12)}…</span>
+                  {' '}({exhaust.topMisses[0]!.repeats}× needed after being dropped)
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Memory bands — survival by proven need, on a timescale (W6.2). */}
+        {bands && bands.total > 0 && (
+          <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] shadow-sm">
+            <div className="border-b border-[var(--color-border-tertiary)] px-5 py-3">
+              <div className="text-xs font-semibold text-[#1d4ed8]">Memory bands — what earned its place</div>
+            </div>
+            <div className="flex items-center gap-2 px-5 py-4">
+              {(['session', 'daily', 'weekly', 'permanent'] as const).map((b) => (
+                <div key={b} className="flex-1">
+                  <div className="text-[11px] uppercase tracking-wide text-[var(--color-text-tertiary)]">{b}</div>
+                  <div className="mt-0.5 text-sm font-semibold text-[var(--color-text-primary)]">{bands.counts[b]}</div>
+                </div>
+              ))}
+            </div>
+            <div className="border-t border-[var(--color-border-tertiary)] px-5 py-2.5 text-[11px] text-[var(--color-text-tertiary)]">
+              Promotion is earned by recall, not recency — a memory nothing ever recalled is retired.
+            </div>
+          </div>
+        )}
 
         {/* Evidence bundles */}
         <div className="rounded-2xl border border-[var(--color-border-tertiary)] bg-[var(--color-background-primary)] shadow-sm">
