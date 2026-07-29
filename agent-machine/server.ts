@@ -330,6 +330,11 @@ interface GovernanceRun {
   task?: string
   session_id?: string
   error?: string   // set on failed runs — enables error-rate visibility in GovernSurface
+  // Where the inference actually ran. The router classifies every request as
+  // local/open/hosted, but nothing read routeType, so the local-vs-hosted
+  // decision was computed and discarded on every turn. Sovereignty is not
+  // auditable from provider+model alone, so the classification is recorded here.
+  route_type?: 'local_model' | 'open_model' | 'hosted_balanced' | 'hosted_frontier'
 }
 const _governanceRuns: GovernanceRun[] = []
 const GOVERNANCE_RING_SIZE = 100
@@ -5289,6 +5294,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
       output_tokens: outputTokens,
       cost_usd: costUsd,
       tokens_egressed: egressed,
+      route_type: routerDecision.routeType,
       task: routerDecision.task,
       session_id: sessionId,
     }, (valueJudgment?.worth ?? 1) < 0.35)
@@ -5537,6 +5543,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
       memory_written: false,
       timestamp,
       latency_ms: Date.now() - started,
+      route_type: routerDecision.routeType,
       task: routerDecision.task,
       session_id: sessionId,
       error: errMsg,
