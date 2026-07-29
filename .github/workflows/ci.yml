@@ -24,8 +24,14 @@ jobs:
           node-version: '20'
           cache: npm
 
-      - name: Install root dependencies
-        run: npm ci
+      - name: Install dependencies
+        run: |
+          npm ci
+          # agent-machine deps (mammoth, unpdf, fflate) are needed here because the
+          # root `typecheck` script chains `npm --prefix agent-machine run typecheck`.
+          # Without this the chained typecheck resolves those imports against the root
+          # node_modules, where they are absent, and fails with TS2307.
+          npm --prefix agent-machine ci
 
       - name: Typecheck
         run: npm run typecheck
