@@ -48,7 +48,7 @@ import { fsMemoryStore } from './lib/fs-memory-store.js'
 import { migrate as migrateLocalState, recordUsage, usageSnapshot } from './lib/local-state.js'
 import { bandCounts, bandOf, sweepBands, verdict as bandVerdict, type BandedDoc } from './lib/memory-bands.js'
 import { originAllowed } from './lib/origin-guard.js'
-import { isConfinedToHomeOrTmp } from './lib/path-confine.js'
+import { confinedRealPath, realPathWithinRoot } from './lib/path-confine.js'
 import { buildAdaptiveBrief } from './lib/progress.js'
 import { safeShellEnv } from './lib/safe-shell-env.js'
 import { buildRouterDecision, LOCAL_MODEL_SUITE, isHuggingFaceLocalRef, resolveProvider, bestCoder, bestWorkhorse, bestResponsive } from './lib/router.js'
@@ -2097,14 +2097,21 @@ async function executeTool(
 ): Promise<string> {
   // Resolve a user-supplied path safely: expand ~, then ensure it stays
   // within the home directory or /tmp. Blocks traversal attacks ("../../etc").
+  //
+  // The MODEL picks these paths, so this is the fence around model-directed fs access. A lexical check
+  // alone is not one: a symlink INSIDE home/tmp pointing outside it passes it, so `~/escape → /etc` made
+  // `~/escape/passwd` readable. `confinedRealPath` re-validates through realpath — and resolves the
+  // nearest EXISTING ancestor, so write_file/edit_file can still create new files. Callers must use the
+  // returned `resolved`: it is the REAL path, which is the only one whose containment we proved.
   function safePath(raw: string): { resolved: string; error?: string } {
     if (!raw.trim()) return { resolved: '', error: 'path required' }
     const expanded = raw.startsWith('~') ? path.join(os.homedir(), raw.slice(1)) : raw
     const resolved = path.resolve(expanded)
-    if (!isConfinedToHomeOrTmp(resolved)) {
+    const real = confinedRealPath(resolved)
+    if (!real) {
       return { resolved, error: `path must be under home directory or /tmp (got ${resolved})` }
     }
-    return { resolved }
+    return { resolved: real }
   }
 
   // scope-d capability confinement (facet 4): authorize side-effecting tools
@@ -10086,10 +10093,13 @@ Question: ${question}`
           if (!filePath) throw new Error('path required')
           // SECURITY: confine to home/tmp — never read arbitrary local files (~/.ssh/id_rsa) from a
           // request body. Without this, the wide-open CORS makes this an arbitrary-file-read from any page.
+          // Lexical confinement is not enough on its own: a symlink inside home/tmp pointing outside it
+          // passes it, so read through the realpath-validated path, not the requested spelling.
           const resolved = path.resolve(filePath.startsWith('~') ? path.join(os.homedir(), filePath.slice(1)) : filePath)
-          if (!isConfinedToHomeOrTmp(resolved)) throw new Error('path must be under home directory or /tmp')
+          const real = confinedRealPath(resolved)
+          if (!real) throw new Error('path must be under home directory or /tmp')
           const fs = await import('node:fs')
-          const buf = fs.readFileSync(resolved)
+          const buf = fs.readFileSync(real)
           const filename = path.basename(resolved)
           const { extractTextWithPages, ingestDocument } = await import('./lib/doc-store.js')
           const { text, pageBreaks } = await extractTextWithPages(filename, '', buf)
@@ -10126,8 +10136,10 @@ Question: ${question}`
           const memDirs: string[] = []
           if (dir) {
             const resolved = path.resolve(dir.startsWith('~') ? path.join(os.homedir(), dir.slice(1)) : dir)
-            if (!isConfinedToHomeOrTmp(resolved)) throw new Error('path must be under home directory or /tmp')
-            memDirs.push(resolved)
+            // realpath-validated, so a symlinked memory dir cannot redirect the scan out of home/tmp.
+            const real = confinedRealPath(resolved)
+            if (!real) throw new Error('path must be under home directory or /tmp')
+            memDirs.push(real)
           } else {
             const projectsRoot = path.join(os.homedir(), '.claude', 'projects')
             let projSlugs: string[] = []
@@ -10147,9 +10159,12 @@ Question: ${question}`
             try { names = fsMod.readdirSync(md).filter((n) => n.toLowerCase().endsWith('.md')) } catch { continue }
             for (const name of names) {
               const full = path.join(md, name)
-              if (!isConfinedToHomeOrTmp(full)) { skipped++; continue }
+              // Re-checked per entry AND through realpath: readdir happily lists a symlink that points
+              // at /etc/shadow, and ingesting it would copy the target into the brain.
+              const realFull = confinedRealPath(full)
+              if (!realFull) { skipped++; continue }
               try {
-                const content = fsMod.readFileSync(full, 'utf8')
+                const content = fsMod.readFileSync(realFull, 'utf8')
                 if (!content.trim()) { skipped++; continue }
                 const rel = path.relative(os.homedir(), full)
                 const r = await ingestDocument(`claude-memory/${rel}`, content)
@@ -10180,11 +10195,12 @@ Question: ${question}`
         const p = JSON.parse(body || '{}') as { path?: string; ingest?: boolean }
         const imgPath = String(p.path ?? '').trim()
         if (!imgPath) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'path_required' })); return }
-        // SECURITY: confine the OCR path to home/tmp (same class as /api/ingest/path).
+        // SECURITY: confine the OCR path to home/tmp (same class as /api/ingest/path), symlinks resolved.
         const safeImg = path.resolve(imgPath.startsWith('~') ? path.join(os.homedir(), imgPath.slice(1)) : imgPath)
-        if (!isConfinedToHomeOrTmp(safeImg)) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'path must be under home directory or /tmp' })); return }
+        const realImg = confinedRealPath(safeImg)
+        if (!realImg) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'path must be under home directory or /tmp' })); return }
         const { runOcr } = await import('./lib/ocr.js')
-        const text = await runOcr(safeImg)
+        const text = await runOcr(realImg)
         if (/^OCR (error|unavailable)/i.test(text)) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: text, text: '' })); return }
         const model = await pickChatModel()
         const { generateOllamaText } = await import('./lib/ollama.js')
@@ -11992,12 +12008,16 @@ Question: ${question}`
       const rel = (url.searchParams.get('path') ?? '').replace(/^\/+/, '')
       const base = path.join(os.homedir(), '.noetica', 'workspaces', ws)
       const target = path.resolve(base, rel)
-      if (!target.startsWith(base + path.sep)) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'bad_path' })); return }
+      // Was a bare lexical `startsWith(base + sep)`. That admits any symlink INSIDE the workspace that
+      // points out of it — workspaces hold agent-written files, so the agent could plant the link itself.
+      // realPathWithinRoot keeps the lexical barrier first, then re-validates the resolved target.
+      const safe = realPathWithinRoot(target, base)
+      if (!safe) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'bad_path' })); return }
       // Operate on a single file handle (open → fstat → read) so the size check and
       // the read hit the same inode — a statSync-then-readFileSync on the path races.
       let fd: number | undefined
       try {
-        fd = fs.openSync(target, 'r')
+        fd = fs.openSync(safe, 'r')
         const st = fs.fstatSync(fd)
         if (st.size > 1024 * 1024) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ content: `(file too large: ${st.size} bytes)`, truncated: true })); return }
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ content: fs.readFileSync(fd, 'utf8') }))
