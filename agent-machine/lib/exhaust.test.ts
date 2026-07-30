@@ -107,10 +107,34 @@ test('the ledgers round-trip through disk and mine end-to-end', () => {
 
 test('recording never throws even when the home is unwritable — observability cannot fail a request', () => {
   const prev = process.env['NOETICA_HOME']
-  process.env['NOETICA_HOME'] = '/proc/nonexistent-and-unwritable'
+  // A FILE standing where the home directory should be. Writes under it fail ENOTDIR on every OS,
+  // and — unlike permission bits — that holds for root too, so a CI job running as uid 0 still
+  // exercises the failure.
+  //
+  // This fixture used to be '/proc/nonexistent-and-unwritable', picked because macOS has no /proc.
+  // On Linux it IS a live procfs, and procfs answers mkdir with ENOENT even though the parent
+  // exists. Node's recursive mkdirp reads ENOENT as "create the parent, then retry" — /proc already
+  // exists, so it created nothing and retried, forever, at 100% CPU. The try/catch in recordExhaust
+  // cannot catch a loop that never returns, so "never throws" quietly became "never returns", and
+  // the required check ran ~6h and expired as `cancelled` on every commit from 65ec5819 onward.
+  const unwritableHome = path.join(HOME, 'home-is-a-file')
+  fs.writeFileSync(unwritableHome, 'a file, not a directory')
+  process.env['NOETICA_HOME'] = unwritableHome
   try {
-    recordExhaust(exhaustFromSelection(['a'], [], (s) => s, { source: 'retrieval' }))
-    noteNeeded(['a'])
+    // The fixture must genuinely be hostile. Without this, a fixture that had quietly become
+    // writable would sail through the assertions below while testing nothing at all.
+    assert.throws(
+      () => fs.appendFileSync(path.join(unwritableHome, 'exhaust.jsonl'), '{}\n'),
+      (err: unknown) => {
+        // ENOTDIR on POSIX (measured: macOS and Linux both, 0ms); ENOENT is the Windows spelling.
+        const code = (err as NodeJS.ErrnoException).code
+        return code === 'ENOTDIR' || code === 'ENOENT'
+      },
+      'the fixture must actually make the ledger unwritable',
+    )
+
+    assert.doesNotThrow(() => recordExhaust(exhaustFromSelection(['a'], [], (s) => s, { source: 'retrieval' })))
+    assert.doesNotThrow(() => noteNeeded(['a']))
   } finally { process.env['NOETICA_HOME'] = prev }
 })
 
