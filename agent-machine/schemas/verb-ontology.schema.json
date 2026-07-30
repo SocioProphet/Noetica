@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.socioprophet.io/noetica/verb-ontology.schema.json",
+  "title": "VerbOntology",
+  "description": "A canonical catalogue of action verbs, classified under KKO upper classes. Apple's AppIntent schema exposes 203 intents and only FOUR semantic verb primitives (`open`, `delete`, `search`, `audioStarting`); 156 of the 203 intents have no verb at all. That thinness is not a design choice, it is an absence — a system with no verb ontology cannot say why two actions are the same kind of thing. This ontology anchors each verb in the KKO upper structure (see PROVENANCE.md), so a `send` and a `publish` are both `Communication` (a form of TriadicAction — one event produces a second that mediates a third), and a `read` and a `list` are both `Observation` under Events. Classifications are decisions, not scrapings; they must be traceable to the KKO class name.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ontologyVersion", "kkoVersion", "verbs"],
+  "properties": {
+    "ontologyVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "kkoVersion": { "type": "string", "description": "Version of KKO the upper-class references anchor to. Locks provenance so a widening of KKO upstream is visible as a version bump here." },
+    "verbs": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/verb" }
+    }
+  },
+  "$defs": {
+    "verb": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "definition", "kkoClass", "voice", "reversibleByDefault"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z_]*$",
+          "description": "Stable lowercase ASCII identifier — the primary key. Verbs are named for what they DO, not for the tool that implements them."
+        },
+        "label": { "type": "string", "minLength": 1 },
+        "definition": { "type": "string", "minLength": 20, "description": "What the verb means in one sentence. Prose only — the machine-checkable content lives in kkoClass." },
+        "kkoClass": {
+          "type": "string",
+          "description": "The KKO upper class this verb specialises. Not free text — the classifier lists the acceptable values."
+        },
+        "voice": {
+          "enum": ["actor", "patient", "observer"],
+          "description": "actor: verb describes what a subject DOES (send, delete). patient: what happens TO a subject (received, deleted). observer: pure inspection (read, list, count) that does not modify. Apple’s vocabulary conflates all three; keeping them apart is what lets a governance layer decide when a receipt is required."
+        },
+        "reversibleByDefault": {
+          "type": "boolean",
+          "description": "Default reversibility for actions specialising this verb. Individual action entries may still override (e.g. a specific `send` variant that can be recalled)."
+        },
+        "aliases": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z][a-z_]*$" },
+          "uniqueItems": true,
+          "description": "Other names people call this verb — kept for search, never for identity. The id is authoritative; an alias is a lookup convenience."
+        }
+      }
+    }
+  }
+}

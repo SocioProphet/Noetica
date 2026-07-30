@@ -1,0 +1,321 @@
+{
+  "ontologyVersion": "0.1.0",
+  "kkoVersion": "2.10",
+  "verbs": [
+    {
+      "id": "read",
+      "label": "Read",
+      "definition": "Retrieve the current value of a resource without modifying it.",
+      "kkoClass": "Events.Observation",
+      "voice": "observer",
+      "reversibleByDefault": true,
+      "aliases": ["get", "fetch", "view", "inspect", "load"]
+    },
+    {
+      "id": "list",
+      "label": "List",
+      "definition": "Enumerate the members of a collection without modifying any.",
+      "kkoClass": "Events.Observation",
+      "voice": "observer",
+      "reversibleByDefault": true,
+      "aliases": ["enumerate", "index"]
+    },
+    {
+      "id": "count",
+      "label": "Count",
+      "definition": "Return the cardinality of a collection without modifying it.",
+      "kkoClass": "Events.Observation",
+      "voice": "observer",
+      "reversibleByDefault": true,
+      "aliases": ["size"]
+    },
+    {
+      "id": "search",
+      "label": "Search",
+      "definition": "Query a corpus for matching entries and return references, without modifying the corpus.",
+      "kkoClass": "InquiryMethods",
+      "voice": "observer",
+      "reversibleByDefault": true,
+      "aliases": ["find", "lookup", "query"]
+    },
+    {
+      "id": "measure",
+      "label": "Measure",
+      "definition": "Take a quantitative observation of a state; the observation itself does not change the state.",
+      "kkoClass": "InquiryMethods",
+      "voice": "observer",
+      "reversibleByDefault": true,
+      "aliases": ["gauge", "assess"]
+    },
+    {
+      "id": "create",
+      "label": "Create",
+      "definition": "Bring a new entity into existence. The inverse is delete of that entity.",
+      "kkoClass": "Action",
+      "voice": "actor",
+      "reversibleByDefault": true,
+      "aliases": ["make", "new", "generate", "add"]
+    },
+    {
+      "id": "update",
+      "label": "Update",
+      "definition": "Modify the value or attributes of an existing entity in place. The inverse is restore from the pre-image.",
+      "kkoClass": "Action",
+      "voice": "actor",
+      "reversibleByDefault": true,
+      "aliases": ["modify", "edit", "change", "set", "write"]
+    },
+    {
+      "id": "append",
+      "label": "Append",
+      "definition": "Extend a sequence or log with a new entry, without altering existing entries. Inverse is truncation of the appended entry.",
+      "kkoClass": "Action",
+      "voice": "actor",
+      "reversibleByDefault": true,
+      "aliases": ["log", "record"]
+    },
+    {
+      "id": "delete",
+      "label": "Delete",
+      "definition": "Remove an existing entity. Reversibility depends on whether a pre-image was retained; the verb itself does not assert one.",
+      "kkoClass": "Action",
+      "voice": "actor",
+      "reversibleByDefault": false,
+      "aliases": ["remove", "destroy", "drop"]
+    },
+    {
+      "id": "move",
+      "label": "Move",
+      "definition": "Change the location or ownership of an entity without altering its content. Inverse is a move back to the origin.",
+      "kkoClass": "Action",
+      "voice": "actor",
+      "reversibleByDefault": true,
+      "aliases": ["relocate", "transfer"]
+    },
+    {
+      "id": "copy",
+      "label": "Copy",
+      "definition": "Produce a new entity whose content mirrors an existing one, without modifying the source.",
+      "kkoClass": "Action",
+      "voice": "actor",
+      "reversibleByDefault": true,
+      "aliases": ["duplicate", "clone"]
+    },
+    {
+      "id": "open",
+      "label": "Open",
+      "definition": "Bring an entity into an interactive or accessible state — a UI window, a stream, a session. Inverse is close.",
+      "kkoClass": "Situations",
+      "voice": "actor",
+      "reversibleByDefault": true,
+      "aliases": ["launch", "start"]
+    },
+    {
+      "id": "close",
+      "label": "Close",
+      "definition": "Take an entity out of its interactive/accessible state. The observable content persists; the accessibility does not.",
+      "kkoClass": "Situations",
+      "voice": "actor",
+      "reversibleByDefault": true,
+      "aliases": ["end", "terminate"]
+    },
+    {
+      "id": "schedule",
+      "label": "Schedule",
+      "definition": "Register an action to occur at a specified moment. Inverse is cancellation before the moment arrives.",
+      "kkoClass": "SituationTypes",
+      "voice": "actor",
+      "reversibleByDefault": true,
+      "aliases": ["defer", "enqueue"]
+    },
+    {
+      "id": "cancel",
+      "label": "Cancel",
+      "definition": "Withdraw a scheduled action before it takes effect. If the action has already executed, cancel is not admissible.",
+      "kkoClass": "SituationTypes",
+      "voice": "actor",
+      "reversibleByDefault": false,
+      "aliases": ["abort", "revoke"]
+    },
+    {
+      "id": "send",
+      "label": "Send",
+      "definition": "Communicate a payload from a sender to a receiver via a channel. Instance of TriadicAction: the message mediates sender and receiver.",
+      "kkoClass": "TriadicAction",
+      "voice": "actor",
+      "reversibleByDefault": false,
+      "aliases": ["transmit", "deliver", "post"]
+    },
+    {
+      "id": "publish",
+      "label": "Publish",
+      "definition": "Make content available to a channel or audience. TriadicAction — the channel mediates author and audience.",
+      "kkoClass": "TriadicAction",
+      "voice": "actor",
+      "reversibleByDefault": false,
+      "aliases": ["broadcast", "announce", "release"]
+    },
+    {
+      "id": "subscribe",
+      "label": "Subscribe",
+      "definition": "Register interest in future messages on a channel. Inverse is unsubscribe.",
+      "kkoClass": "TriadicAction",
+      "voice": "actor",
+      "reversibleByDefault": true,
+      "aliases": ["listen", "follow"]
+    },
+    {
+      "id": "invite",
+      "label": "Invite",
+      "definition": "Propose participation to a party in a scheduled interaction. Reversibility limited: invites are receivable and cannot be recalled from cognition even when withdrawn.",
+      "kkoClass": "TriadicAction",
+      "voice": "actor",
+      "reversibleByDefault": false,
+      "aliases": ["summon"]
+    },
+    {
+      "id": "share",
+      "label": "Share",
+      "definition": "Extend access to a resource from an owner to another party. Inverse is unshare — resource state is preserved.",
+      "kkoClass": "TriadicAction",
+      "voice": "actor",
+      "reversibleByDefault": true,
+      "aliases": ["grant", "permit"]
+    },
+    {
+      "id": "acknowledge",
+      "label": "Acknowledge",
+      "definition": "Confirm receipt of a message. Distinct from acting on the message — the reply reports observation, not effect.",
+      "kkoClass": "TriadicAction",
+      "voice": "actor",
+      "reversibleByDefault": false,
+      "aliases": ["ack", "confirm"]
+    },
+    {
+      "id": "sign",
+      "label": "Sign",
+      "definition": "Produce a cryptographic attestation binding a party to a payload. The attestation is verifiable; it cannot be unmade after issuance.",
+      "kkoClass": "Action",
+      "voice": "actor",
+      "reversibleByDefault": false,
+      "aliases": ["attest", "witness"]
+    },
+    {
+      "id": "encrypt",
+      "label": "Encrypt",
+      "definition": "Transform content into a form only holders of a key can read. Inverse is decrypt with the paired key.",
+      "kkoClass": "Action",
+      "voice": "actor",
+      "reversibleByDefault": true,
+      "aliases": ["seal"]
+    },
+    {
+      "id": "decrypt",
+      "label": "Decrypt",
+      "definition": "Recover plaintext from ciphertext using the paired key. The observation is one-way — once seen, a payload cannot be unseen.",
+      "kkoClass": "Action",
+      "voice": "actor",
+      "reversibleByDefault": false,
+      "aliases": ["unseal"]
+    },
+    {
+      "id": "enable",
+      "label": "Enable",
+      "definition": "Grant a capability to a subject. Inverse is disable.",
+      "kkoClass": "SituationTypes",
+      "voice": "actor",
+      "reversibleByDefault": true,
+      "aliases": ["allow", "permit"]
+    },
+    {
+      "id": "deny",
+      "label": "Deny",
+      "definition": "Refuse a capability request. The refusal is a decision receipt; the capability remains unavailable until re-authorised.",
+      "kkoClass": "SituationTypes",
+      "voice": "actor",
+      "reversibleByDefault": true,
+      "aliases": ["block", "refuse"]
+    },
+    {
+      "id": "approve",
+      "label": "Approve",
+      "definition": "Adjudicate a proposal as admissible. The approval is a decision-of-record; the underlying proposal may still be withdrawn.",
+      "kkoClass": "InquiryMethods",
+      "voice": "actor",
+      "reversibleByDefault": false,
+      "aliases": ["accept", "authorise"]
+    },
+    {
+      "id": "reject",
+      "label": "Reject",
+      "definition": "Adjudicate a proposal as inadmissible. Distinct from deny: reject applies to a proposal in review, deny to a capability request.",
+      "kkoClass": "InquiryMethods",
+      "voice": "actor",
+      "reversibleByDefault": false,
+      "aliases": ["dismiss"]
+    },
+    {
+      "id": "revoke",
+      "label": "Revoke",
+      "definition": "Withdraw a previously granted capability or credential. The historical grant persists in the audit; future authority does not.",
+      "kkoClass": "Action",
+      "voice": "actor",
+      "reversibleByDefault": false,
+      "aliases": ["rescind"]
+    },
+    {
+      "id": "learn",
+      "label": "Learn",
+      "definition": "Acquire, modify, or reinforce knowledge from observed evidence.",
+      "kkoClass": "LearningProcesses",
+      "voice": "actor",
+      "reversibleByDefault": false,
+      "aliases": ["train", "study"]
+    },
+    {
+      "id": "reason",
+      "label": "Reason",
+      "definition": "Derive a conclusion from premises via a specified inference method.",
+      "kkoClass": "InquiryMethods",
+      "voice": "actor",
+      "reversibleByDefault": true,
+      "aliases": ["infer", "deduce"]
+    },
+    {
+      "id": "abstain",
+      "label": "Abstain",
+      "definition": "Decline to produce an answer when evidence is insufficient. Distinct from failure — a considered non-answer is a decision.",
+      "kkoClass": "InquiryMethods",
+      "voice": "actor",
+      "reversibleByDefault": true,
+      "aliases": ["withhold", "defer"]
+    },
+    {
+      "id": "remember",
+      "label": "Remember",
+      "definition": "Persist a fact to durable memory so it survives the current session. Inverse is forget.",
+      "kkoClass": "LearningProcesses",
+      "voice": "actor",
+      "reversibleByDefault": true,
+      "aliases": ["save", "note"]
+    },
+    {
+      "id": "forget",
+      "label": "Forget",
+      "definition": "Remove a previously remembered fact. If the fact was replicated elsewhere the observation cannot itself be unmade.",
+      "kkoClass": "LearningProcesses",
+      "voice": "actor",
+      "reversibleByDefault": false,
+      "aliases": ["purge"]
+    },
+    {
+      "id": "execute",
+      "label": "Execute",
+      "definition": "Run a specified computation to completion. Reversibility depends on the computation; the verb itself asserts none.",
+      "kkoClass": "Processes",
+      "voice": "actor",
+      "reversibleByDefault": false,
+      "aliases": ["run", "invoke", "call"]
+    }
+  ]
+}
