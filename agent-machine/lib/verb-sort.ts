@@ -11,14 +11,27 @@
  * no node (an expression over the basis).
  *
  * Pipeline logic is [CONTRACT]. The three seams are bound per Phase-0 discovery:
- *   SEAM-A independenceMetric  — [obstruction] Mellumwork is doctrine-only; real ι is a
- *                                conditional-independence statistic over the atomspace
- *                                episode log (logTail). Stub reads the declared field.
- *   SEAM-B historyDependence   — [substrate confirmed] ∂O/∂h via permuted logTail replay
- *                                (harness pending). Stub reads the declared field.
+ *   SEAM-A independenceMetric  — [IMPLEMENTED, unbound in prod] ι = 1 − max over
+ *                                constituent pairs of normalised mutual information, on
+ *                                the stratum where the parent fired. The ESTIMATOR is
+ *                                real and tested against synthetic ground truth; the
+ *                                production episode log (logTail) still does not exist,
+ *                                so `independenceEstimate` falls back to the declared
+ *                                field and REPORTS that it did.
+ *   SEAM-B historyDependence   — [injection point] ∂O/∂h needs the observable re-run under
+ *                                a permuted history; a log cannot supply that, so this
+ *                                stays a bindable probe rather than something computed.
  *   SEAM-C ledgerHash          — [bound] canonical-JSON SHA-256, matching cairnpath-adapter.
+ *
+ * The tiering is the enforcement. A FACTORIZATION verdict is T1 only when BOTH consumed
+ * seams were measured; unbound, it is T2/ZERO. Previously every such verdict was stamped
+ * T1 — "instrumented" — while reading numbers no instrument had produced, which is the
+ * same declared-but-unenforced defect as a dispatch asserting its own verdict. Compare
+ * dispatch-ledger: T2 ⇒ ZERO ⇒ unestablished, one doctrine across both modules.
+ *
  * CI-5 (seam isolation): swapping the SEAM-A/B stubs for the real statistics must not
- * change verdicts for verbs whose fields don't depend on them.
+ * change verdicts for verbs whose fields don't depend on them — ORDER and MINIMALITY
+ * verdicts never consume a seam, and their tier is correspondingly untouched.
  */
 import { createHash } from 'node:crypto'
 
@@ -48,12 +61,139 @@ export interface Verdict {
 }
 
 // ── SEAMS ────────────────────────────────────────────────────────────────────
-/** SEAM-A. Real ι = conditional independence of constituents given the parent, over
- *  the episode log. Stub returns the declared value (skeleton parity, CI-5 isolated). */
-export function independenceMetric(v: Verb): number { return v.independence }
-/** SEAM-B. Real probe = re-evaluate the observable under a permuted prior-reading
- *  history h from logTail(); ∂O/∂h ≠ 0 ⇒ history-dependent. Stub returns declared. */
-export function historyDependenceProbe(v: Verb): boolean { return v.historyDependent }
+/** One observation: the set of verb/constituent ids that fired together. This is the
+ *  substrate SEAM-A needs. It does not yet exist in production (there is no logTail),
+ *  which is why `independenceEstimate` reports its source rather than silently
+ *  substituting the declared value. */
+export interface Episode { fired: readonly string[] }
+
+/** A seam reading that knows whether it was MEASURED or merely DECLARED. The
+ *  distinction is the whole point: a declared value is an assertion, and a verdict
+ *  resting on an assertion cannot honestly be tiered T1 (instrumented). */
+export interface SeamEstimate<T> { value: T; source: 'measured' | 'declared'; n: number; reason?: string }
+
+/** Optional real bindings for the seams. Supplying them upgrades affected verdicts from
+ *  T2 to T1; supplying nothing leaves the sorter working exactly as before, but honest
+ *  about it. This is what makes the seams swappable rather than "harness pending". */
+export interface SeamBindings {
+  log?: readonly Episode[]
+  /** Real SEAM-B probe: re-evaluate the observable under a permuted prior-reading history
+   *  h and report ∂O/∂h ≠ 0. Cannot be derived from a log alone — it needs an executable
+   *  observable — so it stays an injection point rather than something computed here. */
+  historyProbe?: (v: Verb) => boolean
+}
+
+/** House minimum. Never compute a statistic on fewer than 30 observations; below that the
+ *  correct output is "unestablished", not a number with wide error bars presented bare. */
+const MIN_SUPPORT = 30
+
+/** Parent-stratum index, memoised per log. `sortVerb` is called once per candidate verb and
+ *  `independenceEstimate` once per call, so a naive `log.filter()` re-scanned the entire episode
+ *  log every time — O(|log| x |verbs|) on a log that is expected to be large once it exists.
+ *  Keyed on the log OBJECT so a caller passing a new log gets a fresh index, and a WeakMap so
+ *  retaining the index never keeps a discarded log alive. */
+const stratumCache = new WeakMap<object, Map<string, readonly Episode[]>>()
+
+function parentStratum(log: readonly Episode[], parentId: string): readonly Episode[] {
+  let byParent = stratumCache.get(log as unknown as object)
+  if (!byParent) {
+    byParent = new Map()
+    stratumCache.set(log as unknown as object, byParent)
+  }
+  let hit = byParent.get(parentId)
+  if (!hit) {
+    hit = log.filter((e) => e.fired.includes(parentId))
+    byParent.set(parentId, hit)
+  }
+  return hit
+}
+
+/** Binary entropy, in bits. */
+function binaryEntropy(p: number): number {
+  return p <= 0 || p >= 1 ? 0 : -(p * Math.log2(p) + (1 - p) * Math.log2(1 - p))
+}
+
+/** Normalised mutual information between two presence indicators, in [0,1].
+ *  Returns null when either indicator is CONSTANT across the stratum: a constant carries
+ *  no information, so the pair cannot witness dependence either way. Reporting 0 there
+ *  would read as "independent" when the truth is "unobservable". */
+function normalizedMI(xs: readonly boolean[], ys: readonly boolean[]): number | null {
+  const n = xs.length
+  if (n === 0) return null
+  let n11 = 0, n10 = 0, n01 = 0, n00 = 0
+  for (let i = 0; i < n; i++) {
+    const x = xs[i]!, y = ys[i]!
+    if (x && y) n11++; else if (x) n10++; else if (y) n01++; else n00++
+  }
+  const px = (n11 + n10) / n, py = (n11 + n01) / n
+  const hx = binaryEntropy(px), hy = binaryEntropy(py)
+  if (hx === 0 || hy === 0) return null
+  let mi = 0
+  for (const [c, a, b] of [[n11, px, py], [n10, px, 1 - py], [n01, 1 - px, py], [n00, 1 - px, 1 - py]] as const) {
+    if (c === 0) continue                        // 0·log0 = 0, and log0 would be -Infinity
+    const pj = c / n
+    mi += pj * Math.log2(pj / (a * b))
+  }
+  return Math.max(0, Math.min(1, mi / Math.min(hx, hy)))
+}
+
+/** SEAM-A, implemented. ι = 1 − max over constituent pairs of normalised mutual
+ *  information, computed on the stratum of episodes in which the PARENT fired — which is
+ *  what "independent given the parent" means. Ranges 1 (no pair shares information:
+ *  a product state) to 0 (a pair is fully determined by the other: a bound state).
+ *
+ *  Falls back to the declared field when it cannot measure, and says so. The three
+ *  honest reasons to fall back: no log at all, a parent stratum below MIN_SUPPORT, or
+ *  every pair degenerate. Only the first is the standing production case. */
+export function independenceEstimate(v: Verb, seams?: SeamBindings): SeamEstimate<number> {
+  const d = v.decomposition
+  if (!d) return { value: v.independence, source: 'declared', n: 0, reason: 'irreducible: no constituents to test' }
+
+  const cs = [...new Set(d.constituents)]
+  if (cs.length < 2) {
+    // Structural, not statistical: with one distinct constituent there is no pair that
+    // could be dependent, so ι = 1 follows from the decomposition itself. Establishable
+    // without any log, hence 'measured'.
+    return { value: 1, source: 'measured', n: 0, reason: 'single distinct constituent: pairwise independence is vacuous' }
+  }
+
+  if (!seams?.log) return { value: v.independence, source: 'declared', n: 0, reason: 'no episode log supplied' }
+
+  const stratum = parentStratum(seams.log, v.id)
+  if (stratum.length < MIN_SUPPORT) {
+    return { value: v.independence, source: 'declared', n: stratum.length,
+      reason: `parent stratum n=${stratum.length} < ${MIN_SUPPORT}` }
+  }
+
+  let worst: number | null = null
+  for (let i = 0; i < cs.length; i++) {
+    for (let j = i + 1; j < cs.length; j++) {
+      const m = normalizedMI(
+        stratum.map((e) => e.fired.includes(cs[i]!)),
+        stratum.map((e) => e.fired.includes(cs[j]!)),
+      )
+      if (m !== null) worst = worst === null ? m : Math.max(worst, m)
+    }
+  }
+  if (worst === null) {
+    return { value: v.independence, source: 'declared', n: stratum.length,
+      reason: 'every constituent pair degenerate in the stratum' }
+  }
+  return { value: 1 - worst, source: 'measured', n: stratum.length }
+}
+
+/** SEAM-B. Genuinely blocked on a harness: ∂O/∂h requires re-running the observable under
+ *  a permuted history, which a log cannot supply. Now an injection point rather than a
+ *  hardcoded stub, so binding it is a caller's decision and its absence is visible. */
+export function historyDependenceEstimate(v: Verb, seams?: SeamBindings): SeamEstimate<boolean> {
+  if (seams?.historyProbe) return { value: seams.historyProbe(v), source: 'measured', n: 1 }
+  return { value: v.historyDependent, source: 'declared', n: 0, reason: 'no ∂O/∂h probe bound' }
+}
+
+/** Back-compatible readers. Prefer the *Estimate forms — these discard the provenance,
+ *  and discarding the provenance is how a declared value came to be tiered T1. */
+export function independenceMetric(v: Verb, seams?: SeamBindings): number { return independenceEstimate(v, seams).value }
+export function historyDependenceProbe(v: Verb, seams?: SeamBindings): boolean { return historyDependenceEstimate(v, seams).value }
 /** SEAM-C [bound]. Canonical-JSON SHA-256 — same entrypoint as cairnpath-adapter. */
 export function ledgerHash(obj: unknown): string {
   return 'sha256:' + createHash('sha256').update(canonicalJson(obj)).digest('hex')
@@ -71,10 +211,26 @@ function canonicalJson(obj: unknown): string {
 const orderTest = (v: Verb): boolean => v.operandType === 'action'   // T0: 2nd-order ⇒ META
 
 /** Separable iff a decomposition exists, constituents independent given parent
- *  (ι ≥ τ), and no history dependence — a product state, not a bound state. */
-function separable(v: Verb, tau: number): boolean {
-  if (!v.decomposition) return false
-  return independenceMetric(v) >= tau && !historyDependenceProbe(v)
+ *  (ι ≥ τ), and no history dependence — a product state, not a bound state.
+ *
+ *  Returns the two seam readings alongside the answer, because the CALLER needs to know
+ *  whether the answer was measured. A boolean that hides its provenance is exactly how a
+ *  declared ι came to be stamped T1 (instrumented) for the whole life of this module. */
+interface Separability {
+  separable: boolean
+  iota: SeamEstimate<number>
+  history: SeamEstimate<boolean>
+  /** True iff BOTH consumed seams were measured. Only then is a FACTORIZATION verdict T1. */
+  measured: boolean
+}
+function separability(v: Verb, tau: number, seams?: SeamBindings): Separability {
+  const iota = independenceEstimate(v, seams)
+  const history = historyDependenceEstimate(v, seams)
+  return {
+    separable: Boolean(v.decomposition) && iota.value >= tau && !history.value,
+    iota, history,
+    measured: iota.source === 'measured' && history.source === 'measured',
+  }
 }
 /** Minimality: candidate collapses to one primitive under a slot rebinding. */
 function collapsesToSingle(v: Verb): Decomp | null {
@@ -82,8 +238,16 @@ function collapsesToSingle(v: Verb): Decomp | null {
   return d && d.mediator === 'identity' && d.constituents.length === 1 && d.slotBinding ? d : null
 }
 
-/** Sort a candidate verb. Order fires before factorization (load-bearing). */
-export function sortVerb(v: Verb, tau: number): Verdict {
+/** Sort a candidate verb. Order fires before factorization (load-bearing).
+ *
+ *  `seams` binds SEAM-A (an episode log) and SEAM-B (a ∂O/∂h probe). Unbound, the sorter
+ *  behaves exactly as before EXCEPT that FACTORIZATION verdicts — the only ones that
+ *  consume the seams — are tiered T2/ZERO rather than T1/POS. That demotion is the fix:
+ *  those verdicts were being stamped "instrumented" while reading numbers no instrument
+ *  had produced. ORDER and MINIMALITY verdicts are unaffected because operand type and
+ *  slot-collapse are structural facts, directly inspectable, not measured statistics —
+ *  which is CI-5 (seam isolation) holding, and now visible in the tiering. */
+export function sortVerb(v: Verb, tau: number, seams?: SeamBindings): Verdict {
   // T0 — ORDER
   if (orderTest(v)) {
     return mk(v, 'PRIMITIVE_NO', 'ORDER', { operandType: 'action' }, [], 'embedding',
@@ -97,20 +261,38 @@ export function sortVerb(v: Verb, tau: number): Verdict {
   }
   // T1 — FACTORIZATION
   if (v.decomposition) {
-    if (separable(v, tau)) {
-      return mk(v, 'REDUCIBLE', 'FACTORIZATION',
-        { mediator: v.decomposition.mediator, constituents: v.decomposition.constituents, iota: independenceMetric(v) },
-        [], 'none', 'separable composition (product state); not a new primitive')
+    const s = separability(v, tau, seams)
+    // Provenance travels with the verdict, so an auditor reading a T2 can see WHICH seam
+    // was unbound and why, rather than having to know this module's history.
+    // Everything the separability decision consumed, so an auditor can re-derive the verdict
+    // from the witness alone. An earlier revision recorded historySource but not the history
+    // VALUE or its support — which meant the witness could not reproduce the decision it was
+    // supposed to justify, and `tau` (the threshold ι was compared against) was absent too.
+    const seamWitness = {
+      iota: s.iota.value, iotaSource: s.iota.source, iotaN: s.iota.n,
+      ...(s.iota.reason ? { iotaReason: s.iota.reason } : {}),
+      historyDependent: s.history.value, historySource: s.history.source, historyN: s.history.n,
+      ...(s.history.reason ? { historyReason: s.history.reason } : {}),
+      tau,
     }
-    if (!separable(v, tau) && historyDependenceProbe(v)) {
+    const tier: 'T1' | 'T2' = s.measured ? 'T1' : 'T2'
+    const unmeasured = s.measured ? '' : ' [T2: seam declared, not measured]'
+
+    if (s.separable) {
+      return mk(v, 'REDUCIBLE', 'FACTORIZATION',
+        { mediator: v.decomposition.mediator, constituents: v.decomposition.constituents, ...seamWitness },
+        [], 'none', `separable composition (product state); not a new primitive${unmeasured}`, undefined, tier)
+    }
+    if (s.history.value) {
       return mk(v, 'ENTANGLEMENT', 'FACTORIZATION',
-        { mediator: 'entangle', constituents: v.decomposition.constituents, iota: independenceMetric(v) },
+        { mediator: 'entangle', constituents: v.decomposition.constituents, ...seamWitness },
         ['PERSISTENCE'], 'embedding',
-        'non-separable bound state; observable is a function of history h; adds PERSISTENCE to the dispatch bar')
+        `non-separable bound state; observable is a function of history h; adds PERSISTENCE to the dispatch bar${unmeasured}`,
+        undefined, tier)
     }
     // decomposed but neither cleanly separable nor history-dependent ⇒ ambiguous, T2/ZERO
     return mk(v, 'ENTANGLEMENT', 'FACTORIZATION',
-      { mediator: v.decomposition.mediator, constituents: v.decomposition.constituents, iota: independenceMetric(v), obstruction: 'ambiguous separability' },
+      { mediator: v.decomposition.mediator, constituents: v.decomposition.constituents, ...seamWitness, obstruction: 'ambiguous separability' },
       ['PERSISTENCE'], 'embedding', 'ambiguous separability — manual adjudication required', undefined, 'T2')
   }
   // T2 — MINIMALITY: irreducible ⇒ PRIMITIVE (admit as a column)

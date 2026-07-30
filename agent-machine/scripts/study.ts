@@ -216,7 +216,10 @@ async function main() {
         session: `study:${courseTag}`, requestHash: contentHash(prob.slice(0, 500)),
         action: 'transform', polarity: 'write', tier: 'deliberate', target: 'study', phase: 'crystallize',
         barCleared: true, residual: [], model: MODEL,
-        answerHash: contentHash(solText.slice(0, 500)), latencyMs, grounded: true, verdict: 'POS',
+        // No verdict field: it is DERIVED from (barCleared, residual) × (hashes, grounded).
+        // This call site used to pass `verdict: 'POS'` literally on every dispatch, which
+        // made the ledger's entire recorded history true by construction.
+        answerHash: contentHash(solText.slice(0, 500)), latencyMs, grounded: true,
       })
       const art = crystallizeAnswer({
         question: q, answer: `Correct approach (from official solution):\n${solText.slice(0, 1500)}`,
