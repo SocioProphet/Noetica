@@ -4225,7 +4225,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
         sse(res, 'delta', { delta: hit.answer })
         try {
           const { recordDispatch, contentHash } = await import('./lib/dispatch-ledger.js')
-          recordDispatch({ session: body.session_id ?? 'local', requestHash: contentHash(latestUserContent), action, polarity, tier: actionRoute.tier, target: actionRoute.target, phase, barCleared: true, residual: [], model: 'recall', answerHash: contentHash(hit.answer), latencyMs: lat, grounded: true, verdict: 'POS' })
+          recordDispatch({ session: body.session_id ?? 'local', requestHash: contentHash(latestUserContent), action, polarity, tier: actionRoute.tier, target: actionRoute.target, phase, barCleared: true, residual: [], model: 'recall', answerHash: contentHash(hit.answer), latencyMs: lat, grounded: true })
           const { recordTurn } = await import('./lib/dialogue-tracker.js')
           recordTurn({ session_id: body.session_id ?? 'local', intent: intentPlan.name, intent_score: intentPlan.score, fallback: false, slots_expected: intentPlan.slots, slots_filled: policy.filled, fill_rate: policy.fillRate, clarified: false, entities: glossaryTerms, surface: intentPlan.surface, skill: intentPlan.skill, tools: intentPlan.tools, capability: intentPlan.model, model: 'recall', retrieval: intentPlan.retrieval, grounded: true, latency_ms: lat, worth: 0.85, reward: 0.85, escalated: false })
         } catch { /* tracking best-effort */ }
@@ -4331,7 +4331,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
             session: body.session_id ?? 'local', requestHash: contentHash(latestUserContent),
             action, polarity, tier: actionRoute.tier, target: actionRoute.target, phase,
             barCleared: true, residual: [], model: 'extractive',
-            answerHash: contentHash(ex.answer), latencyMs: exLatency, grounded: true, verdict: 'POS',
+            answerHash: contentHash(ex.answer), latencyMs: exLatency, grounded: true,
           })
           // Crystallize the (deterministic, grounded) extractive answer as a durable artifact.
           const { crystallizeAnswer } = await import('./lib/crystallize.js')
@@ -4387,7 +4387,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
           const { recordTurn } = await import('./lib/dialogue-tracker.js')
           recordTurn({ session_id: body.session_id ?? 'local', intent: intentPlan.name, intent_score: intentPlan.score, fallback: false, slots_expected: intentPlan.slots, slots_filled: policy.filled, fill_rate: policy.fillRate, clarified: false, entities: glossaryTerms, surface: intentPlan.surface, skill: intentPlan.skill, tools: intentPlan.tools, capability: intentPlan.model, model: 'concept-lookup', retrieval: intentPlan.retrieval, grounded: true, latency_ms: lat, worth: 0.85, reward: 0.85, escalated: false })
           const { recordDispatch, contentHash } = await import('./lib/dispatch-ledger.js')
-          const d = recordDispatch({ session: body.session_id ?? 'local', requestHash: contentHash(latestUserContent), action, polarity, tier: actionRoute.tier, target: actionRoute.target, phase, barCleared: true, residual: [], model: 'concept-lookup', answerHash: contentHash(answer), latencyMs: lat, grounded: true, verdict: 'POS' })
+          const d = recordDispatch({ session: body.session_id ?? 'local', requestHash: contentHash(latestUserContent), action, polarity, tier: actionRoute.tier, target: actionRoute.target, phase, barCleared: true, residual: [], model: 'concept-lookup', answerHash: contentHash(answer), latencyMs: lat, grounded: true })
           const { crystallizeAnswer } = await import('./lib/crystallize.js')
           crystallizeAnswer({ question: latestUserContent, answer, session: body.session_id ?? 'local', action, attestation: d.attestation, worth: 0.85 })
           conceptAttestation = d.attestation
@@ -5351,7 +5351,7 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
           session: sessionId, requestHash: contentHash(latestUserContent),
           action, polarity, tier: actionRoute.tier, target: actionRoute.target, phase,
           barCleared: true, residual: [], // proceeded past the policy gate
-          model, answerHash: contentHash(fullContent), latencyMs, grounded: turnGrounded, verdict: 'POS',
+          model, answerHash: contentHash(fullContent), latencyMs, grounded: turnGrounded,
         })
         // Crystallize a high-worth answer into a durable, attested artifact (loop closes).
         if (typeof turnWorth === 'number') {
