@@ -15,7 +15,21 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
 
-const STORE = path.join(os.homedir(), '.noetica', 'a2a-trust.json')
+/** Where the ledger lives. Resolved on EVERY access — never frozen into a module-load constant — and
+ *  overridable with NOETICA_A2A_STORE.
+ *
+ *  This is a data-safety boundary, not a convenience. `_reset()` and `recordOutcome()` both persist, so a
+ *  path baked in at import time pointed the TEST SUITE at the operator's REAL federation ledger: `npm test`
+ *  in agent-machine rewrote ~/.noetica/a2a-trust.json hundreds of times per run. That is not merely data
+ *  loss — the ledger is FAIL-OPEN on erasure, because a peer with no record falls back to `fresh()`
+ *  (integrity 1, threat 1, score 0.64 — comfortably over TRUST_FLOOR). So a test run silently RESTORED
+ *  authority to every peer the operator had revoked or suspended, and overwrote surviving peers with
+ *  fixture scores. Resolving late also means an override applies to a module already imported — the old
+ *  module-load constant made import ORDER load-bearing, which is exactly the kind of thing that regresses
+ *  silently. Guarded by the `a2a store path` tests in a2a-trust.test.ts. */
+export function _storePath(): string {
+  return process.env['NOETICA_A2A_STORE'] || path.join(os.homedir(), '.noetica', 'a2a-trust.json')
+}
 const WEIGHTS = { success: 0.4, uptime: 0.2, threat: 0.2, integrity: 0.2 } as const
 const ALPHA = 0.12
 const STRIKE = 0.1
@@ -35,14 +49,15 @@ function load(): Map<string, TrustRecord> {
   if (ledger) return ledger
   try {
     const { readJson } = require('./at-rest.js') as typeof import('./at-rest.js')
-    ledger = new Map(Object.entries(readJson<Record<string, TrustRecord>>(STORE) ?? {}))
+    ledger = new Map(Object.entries(readJson<Record<string, TrustRecord>>(_storePath()) ?? {}))
   } catch { ledger = new Map() }
   return ledger
 }
 function persist(): void {
+  const store = _storePath()
   const obj = Object.fromEntries(ledger ?? new Map<string, TrustRecord>())
-  try { const { writeJson } = require('./at-rest.js') as typeof import('./at-rest.js'); writeJson(STORE, obj) }
-  catch { try { fs.mkdirSync(path.dirname(STORE), { recursive: true }); fs.writeFileSync(STORE, JSON.stringify(obj)) } catch { /* in-memory only */ } }
+  try { const { writeJson } = require('./at-rest.js') as typeof import('./at-rest.js'); writeJson(store, obj) }
+  catch { try { fs.mkdirSync(path.dirname(store), { recursive: true }); fs.writeFileSync(store, JSON.stringify(obj)) } catch { /* in-memory only */ } }
 }
 
 export function isExternalActor(spiffeId: string): boolean { return !spiffeId.startsWith('spiffe://noetica.local/') }

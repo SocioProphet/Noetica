@@ -21,26 +21,35 @@ import { cosineSim as cosine } from './vec-sim.js'
 // plaintext lines (lazy migration), so switching writes AND reads here loses nothing.
 import { appendJsonl, readJsonl } from './at-rest.js'
 
-const DIR = path.join(os.homedir(), '.noetica')
-const LOG = path.join(DIR, 'solve-log.jsonl')              // every attempt → metrics / the compounding curve
-const MEM = path.join(DIR, 'verified-solutions.jsonl')     // verified solutions → retrieval corpus
+/** Where the solve log + verified-solution corpus live. Resolved on EVERY access — never frozen into a
+ *  module-load constant — and overridable with NOETICA_SOLUTION_MEMORY_DIR. recordSolve() and
+ *  recordVerified() append, so a path baked in at import time let `npm test` inject fixture solutions
+ *  into the operator's real retrieval corpus — which then get served back as "proven" prior art, and
+ *  pollute the compounding-curve metrics the log exists to measure. See lib/store-path-guard.ts. */
+export function _dir(): string {
+  return process.env['NOETICA_SOLUTION_MEMORY_DIR'] || path.join(os.homedir(), '.noetica')
+}
+// every attempt → metrics / the compounding curve
+function logPath(): string { return path.join(_dir(), 'solve-log.jsonl') }
+// verified solutions → retrieval corpus
+function memPath(): string { return path.join(_dir(), 'verified-solutions.jsonl') }
 
 export interface SolveRecord { ts: number; task: string; solved: boolean; attempts: number; escalated: boolean; model: string; usedMemory: boolean }
 export interface VerifiedSolution { ts: number; task: string; files: { path: string; content: string }[]; verify: string; embedding?: number[] }
 
 export function recordSolve(rec: Omit<SolveRecord, 'ts'>): void {
-  appendJsonl(LOG, { ts: Date.now(), ...rec })
+  appendJsonl(logPath(), { ts: Date.now(), ...rec })
 }
 
 export async function recordVerified(task: string, files: { path: string; content: string }[], verify: string): Promise<void> {
   let embedding: number[] | undefined
   try { embedding = (await embedBatchLocal([task]))?.[0] ?? undefined } catch { /* embedder cold */ }
-  appendJsonl(MEM, { ts: Date.now(), task, files: files.slice(0, 12), verify, ...(embedding ? { embedding } : {}) })
+  appendJsonl(memPath(), { ts: Date.now(), task, files: files.slice(0, 12), verify, ...(embedding ? { embedding } : {}) })
 }
 
 /** The k most-similar proven solutions to `task` (cosine over the embedder; recency fallback). */
 export async function retrieveSimilar(task: string, k = 2): Promise<VerifiedSolution[]> {
-  const all = readJsonl<VerifiedSolution>(MEM)
+  const all = readJsonl<VerifiedSolution>(memPath())
   if (!all.length) return []
   let qemb: number[] | undefined
   try { qemb = (await embedBatchLocal([task]))?.[0] ?? undefined } catch { /* */ }
@@ -69,7 +78,7 @@ export interface QualityMetrics {
 }
 /** Solve-rate over time — the compounding curve. Buckets the log into ~8 windows. */
 export function qualityMetrics(): QualityMetrics {
-  const recs = readJsonl<SolveRecord>(LOG)
+  const recs = readJsonl<SolveRecord>(logPath())
   const total = recs.length
   if (!total) return { total: 0, solved: 0, solveRate: 0, avgAttempts: 0, escalationRate: 0, memoryUseRate: 0, series: [] }
   const solved = recs.filter((r) => r.solved).length

@@ -65,7 +65,13 @@ export const CONSTRUCTION_REPOS: RepoSpec[] = [
 ]
 
 const DEV_ROOT = process.env['NOETICA_DEV_ROOT'] ?? path.join(os.homedir(), 'dev')
-const SNAPSHOT_PATH = path.join(os.homedir(), '.noetica', 'self-model.json')
+/** Where the self-model snapshot lives. Resolved on EVERY access — never frozen into a module-load
+ *  constant — and overridable with NOETICA_SELF_MODEL_STORE. The writer replaces the whole snapshot, so
+ *  a run over a fixture repo set does not merge, it substitutes — the operator's real map of their own
+ *  estate is gone. See lib/store-path-guard.ts. */
+export function _snapshotPath(): string {
+  return process.env['NOETICA_SELF_MODEL_STORE'] || path.join(os.homedir(), '.noetica', 'self-model.json')
+}
 
 function readFirst(dir: string, candidates: string[], max = 2400): string {
   for (const c of candidates) {
@@ -177,7 +183,7 @@ export async function ingestSelfModel(): Promise<IngestSelfResult> {
     // Identity text: live from disk, else from the baked snapshot.
     let text = onDisk ? extractRepoIdentity(repo) : ''
     if (!text) {
-      try { const snap = JSON.parse(fs.readFileSync(SNAPSHOT_PATH, 'utf8')) as Record<string, string>; text = snap[repo.name] ?? '' } catch { /* none */ }
+      try { const snap = JSON.parse(fs.readFileSync(_snapshotPath(), 'utf8')) as Record<string, string>; text = snap[repo.name] ?? '' } catch { /* none */ }
     }
     if (!text) { missing.push(repo.name); continue }
     present.push(repo.name)
@@ -199,7 +205,8 @@ export async function ingestSelfModel(): Promise<IngestSelfResult> {
   }
 
   // Persist snapshot for shipped builds (best-effort).
-  try { fs.mkdirSync(path.dirname(SNAPSHOT_PATH), { recursive: true }); fs.writeFileSync(SNAPSHOT_PATH, JSON.stringify(snapshot, null, 2)) } catch { /* non-fatal */ }
+  const snapshotPath = _snapshotPath()
+  try { fs.mkdirSync(path.dirname(snapshotPath), { recursive: true }); fs.writeFileSync(snapshotPath, JSON.stringify(snapshot, null, 2)) } catch { /* non-fatal */ }
 
   return { reposIngested: present.length, chunksEmbedded, atoms, present, missing }
 }

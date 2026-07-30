@@ -15,7 +15,17 @@ import * as os from 'node:os'
 import { gateOpenChat, type OpenChatMessage, type GateFindings } from './open-chat-gate.js'
 import { forwardPublish, forwardRevoke } from './commons-federation.js'
 
-const STORE = path.join(os.homedir(), '.noetica', 'open-chats.json')
+/** Where the open-chat index lives. Resolved on EVERY access — never frozen into a module-load
+ *  constant — and overridable with NOETICA_OPEN_CHATS_STORE. persist() writes, and a full-suite run on
+ *  2026-07-29 was OBSERVED rewriting the operator's real ~/.noetica/open-chats.json.
+ *
+ *  This module is the canonical example of why a test-side HOME sandbox is NOT a fix:
+ *  open-chat-index.test.ts already set process.env.HOME in a before() hook, but before() runs AFTER this
+ *  module's import-time const had resolved, so the redirect silently missed and the suite kept writing
+ *  the real file. Late resolution is what makes an override actually bind. See lib/store-path-guard.ts. */
+export function _storePath(): string {
+  return process.env['NOETICA_OPEN_CHATS_STORE'] || path.join(os.homedir(), '.noetica', 'open-chats.json')
+}
 
 export interface OpenChatEntry {
   sessionId: string
@@ -40,13 +50,13 @@ export interface OpenChatHit {
 let cache: Map<string, OpenChatEntry> | null = null
 function load(): Map<string, OpenChatEntry> {
   if (cache) return cache
-  try { const { readJson } = require('./at-rest.js') as typeof import('./at-rest.js'); cache = new Map(Object.entries(readJson<Record<string, OpenChatEntry>>(STORE) ?? {})) }
+  try { const { readJson } = require('./at-rest.js') as typeof import('./at-rest.js'); cache = new Map(Object.entries(readJson<Record<string, OpenChatEntry>>(_storePath()) ?? {})) }
   catch { cache = new Map() }
   return cache
 }
 function persist(): void {
   const obj = Object.fromEntries(cache ?? new Map<string, OpenChatEntry>())
-  try { const { writeJson } = require('./at-rest.js') as typeof import('./at-rest.js'); writeJson(STORE, obj) }
+  try { const { writeJson } = require('./at-rest.js') as typeof import('./at-rest.js'); writeJson(_storePath(), obj) }
   catch { /* in-memory only */ }
 }
 

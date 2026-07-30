@@ -10,7 +10,14 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
 
-const STORE = path.join(os.homedir(), '.noetica', 'collections.json')
+/** Where the collection index lives. Resolved on EVERY access — never frozen into a module-load
+ *  constant — and overridable with NOETICA_COLLECTIONS_STORE. persist() writes, and a full-suite run on
+ *  2026-07-29 was OBSERVED rewriting the operator's real ~/.noetica/collections.json. This index is the
+ *  Library⇄Projects join key, so losing it doesn't lose documents, it orphans them from every project
+ *  that referenced the collection. See lib/store-path-guard.ts. */
+export function _storePath(): string {
+  return process.env['NOETICA_COLLECTIONS_STORE'] || path.join(os.homedir(), '.noetica', 'collections.json')
+}
 
 export interface Collection {
   id: string
@@ -26,14 +33,15 @@ export interface Collection {
 let cache: Map<string, Collection> | null = null
 function load(): Map<string, Collection> {
   if (cache) return cache
-  try { const { readJson } = require('./at-rest.js') as typeof import('./at-rest.js'); cache = new Map(Object.entries(readJson<Record<string, Collection>>(STORE) ?? {})) }
+  try { const { readJson } = require('./at-rest.js') as typeof import('./at-rest.js'); cache = new Map(Object.entries(readJson<Record<string, Collection>>(_storePath()) ?? {})) }
   catch { cache = new Map() }
   return cache
 }
 function persist(): void {
+  const store = _storePath()
   const obj = Object.fromEntries(cache ?? new Map<string, Collection>())
-  try { const { writeJson } = require('./at-rest.js') as typeof import('./at-rest.js'); writeJson(STORE, obj) }
-  catch { try { fs.mkdirSync(path.dirname(STORE), { recursive: true }); fs.writeFileSync(STORE, JSON.stringify(obj)) } catch { /* in-memory only */ } }
+  try { const { writeJson } = require('./at-rest.js') as typeof import('./at-rest.js'); writeJson(store, obj) }
+  catch { try { fs.mkdirSync(path.dirname(store), { recursive: true }); fs.writeFileSync(store, JSON.stringify(obj)) } catch { /* in-memory only */ } }
 }
 
 /** Stable catch-all collection for loose single-file drops. */

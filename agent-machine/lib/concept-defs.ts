@@ -16,7 +16,13 @@ import { embedText, cosineSim } from './ollama.js'
 import { isStopword } from './text-normalize.js'
 import { canonDef } from './canon-lookup.js'
 
-const STORE = path.join(os.homedir(), '.noetica', 'concepts')
+/** Where the per-field concept stores live. Resolved on EVERY access — never frozen into a module-load
+ *  constant — and overridable with NOETICA_CONCEPTS_DIR. saveConcepts() writes the WHOLE per-field file,
+ *  so a fixture field ("test", "demo") is created in the operator's real store and a real field name
+ *  collided with by a fixture is replaced outright. See lib/store-path-guard.ts. */
+export function _storeDir(): string {
+  return process.env['NOETICA_CONCEPTS_DIR'] || path.join(os.homedir(), '.noetica', 'concepts')
+}
 
 // GLiNER/KeyBERT extraction leaks HTML chrome + stopwords as "top terms" — filter them out so we
 // only enrich REAL concepts (the cleanup the brain needs).
@@ -154,18 +160,18 @@ export async function fetchConceptDef(term: string, field?: string): Promise<Con
   return c
 }
 
-function storeFile(field: string): string { return path.join(STORE, `${field}.concepts.json`) }
+function storeFile(field: string): string { return path.join(_storeDir(), `${field}.concepts.json`) }
 
 export function loadConcepts(field: string): Record<string, Concept> {
   try { return JSON.parse(fs.readFileSync(storeFile(field), 'utf8')) as Record<string, Concept> } catch { return {} }
 }
 function saveConcepts(field: string, c: Record<string, Concept>): void {
-  fs.mkdirSync(STORE, { recursive: true })
+  fs.mkdirSync(_storeDir(), { recursive: true })
   fs.writeFileSync(storeFile(field), JSON.stringify(c))
 }
 
 export function conceptStoreFields(): string[] {
-  try { return fs.readdirSync(STORE).filter((f) => f.endsWith('.concepts.json')).map((f) => f.replace('.concepts.json', '')) } catch { return [] }
+  try { return fs.readdirSync(_storeDir()).filter((f) => f.endsWith('.concepts.json')).map((f) => f.replace('.concepts.json', '')) } catch { return [] }
 }
 
 /**
