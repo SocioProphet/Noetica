@@ -21,8 +21,15 @@ import { allIntents, type Intent, type Tool, type Retrieval, type Capability } f
 import { ACTION_SIGNATURE, type Substrate, type Polarity } from './verb-sort.js'
 import { ledgerHash } from './verb-sort.js'
 
-/** The 6 columns, in (substrate × polarity) order. Sourced from ACTION_SIGNATURE so the
- *  column set cannot drift from the closure derivation in verb-sort.ts either. */
+/** The 6 columns, in (substrate × polarity) order.
+ *
+ *  This is a LITERAL, not a derivation — the tuple type is what gives `GridAction` its union,
+ *  and deriving it from `Object.keys(ACTION_SIGNATURE)` would erase that to `string`. It is
+ *  kept honest by TEST rather than by construction: the suite asserts the column set and
+ *  ACTION_SIGNATURE's key set are the same set in BOTH directions, and that the result
+ *  satisfies `adjointClosure`. So it cannot silently drift from verb-sort's closure
+ *  derivation — but the enforcement is the test, and an earlier comment here claimed the
+ *  stronger "sourced from", which was not true of the code. */
 export const ACTIONS = ['retrieve', 'create', 'evaluate', 'transform', 'sense', 'execute'] as const
 export type GridAction = typeof ACTIONS[number]
 
@@ -98,7 +105,12 @@ export function deriveCell(it: Intent, action: GridAction): GridCell {
   if (action === 'evaluate' && EVALUATING_SKILLS.has(it.skill)) evidence.push(`skill:${it.skill}`)
 
   if (evidence.length > 0) {
-    return { topic: it.name, action, substrate, polarity, valid: true, evidence, attestation: attest(it.name, action, evidence) }
+    // Normalise on the way OUT, not only inside attest(). The attestation already sorted, so an
+    // unsorted stored array meant two cells could share an attestation while displaying their
+    // evidence in different orders — a content-addressed field disagreeing with the content it
+    // addresses.
+    const ordered = [...evidence].sort()
+    return { topic: it.name, action, substrate, polarity, valid: true, evidence: ordered, attestation: attest(it.name, action, ordered) }
   }
   return {
     topic: it.name, action, substrate, polarity, valid: false, evidence: [],
@@ -165,10 +177,14 @@ export function buildGrid(): GridReport {
   // exactly why it is the +1 rather than a 23rd column.
   for (const a of ACTIONS) {
     const { substrate, polarity } = sig(a)
+    // The attestation must be computed over the SAME evidence the cell carries. An earlier
+    // revision hashed ['second-order'] while storing a full sentence, so the content address
+    // did not address the content — the exact defect this file's discipline is aimed at.
+    const metaEvidence = ['second-order: the operand is the conversation objective, not a topic']
     cells.push({
       topic: META_ROW, action: a, substrate, polarity, valid: true,
-      evidence: ['second-order: the operand is the conversation objective, not a topic'],
-      attestation: attest(META_ROW, a, ['second-order']),
+      evidence: metaEvidence,
+      attestation: attest(META_ROW, a, metaEvidence),
     })
   }
 
@@ -316,6 +332,50 @@ export function columnAsymmetry(report: GridReport = buildCanonicalGrid()): {
       `'${thinnest}' is admissible in only ${low} of ${rows} rows against '${widest}' at ${high}. ` +
       `The read/generate half of the algebra is well wired and the SENSE column is nearly absent — ` +
       `world:read is the estate's thinnest capability, which is a wiring gap, not a property of the algebra.`,
+  }
+}
+
+/**
+ * What would overturn the asymmetry finding. A finding that does not state its own
+ * sensitivity is an assertion dressed as a measurement.
+ *
+ * `sense = 3/23` rests on three tool classifications a reviewer could reasonably dispute —
+ * chiefly whether `web_search` and `brain_status` are store:read (a corpus / a system record)
+ * or world:read (the live internet / live process state). The router types web search as
+ * `retrieval: 'web+vector'`, which is why they are classified as `retrieve` here, but that is
+ * a modelling choice rather than a fact.
+ *
+ * Measured, by recomputing the fill under each alternative:
+ *
+ *   baseline                          sense 3/23    thinnest: sense
+ *   web_search   -> sense             sense 6/23    thinnest: sense
+ *   brain_status -> sense             sense 7/23    thinnest: sense
+ *   BOTH reclassified                 sense 10/23   thinnest: EXECUTE (7/23)
+ *
+ * So "sense is the thinnest column" survives either reclassification alone and FAILS under
+ * both together. State it that way rather than as an unqualified 3/23.
+ *
+ * What survives every variant is the shape underneath: create (8), execute (7) and sense
+ * (3-10) all sit far below retrieve (20) and transform (22). The estate READS AND GENERATES
+ * readily, and SENSES, PERSISTS AND ACTS rarely — that conclusion does not depend on any of
+ * the disputed classifications, and it is the claim worth making.
+ */
+export function asymmetryRobustness(report: GridReport = buildCanonicalGrid()): {
+  robust: boolean; readMean: number; writeMean: number; finding: string
+} {
+  const f = report.columnFill
+  // The classification-independent split: reads-of-what-we-already-have vs everything else.
+  const wellWired = (f.retrieve + f.transform) / 2
+  const thin = (f.create + f.execute + f.sense) / 3
+  return {
+    robust: thin < wellWired / 2,
+    readMean: wellWired, writeMean: thin,
+    finding:
+      `retrieve+transform average ${wellWired.toFixed(1)}/${report.rows.length} against ` +
+      `create+execute+sense at ${thin.toFixed(1)}. Which single column is THINNEST depends on ` +
+      `whether web_search and brain_status are store:read or world:read — reclassifying both ` +
+      `moves the minimum from sense to execute — but the gap between the read/generate half and ` +
+      `the sense/persist/act half survives every variant.`,
   }
 }
 

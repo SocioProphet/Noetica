@@ -98,9 +98,17 @@ export function classifyIntent(text: string, ctx: { hasDoc?: boolean } = {}): In
 /** Every intent in the canon, in id order. Exposed so the 23x6 action grid can be DERIVED
  *  from this file rather than authored alongside it — a hand-maintained copy of the row set
  *  would drift the moment an intent was added here, and the grid's whole value is that it
- *  cannot disagree with the canon. */
-export function allIntents(): readonly Intent[] { return INTENTS }
+ *  cannot disagree with the canon.
+ *
+ *  Returns a FROZEN COPY, not the backing array. `readonly` is erased at runtime, so handing
+ *  out `INTENTS` itself would let any consumer mutate the canon in place — and a mutable canon
+ *  is precisely the drift this accessor exists to prevent. The copy is shallow and the elements
+ *  are frozen too, so neither the row set nor an individual intent can be edited through it. */
+export function allIntents(): readonly Intent[] {
+  return Object.freeze(INTENTS.map((i) => Object.freeze({ ...i })))
+}
 
+/** Look up one intent by its canonical name. */
 export function intentByName(name: string): Intent | undefined {
   return INTENTS.find((i) => i.name === name)
 }

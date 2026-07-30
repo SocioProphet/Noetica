@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   ACTIONS, TOOL_SIGNATURE, META_ROW, buildGrid, buildCanonicalGrid, deriveCell,
-  everydayCollapses, columnAsymmetry, renderGrid, type GridAction,
+  everydayCollapses, columnAsymmetry, asymmetryRobustness, renderGrid, type GridAction,
 } from './intent-grid.js'
 import { allIntents, type Tool } from './intent-router.js'
 import { ACTION_SIGNATURE, adjointClosure } from './verb-sort.js'
@@ -201,5 +201,24 @@ test('renderGrid emits one row per row and one mark per column', () => {
     assert.ok(line, `row '${r}' must render`)
     const marks = (line!.match(/[●·]/g) ?? []).length
     assert.equal(marks, 6, `row '${r}' must show exactly 6 cells, got ${marks}`)
+  }
+})
+
+test('the asymmetry finding states what would overturn it', () => {
+  // A finding without its sensitivity is an assertion dressed as a measurement. `sense = 3/23`
+  // depends on classifying web_search and brain_status as store:read; reclassifying BOTH as
+  // world:read moves the minimum to execute. So the narrow claim is bounded — and the broad one
+  // is not, which is why the broad one is what gets asserted here.
+  const r = asymmetryRobustness()
+  assert.equal(r.robust, true, 'the read/generate half must be more than twice the sense/persist/act half')
+  assert.ok(r.readMean > 2 * r.writeMean, `${r.readMean} vs ${r.writeMean}`)
+  assert.match(r.finding, /survives every variant/)
+
+  // And the classification-independent core, pinned directly.
+  const f = buildCanonicalGrid().columnFill
+  for (const thin of ['create', 'execute', 'sense'] as const) {
+    for (const wide of ['retrieve', 'transform'] as const) {
+      assert.ok(f[thin] < f[wide], `${thin} (${f[thin]}) must be thinner than ${wide} (${f[wide]})`)
+    }
   }
 })
