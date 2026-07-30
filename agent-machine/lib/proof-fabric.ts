@@ -42,7 +42,14 @@ export interface VerifiedAnswerInput {
 }
 
 const REQUIRED = ['artifact_id', 'artifact_type', 'claim_class', 'inputs', 'outputs', 'non_claim_boundary'] as const
-const PROOFS_DIR = path.join(os.homedir(), '.noetica', 'proofs')
+/** Where proof artifacts are written. Resolved on EVERY access — never frozen into a module-load
+ *  constant — and overridable with NOETICA_PROOFS_DIR. writeProofArtifact() writes, so a path baked in
+ *  at import time let `npm test` scatter fixture artifacts through the operator's REAL proof fabric.
+ *  These files ARE the audit trail: a test-authored proof is indistinguishable from a real one once it
+ *  lands, so this is evidence contamination, not just clutter. See lib/store-path-guard.ts. */
+export function _proofsDir(): string {
+  return process.env['NOETICA_PROOFS_DIR'] || path.join(os.homedir(), '.noetica', 'proofs')
+}
 
 /** Build a PFK-conformant ProofArtifact for a verified answer. */
 export function buildVerifiedAnswerArtifact(v: VerifiedAnswerInput): ProofArtifact {
@@ -93,8 +100,9 @@ export function validateArtifact(a: unknown): { ok: boolean; errors: string[] } 
 
 /** Write the artifact to disk + mirror as a ProofArtifact atom linked to its Episode. */
 export function writeProofArtifact(a: ProofArtifact): string {
-  fs.mkdirSync(PROOFS_DIR, { recursive: true })
-  const p = path.join(PROOFS_DIR, `${a.artifact_id.replace(/[^a-z0-9]/gi, '_')}.json`)
+  const proofsDir = _proofsDir()
+  fs.mkdirSync(proofsDir, { recursive: true })
+  const p = path.join(proofsDir, `${a.artifact_id.replace(/[^a-z0-9]/gi, '_')}.json`)
   // Atomic write: serialize to a temp sibling then rename (rename is atomic on the same fs). A crash or
   // concurrent read mid-write must never see a half-written, unparseable proof artifact — the proof
   // fabric is evidence; a torn file silently corrupts the audit trail.

@@ -15,7 +15,14 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
 
-const KEY_PATH = path.join(os.homedir(), '.noetica', 'at-rest.key')
+/** Where the at-rest device key lives. Resolved on EVERY access — never frozen into a module-load
+ *  constant — and overridable with NOETICA_AT_REST_KEY. key() MINTS and persists on a read miss, so a
+ *  path baked in at import time let `npm test` overwrite the operator's real at-rest key. That is the
+ *  highest-blast-radius write in the estate: this key decrypts EVERY sealed file under ~/.noetica, so
+ *  replacing it does not lose one store, it orphans all of them at once. See lib/store-path-guard.ts. */
+export function _keyPath(): string {
+  return process.env['NOETICA_AT_REST_KEY'] || path.join(os.homedir(), '.noetica', 'at-rest.key')
+}
 const MAGIC = 'enc:v1:'
 const KC_SERVICE = 'noetica-at-rest'
 const KC_ACCOUNT = 'device-key'
@@ -53,11 +60,12 @@ function key(): Buffer {
   const kc = keychainGet()
   if (kc) { _key = kc; return kc }
   // Legacy / portable file key — adopt it, and migrate it into the keychain when we can.
-  try { const b = fs.readFileSync(KEY_PATH); if (b.length === 32) { keychainSet(b); _key = b; return b } } catch { /* create below */ }
+  try { const b = fs.readFileSync(_keyPath()); if (b.length === 32) { keychainSet(b); _key = b; return b } } catch { /* create below */ }
   // First run: generate; store in the keychain, else fall back to the 0600 file.
   const k = randomBytes(32)
   if (!keychainSet(k)) {
-    try { fs.mkdirSync(path.dirname(KEY_PATH), { recursive: true }); fs.writeFileSync(KEY_PATH, k, { mode: 0o600 }) } catch { /* in-memory only if both fail */ }
+    const kp = _keyPath()
+    try { fs.mkdirSync(path.dirname(kp), { recursive: true }); fs.writeFileSync(kp, k, { mode: 0o600 }) } catch { /* in-memory only if both fail */ }
   }
   _key = k
   return k

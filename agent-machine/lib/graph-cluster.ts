@@ -224,9 +224,16 @@ const clusterCache = new BoundedMap<string, Clustering>(Number(process.env['GRAP
 // launch. Persist the result to disk keyed by a content hash of the candidate set; an unchanged
 // graph reloads instantly instead of reprocessing. Recompute only when the candidates actually
 // change. (Full delta-level incrementality — regis graph_delta — is the next step up from this.)
-const CACHE_DIR = path.join(os.homedir(), '.noetica', 'cache')
+/** Where the clustering cache lives. Resolved on EVERY access — never frozen into a module-load
+ *  constant — and overridable with NOETICA_GRAPH_CLUSTER_CACHE_DIR. persist() writes, so a path baked
+ *  in at import time let `npm test` seed the operator's real cache with fixture clusterings. A cache is
+ *  the easiest of the class to dismiss, and the worst to debug: the entries are hash-keyed, so a stale
+ *  fixture entry is served silently as if it were computed. See lib/store-path-guard.ts. */
+export function _cacheDir(): string {
+  return process.env['NOETICA_GRAPH_CLUSTER_CACHE_DIR'] || path.join(os.homedir(), '.noetica', 'cache')
+}
 function cheapHash(s: string): string { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return (h >>> 0).toString(36) }
-function cacheFile(view: string): string { return path.join(CACHE_DIR, `graph-cluster-${view.replace(/[^a-z0-9]/gi, '_')}.json`) }
+function cacheFile(view: string): string { return path.join(_cacheDir(), `graph-cluster-${view.replace(/[^a-z0-9]/gi, '_')}.json`) }
 function loadPersisted(view: string, hash: string): Clustering | null {
   try {
     const raw = JSON.parse(fs.readFileSync(cacheFile(view), 'utf8')) as { hash: string; reps: string[]; members: [string, string[]][]; clusterOf: [string, string][]; classNames: [string, string][] }
@@ -236,7 +243,7 @@ function loadPersisted(view: string, hash: string): Clustering | null {
 }
 function persist(view: string, hash: string, cl: Clustering): void {
   try {
-    fs.mkdirSync(CACHE_DIR, { recursive: true })
+    fs.mkdirSync(_cacheDir(), { recursive: true })
     fs.writeFileSync(cacheFile(view), JSON.stringify({ hash, reps: cl.reps, members: [...cl.members], clusterOf: [...cl.clusterOf], classNames: [...cl.classNames] }))
   } catch { /* best-effort cache */ }
 }

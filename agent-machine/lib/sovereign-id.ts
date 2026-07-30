@@ -17,7 +17,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-const ROOT_PATH = path.join(os.homedir(), ".noetica", "sovereign-root.key");
+/** Where the user-held root seed lives. Resolved on EVERY access — never frozen into a module-load
+ *  constant — and overridable with NOETICA_SOVEREIGN_ROOT. loadOrCreateRoot() MINTS and writes a seed,
+ *  so a path baked in at import time aimed `npm test` at the operator's REAL root key. This one is the
+ *  worst of the class: every sealed blob and every derived facet hangs off this seed, so a stray write
+ *  is not lossy-but-recoverable, it is silent catastrophic key loss. See lib/store-path-guard.ts. */
+export function _rootPath(): string {
+  return process.env["NOETICA_SOVEREIGN_ROOT"] || path.join(os.homedir(), ".noetica", "sovereign-root.key");
+}
 const SALT = Buffer.from("prophet-sovereign-id/v1");
 // PKCS8 wrapper for a raw 32-byte Ed25519 seed → lets us build a DETERMINISTIC keypair from derived bytes.
 const ED25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
@@ -37,20 +44,21 @@ export interface ScopeFacet {
 
 /** Load the user-held root seed, generating a fresh 32-byte one (0600) on first use. Sovereign: never leaves. */
 export function loadOrCreateRoot(): Buffer {
+  const rootPath = _rootPath();
   try {
-    return fs.readFileSync(ROOT_PATH);
+    return fs.readFileSync(rootPath);
   } catch (e) {
     // ONLY treat "file absent" as create. A permission/IO error must NOT mint a new root — that would orphan
     // every sealed blob + derived facet (silent catastrophic key loss).
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
   }
   const seed = crypto.randomBytes(32);
-  fs.mkdirSync(path.dirname(ROOT_PATH), { recursive: true });
+  fs.mkdirSync(path.dirname(rootPath), { recursive: true });
   try {
-    fs.writeFileSync(ROOT_PATH, seed, { flag: "wx", mode: 0o600 }); // wx: fail if it appeared (create race)
+    fs.writeFileSync(rootPath, seed, { flag: "wx", mode: 0o600 }); // wx: fail if it appeared (create race)
     return seed;
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "EEXIST") return fs.readFileSync(ROOT_PATH);
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") return fs.readFileSync(rootPath);
     throw e;
   }
 }

@@ -13,9 +13,15 @@ const execFileP = promisify(execFile)
 
 // ─── macOS: Vision framework via compiled Swift helper ────────────────────────
 
-const BIN_DIR = path.join(os.homedir(), '.noetica', 'bin')
-const SRC = path.join(BIN_DIR, 'ocr.swift')
-const BIN = path.join(BIN_DIR, 'noetica-ocr')
+/** Where the compiled OCR helper lives. Resolved on EVERY access — never frozen into a module-load
+ *  constant — and overridable with NOETICA_OCR_BIN_DIR. ensureOcrBinary() writes ocr.swift and shells
+ *  out to `swiftc -o` inside this directory, so a path baked in at import time let `npm test` drop a
+ *  source file and an EXECUTABLE into the operator's real ~/.noetica/bin. See lib/store-path-guard.ts. */
+export function _binDir(): string {
+  return process.env['NOETICA_OCR_BIN_DIR'] || path.join(os.homedir(), '.noetica', 'bin')
+}
+function srcPath(): string { return path.join(_binDir(), 'ocr.swift') }
+function binPath(): string { return path.join(_binDir(), 'noetica-ocr') }
 
 const OCR_SWIFT = `import Foundation
 import Vision
@@ -38,14 +44,15 @@ do {
 
 let compiling: Promise<boolean> | null = null
 async function ensureOcrBinary(): Promise<boolean> {
-  if (fs.existsSync(BIN)) return true
+  if (fs.existsSync(binPath())) return true
   if (compiling) return compiling
   compiling = (async () => {
     try {
-      fs.mkdirSync(BIN_DIR, { recursive: true })
-      fs.writeFileSync(SRC, OCR_SWIFT)
-      await execFileP('swiftc', ['-O', SRC, '-o', BIN], { timeout: 90_000 })
-      return fs.existsSync(BIN)
+      const src = srcPath(), bin = binPath()
+      fs.mkdirSync(_binDir(), { recursive: true })
+      fs.writeFileSync(src, OCR_SWIFT)
+      await execFileP('swiftc', ['-O', src, '-o', bin], { timeout: 90_000 })
+      return fs.existsSync(bin)
     } catch { return false } finally { compiling = null }
   })()
   return compiling
@@ -54,7 +61,7 @@ async function ensureOcrBinary(): Promise<boolean> {
 async function runOcrMacos(imagePath: string): Promise<string> {
   if (!(await ensureOcrBinary())) return 'OCR unavailable — could not compile the Vision helper (are the Xcode command-line tools installed? `xcode-select --install`).'
   try {
-    const { stdout } = await execFileP(BIN, [imagePath], { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 })
+    const { stdout } = await execFileP(binPath(), [imagePath], { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 })
     return stdout.trim() || '(no text detected in image)'
   } catch {
     return 'OCR failed — check that the image is a supported format (PNG/JPEG/TIFF).'

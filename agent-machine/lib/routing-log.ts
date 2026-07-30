@@ -11,7 +11,14 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { readJsonl } from './jsonl.js'
 
-const LOG_PATH = path.join(os.homedir(), '.noetica', 'routing-decisions.jsonl')
+/** Where the routing log lives. Resolved on EVERY access — never frozen into a module-load constant —
+ *  and overridable with NOETICA_ROUTING_LOG_PATH. logRouting() appends, and a full-suite run on
+ *  2026-07-29 was OBSERVED rewriting the operator's real ~/.noetica/routing-decisions.jsonl. Note the
+ *  opt-in NOETICA_ROUTING_LOG=1 gate is not protection here: a test that sets it to exercise the writer
+ *  turns the append on for the REAL file. See lib/store-path-guard.ts. */
+export function _logPath(): string {
+  return process.env['NOETICA_ROUTING_LOG_PATH'] || path.join(os.homedir(), '.noetica', 'routing-decisions.jsonl')
+}
 
 export interface RoutingDecision { ts: string; query: string; intent: string; domain: string; effort: string }
 
@@ -19,13 +26,14 @@ export interface RoutingDecision { ts: string; query: string; intent: string; do
 export function logRouting(d: Omit<RoutingDecision, 'ts'>): void {
   if (process.env['NOETICA_ROUTING_LOG'] !== '1') return // opt-in: don't record queries by default
   try {
-    fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true })
+    const logPath = _logPath()
+    fs.mkdirSync(path.dirname(logPath), { recursive: true })
     const rec: RoutingDecision = { ts: new Date().toISOString(), intent: d.intent, domain: d.domain, effort: d.effort, query: d.query.replace(/\s+/g, ' ').trim().slice(0, 120) }
-    fs.appendFileSync(LOG_PATH, JSON.stringify(rec) + '\n')
+    fs.appendFileSync(logPath, JSON.stringify(rec) + '\n')
   } catch { /* best-effort telemetry */ }
 }
 
 /** The most recent routing decisions (newest-last), for review. */
 export function readRoutingLog(limit = 200): RoutingDecision[] {
-  return readJsonl<RoutingDecision>(LOG_PATH, { limit })
+  return readJsonl<RoutingDecision>(_logPath(), { limit })
 }
