@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { fsMemoryStore } from './fs-memory-store.js'
+import { fsMemoryStore, memoryRoot } from './fs-memory-store.js'
 import { manualWrite, extractMemory, autoDream, assembleContext, type TopicDoc } from './memory-layers.js'
 
 let dir: string
@@ -15,6 +15,60 @@ before(async () => {
   process.env.NOETICA_MEMORY_DIR = dir
 })
 after(async () => { await fs.rm(dir, { recursive: true, force: true }) })
+
+// ── namespace confinement ────────────────────────────────────────────────────
+// A namespace names ONE directory under the memory root; it is not a path. GET
+// /api/memory/bands serves it straight from a query parameter, so an unconfined
+// value here is a traversal primitive: `?namespace=../../../../etc` resolved to
+// /etc and listed /etc/topics. Confinement lives in memoryRoot so the seam is
+// closed for every caller, not just the one handler that happened to be exposed.
+
+test('memoryRoot rejects a namespace that climbs out of the memory root', () => {
+  for (const evil of ['..', '../..', '../../Documents', '../../../../etc', '/etc', 'a/../..']) {
+    assert.throws(
+      () => memoryRoot(evil),
+      /invalid memory namespace/,
+      `namespace ${JSON.stringify(evil)} was accepted and escaped the memory root`,
+    )
+  }
+})
+
+test('memoryRoot rejects separators and NUL rather than joining them into a path', () => {
+  for (const evil of ['self/../../etc', 'a/b', 'a\0b', '']) {
+    assert.throws(() => memoryRoot(evil), /invalid memory namespace/,
+      `namespace ${JSON.stringify(evil)} was accepted`)
+  }
+})
+
+test('memoryRoot still admits the real namespaces, confined under the base', () => {
+  const base = path.resolve(dir)
+  assert.equal(memoryRoot(), base)
+  assert.equal(memoryRoot('default'), base)
+  for (const ns of ['self', 'workspace', 'collective']) {
+    assert.equal(memoryRoot(ns), path.join(base, ns))
+  }
+})
+
+test('fsMemoryStore refuses to open a store outside the memory root', () => {
+  assert.throws(() => fsMemoryStore('../../../../etc'), /invalid memory namespace/)
+})
+
+test('a memory root at the filesystem root still admits its namespaces', () => {
+  // Regression: the containment check used to be `startsWith(confined + path.sep)`,
+  // which doubles the separator when the base IS a root ("/" + "/" = "//") and so
+  // rejected the legitimate "/self". A confinement check that fails closed on valid
+  // input is still broken. Same shape on Windows drive roots ("C:\" + "\").
+  const fsRoot = path.parse(process.cwd()).root
+  const saved = process.env.NOETICA_MEMORY_DIR
+  try {
+    process.env.NOETICA_MEMORY_DIR = fsRoot
+    assert.equal(memoryRoot('self'), path.join(fsRoot, 'self'))
+    assert.equal(memoryRoot(), path.resolve(fsRoot))
+    assert.throws(() => memoryRoot('..'), /invalid memory namespace/)
+  } finally {
+    process.env.NOETICA_MEMORY_DIR = saved
+  }
+})
 
 test('topic round-trips through .md frontmatter (links/score/provenance)', async () => {
   const s = fsMemoryStore()

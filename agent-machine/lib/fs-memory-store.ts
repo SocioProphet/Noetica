@@ -17,9 +17,41 @@ import type { MemoryStore, MemoryPointer, TopicDoc } from './memory-layers.js'
 // MEMORY.md index stays plaintext — it is pointers/hooks only, no substantive content.
 import { encryptText, decryptText } from './at-rest.js'
 
+/**
+ * A namespace names ONE directory under the memory root. It is NOT a path, and it is
+ * not free text: `GET /api/memory/bands` serves it straight off a query parameter, so
+ * an unconfined value here is a directory-traversal primitive rather than a seam —
+ * `?namespace=../../../../etc` used to resolve to `/etc` and enumerate `/etc/topics`.
+ *
+ * Confinement lives here rather than at the handler because this is the seam every
+ * caller crosses. Fixing only the one exposed route would leave the next caller to
+ * rediscover the same hole; `path.join` collapses `..` silently and will never say no.
+ */
+const NAMESPACE_SEGMENT = /^[A-Za-z0-9_.-]+$/
+
 export function memoryRoot(namespace = 'default'): string {
   const base = process.env.NOETICA_MEMORY_DIR || path.join(os.homedir(), '.noetica', 'memory')
-  return namespace === 'default' ? base : path.join(base, namespace)
+  if (namespace === 'default') return path.resolve(base)
+
+  // A single safe segment, and never a dots-only one (`.`/`..` match the charset).
+  if (!NAMESPACE_SEGMENT.test(namespace) || /^\.+$/.test(namespace)) {
+    throw new Error(`invalid memory namespace ${JSON.stringify(namespace)}: expected a single path segment`)
+  }
+  const root = path.resolve(base, namespace)
+  const confined = path.resolve(base)
+  // Belt and braces: the charset above already excludes separators, but the
+  // containment assertion is what actually states the guarantee.
+  //
+  // Via path.relative rather than `startsWith(confined + path.sep)`: when the base
+  // IS a filesystem root, that prefix doubles the separator ("/" + "/" = "//") and
+  // the check rejects the legitimate "/self". NOETICA_MEMORY_DIR="/" is a strange
+  // thing to set, but a confinement check that fails closed on valid input is still
+  // a broken check, and the Windows drive-root case ("C:\" + "\") has the same shape.
+  const rel = path.relative(confined, root)
+  if (rel !== "" && (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel))) {
+    throw new Error(`invalid memory namespace ${JSON.stringify(namespace)}: escapes the memory root`)
+  }
+  return root
 }
 
 const safeName = (name: string) => name.replace(/[^\w.-]/g, '_').replace(/^\.+/, '_')
