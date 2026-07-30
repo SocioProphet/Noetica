@@ -28,6 +28,7 @@
     "test:app": "test -n \"$(find app -name '*.test.ts')\" && find app -name '*.test.ts' -exec node --import tsx --test {} +",
     "icons:generate": "node scripts/generate-icons.mjs",
     "packaging:validate": "npm run icons:generate && node scripts/validate-packaging-metadata.mjs",
+    "test:lib": "test -n \"$(find lib -name '*.test.ts')\" && find lib -name '*.test.ts' -exec node --import tsx --test {} +",
     "sourceos:events:export": "node scripts/export-sourceos-interaction-events.mjs",
     "sourceos:events:path": "node scripts/sourceos-event-export-path.mjs --json",
     "sourceos:events:path:check": "node scripts/check-sourceos-event-export-paths.mjs",
