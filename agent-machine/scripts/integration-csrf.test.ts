@@ -23,9 +23,30 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, type ChildProcess } from 'node:child_process'
+import { createServer } from 'node:net'
+import { fileURLToPath } from 'node:url'
 
-const PORT = 8104
-const BASE = `http://127.0.0.1:${PORT}`
+// Copilot round-1: a hard-coded port made this flaky on shared runners / dev machines
+// where 8104 was already bound. Pick an ephemeral free port at runtime, pass it to
+// the server via NOETICA_AM_PORT, and use the same PORT for the client URL below.
+async function pickFreePort(): Promise<number> {
+  return await new Promise((resolve, reject) => {
+    const srv = createServer()
+    srv.on('error', reject)
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address()
+      if (addr && typeof addr === 'object') {
+        const port = addr.port
+        srv.close(() => resolve(port))
+      } else {
+        srv.close(() => reject(new Error('could not read ephemeral port')))
+      }
+    })
+  })
+}
+
+let PORT = 0
+let BASE = ''
 const TOKEN = 'itest-csrf-token'
 let server: ChildProcess
 
@@ -51,8 +72,12 @@ async function req(
 }
 
 before(async () => {
+  PORT = await pickFreePort()
+  BASE = `http://127.0.0.1:${PORT}`
   server = spawn('node', ['--import', 'tsx', 'server.ts'], {
-    cwd: new URL('..', import.meta.url).pathname,
+    // Copilot round-1: `new URL(...).pathname` produces an invalid path on Windows
+    // (leading-slash encoding differs). `fileURLToPath` handles this correctly.
+    cwd: fileURLToPath(new URL('..', import.meta.url)),
     // NOETICA_ORIGIN_GUARD=0 disables the global guard so we isolate + test the per-endpoint
     // CSRF wall added alongside PR #545 (the belt, not the suspenders).
     // NOETICA_API_TOKEN=<TOKEN> turns on requireApiToken so we can observe 401.
