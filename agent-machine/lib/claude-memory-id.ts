@@ -24,9 +24,15 @@ import * as path from 'node:path'
  */
 export function claudeMemoryDocRel(homeDir: string, full: string): string {
   const rel = path.relative(homeDir, full)
-  const safe = rel
-    .split(/[/\\]+/)
-    .filter((seg) => seg && seg !== '.' && seg !== '..')
-    .join('/')
-  return safe || path.basename(full)
+  const segs = rel.split(/[/\\]+/)
+  // A path that resolves OUTSIDE home (a confined /tmp file — macOS maps /tmp → /private/tmp)
+  // yields a rel with leading '..'. Merely stripping the '..' would collapse it onto the SAME
+  // id as a genuinely in-home file of the same sub-path — an id collision that lets one doc
+  // overwrite another's store. Segregate out-of-home ids under a reserved prefix so the two
+  // namespaces can never alias.
+  const outOfHome = segs.includes('..')
+  const cleaned = segs.filter((seg) => seg && seg !== '.' && seg !== '..').join('/')
+  const safe = cleaned && outOfHome ? `_ext/${cleaned}` : cleaned
+  // basename('/') is '' (e.g. full === homeDir, or a filesystem root); guarantee a non-empty id.
+  return safe || path.basename(full) || 'root'
 }
