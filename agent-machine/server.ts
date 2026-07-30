@@ -49,6 +49,7 @@ import { migrate as migrateLocalState, recordUsage, usageSnapshot } from './lib/
 import { bandCounts, bandOf, sweepBands, verdict as bandVerdict, type BandedDoc } from './lib/memory-bands.js'
 import { originAllowed } from './lib/origin-guard.js'
 import { confinedRealPath, realPathWithinRoot } from './lib/path-confine.js'
+import { claudeMemoryDocRel } from './lib/claude-memory-id.js'
 import { buildAdaptiveBrief } from './lib/progress.js'
 import { safeShellEnv } from './lib/safe-shell-env.js'
 import { buildRouterDecision, LOCAL_MODEL_SUITE, isHuggingFaceLocalRef, resolveProvider, bestCoder, bestWorkhorse, bestResponsive } from './lib/router.js'
@@ -10166,7 +10167,10 @@ Question: ${question}`
               try {
                 const content = fsMod.readFileSync(realFull, 'utf8')
                 if (!content.trim()) { skipped++; continue }
-                const rel = path.relative(os.homedir(), full)
+                // `full` is confined to home OR /tmp; a /tmp file (realpath'd to /private/tmp) is NOT under
+                // home, so path.relative(home, full) climbs out with `..` and `claude-memory/${rel}` would
+                // escape the namespace (claude-memory/../../private/tmp/…). Normalise to an in-namespace id.
+                const rel = claudeMemoryDocRel(os.homedir(), full)
                 const r = await ingestDocument(`claude-memory/${rel}`, content)
                 results.push({ file: rel, chunks: r.chunks })
               } catch { skipped++ }
