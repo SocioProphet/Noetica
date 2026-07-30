@@ -58,19 +58,37 @@ export function isConfinedToHomeOrTmp(resolved: string): boolean {
  *
  * Returns null if a component is a DANGLING symlink — it lstat()s but does not realpath(), so we cannot
  * prove where a create through it would land, and it would land at the link target, not inside the root.
+ * Returns null, too, for any component that fails to resolve for a reason OTHER than absence (see
+ * `isAbsent`): "I could not look" is not the same claim as "it is not there".
  */
+
+/**
+ * Does this error mean "the component is not there YET" — the one condition that justifies walking
+ * further up? Everything else (EACCES, ELOOP, EPERM, ENAMETOOLONG, EIO) means we could not PROVE where
+ * the path lands. Treating those as "absent" and re-attaching the tail hands back a path that was never
+ * validated, through components we were unable to inspect. A confinement primitive that cannot prove
+ * must REFUSE. The fail-CLOSED app copy (app/api/agent-tool/path-confine.ts) already carries this gate;
+ * #584's hardening was dropped from THIS canonical copy when it was relanded — this restores parity.
+ */
+function isAbsent(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code
+  return code === 'ENOENT' || code === 'ENOTDIR'
+}
+
 function realPathOfNearestExisting(p: string): string | null {
   const tail: string[] = []
   let probe = p
   for (;;) {
     try {
       return tail.length ? path.join(fs.realpathSync(probe), ...tail) : fs.realpathSync(probe)
-    } catch {
+    } catch (err) {
+      if (!isAbsent(err)) return null // unresolvable ⇒ unprovable ⇒ refuse
       /* `probe` does not exist (yet) — keep walking up. */
     }
     try {
       if (fs.lstatSync(probe).isSymbolicLink()) return null // dangling link: unverifiable target
-    } catch {
+    } catch (err) {
+      if (!isAbsent(err)) return null // cannot even lstat it ⇒ cannot rule out a link ⇒ refuse
       /* genuinely absent, which is fine — it is the path being created. */
     }
     const parent = path.dirname(probe)

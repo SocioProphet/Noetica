@@ -205,3 +205,36 @@ test('realPathWithinRoot resolves the ROOT too, so a symlinked root is not a fal
     assert.ok(confinedRealPath(viaLink))
   })
 })
+
+test('confinedRealPath / realPathWithinRoot REFUSE a component they cannot RESOLVE (EACCES), not walk up and accept it', {
+  // The fail-OPEN shape was a bare `catch {}` in realPathOfNearestExisting: ANY realpath/lstat failure
+  // (EACCES/ELOOP/ENAMETOOLONG) was read as "absent", so the walk-up realpath'd an ANCESTOR, re-attached
+  // the tail, and handed back a path validated through a component it never inspected — a symlink to /etc
+  // hidden behind a 0o000 directory would be accepted. Fail-CLOSED (the app copy's `isAbsent` gate)
+  // discriminates on error.code and REFUSES. Mirrors app/api/agent-tool/path-confine.test.ts (#584).
+  // Permission bits do not bind uid 0, so under root the fixture is not hostile and this would pass while
+  // proving nothing — declare that rather than run a decorative assertion.
+  skip: process.platform === 'win32' ? 'windows: chmod semantics differ'
+    : process.getuid?.() === 0 ? 'needs a non-root POSIX uid' : false,
+}, () => {
+  withSandboxHome((sandbox) => {
+    const opaque = path.join(sandbox, 'opaque')
+    fs.mkdirSync(opaque)
+    fs.writeFileSync(path.join(opaque, 'inner.txt'), 'x')
+    const target = path.join(opaque, 'inner.txt')
+    fs.chmodSync(opaque, 0o000) // now `inner.txt` cannot be realpath'd or lstat'd — EACCES, not ENOENT
+    try {
+      // The fixture must genuinely be unresolvable, or the assertions below are vacuous.
+      assert.throws(
+        () => fs.realpathSync(target),
+        (err: unknown) => (err as NodeJS.ErrnoException).code === 'EACCES',
+        'the fixture must actually be unreadable',
+      )
+      // "I could not look" is not the same claim as "it is not there" — both entry points must refuse.
+      assert.equal(confinedRealPath(target), null)
+      assert.equal(realPathWithinRoot(target, sandbox), null)
+    } finally {
+      fs.chmodSync(opaque, 0o700) // restore so the sandbox can be removed
+    }
+  })
+})
