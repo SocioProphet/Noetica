@@ -94,6 +94,73 @@ export function classifyIntent(text: string, ctx: { hasDoc?: boolean } = {}): In
   return { id: best.id, name: best.name, model: best.model, retrieval: best.retrieval, slots: best.slots, tools: best.tools, surface: best.surface, skill: best.skill, score: Number(bestScore.toFixed(2)) }
 }
 
+/**
+ * Multi-intent classifier. Returns EVERY intent whose cues match, ranked descending by
+ * specificity. `classifyIntent` (singular) picks the top-1 — the shape Michael's original
+ * routing consumed; `classifyIntents` (plural) surfaces the whole set so Michael's new
+ * `extract_multi_intent` capability can carry primary + secondary + tertiary through the
+ * dispatch chain rather than dropping evidence before the router sees it.
+ *
+ * Why plural is the right shape here specifically: Zurich E-RDA2's Damian pulls out
+ * "cross-selling" + "retail segment" + "claims" + "billing" from one utterance and lets a
+ * downstream reasoner compose them. The single-intent shape has to CHOOSE before evidence,
+ * which is precisely the failure mode the intent-grid + truth-product exist to remove.
+ *
+ * Results are FROZEN — the canon is single-source, and a mutable IntentPlan set is drift
+ * waiting to happen (same reasoning as `allIntents()`).
+ *
+ * @param text  the user's utterance
+ * @param ctx.hasDoc  if true, an ambiguous question with a loaded doc is boosted to
+ *                    qa_over_doc — matches classifyIntent's behaviour
+ * @param limit  cap on the returned set. Default 3 (primary + secondary + tertiary, the
+ *               depth Zurich's diagrams demonstrate). Set higher for research passes.
+ */
+export function classifyIntents(
+  text: string,
+  ctx: { hasDoc?: boolean } = {},
+  limit: number = 3,
+): readonly IntentPlan[] {
+  const t = text.trim()
+  if (limit < 1) return Object.freeze([])
+
+  const scored: { it: Intent; score: number }[] = []
+  for (const it of INTENTS) {
+    const m = t.match(it.cues)
+    if (m) {
+      const score = 1 + Math.min(3, (m[0]?.trim().length ?? 0) / 6)
+      scored.push({ it, score })
+    }
+  }
+  scored.sort((a, b) => b.score - a.score)
+
+  // Doc + question with no strong intent → include qa_over_doc (same rule as classifyIntent).
+  // Added rather than replacing, so a real intent still ranks above it if one matched.
+  if (
+    ctx.hasDoc && /\?/.test(t) &&
+    !scored.some((s) => s.it.name === 'qa_over_doc') &&
+    (!scored[0] || scored[0]!.score < 1.5) &&
+    !/^(\s*)(yes|ok|proceed|go|sure)\b/i.test(t)
+  ) {
+    scored.unshift({ it: INTENTS[4]!, score: 1.5 })
+  }
+
+  if (scored.length === 0) {
+    // Same 'general' fallback classifyIntent uses — kept in the shape callers expect so a
+    // multi-intent caller downgraded to zero real matches still gets a routable plan.
+    return Object.freeze([
+      Object.freeze({
+        id: 21, name: 'general', model: 'general', retrieval: 'kb', slots: [],
+        tools: ['read_file', 'web_search', 'remember', 'set_identity', 'brain_status'],
+        surface: '', skill: '', score: 0,
+      } as IntentPlan),
+    ])
+  }
+
+  const capped = scored.slice(0, limit).map(({ it, score }) =>
+    Object.freeze(planFromIntent(it, score)))
+  return Object.freeze(capped)
+}
+
 /** Look up an intent definition by name (for the embedding classifier's label). */
 /** Every intent in the canon, in id order. Exposed so the 23x6 action grid can be DERIVED
  *  from this file rather than authored alongside it — a hand-maintained copy of the row set
