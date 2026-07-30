@@ -499,6 +499,11 @@ test('a dispatch carrying non-ASCII content seals reproducibly', () => {
   const e = lawful({ requestHash: H('qué es la capital de España?'), answerHash: H('Madrid — 中文 🔒') })
   assert.equal(e.verdict, 'POS')
   assert.deepEqual(replayLedger(), { ok: true, count: 1 }, 'and it replays')
-  assert.ok(!JSON.stringify(entries(home)[0]).includes('\\u00'),
-    'the persisted form carries raw non-ASCII, not \\uXXXX escapes')
+  // Any \uXXXX escape, not just the \u00.. range: an earlier version of this assertion would
+  // have passed on a file full of surrogate-pair escapes like \ud83d\udd12 for the emoji.
+  const raw = fs.readFileSync(logPath(home), 'utf8')
+  assert.ok(!/\\u[0-9a-fA-F]{4}/.test(raw),
+    'the persisted form must carry raw non-ASCII, with no \\uXXXX escape of any kind')
+  assert.ok(raw.includes('é') || raw.includes('中') || raw.includes('🔒') || raw.includes('sha256:'),
+    'and the digests themselves are ASCII, so confirm the row actually persisted')
 })

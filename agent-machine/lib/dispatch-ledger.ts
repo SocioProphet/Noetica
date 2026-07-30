@@ -120,6 +120,16 @@ export interface DispatchEntry extends DispatchInput {
   evidenceTier: 'T1' | 'T2'; sealVersion?: number
 }
 
+/** What is actually ON DISK, which is not what `recordDispatch` returns. Entries written
+ *  before the derived verdict carry no `law`/`evidence`/`sealVersion`, so a reader typed as
+ *  `DispatchEntry` was being handed a guarantee the data does not honour — and
+ *  `truthProduct(e.law, e.evidence)` on such an entry passed the type checker while
+ *  multiplying undefined. Optional here so consumers are FORCED to handle legacy rows;
+ *  `replayLedger` already does, by skipping them as unverifiable rather than tampered. */
+export type StoredDispatchEntry =
+  Omit<DispatchEntry, 'law' | 'evidence' | 'sealVersion'>
+  & Partial<Pick<DispatchEntry, 'law' | 'evidence' | 'sealVersion'>>
+
 // In-memory chain head, rehydrated from disk so the chain continues across restarts.
 // `loadedFrom` records WHICH log the head was hydrated from, not merely that it was:
 // the path is now resolved lazily, so it can legitimately change within one process
@@ -143,12 +153,19 @@ function rehydrate(): void {
   } catch { /* start fresh on a corrupt tail */ }
 }
 
-/** The hashed body = every field that defines the decision, INCLUDING seq/ts/prev, and
- *  excluding only the attestation itself and the evidence tier. Sequence and timestamp
- *  are inside the seal deliberately: an entry that could be re-ordered or re-dated
- *  without breaking its own hash would let a chain be silently rewritten in place. */
-function bodyOf(e: Omit<DispatchEntry, 'attestation'>): unknown {
-  const { attestation: _a, evidenceTier, sealVersion, ...rest } = e as DispatchEntry
+/** The hashed body = every field that defines the decision, excluding only the attestation
+ *  itself. seq, ts and prev are inside the seal deliberately: an entry that could be
+ *  re-ordered or re-dated without breaking its own hash would let a chain be rewritten in
+ *  place. evidenceTier is inside it too, as of sealVersion 2 — it asserts the verdict was
+ *  instrumented, so leaving it out made the governance claim editable at rest. v1 entries
+ *  were sealed WITHOUT the tier, which is why the version selects the body shape rather than
+ *  one rule applying to all of history.
+ *
+ *  (This docstring previously claimed the tier was excluded, describing the pre-v2 behaviour
+ *  the code no longer had — a comment asserting something the implementation contradicted,
+ *  which is the same defect one level down from a verdict asserting itself.) */
+function bodyOf(e: Omit<StoredDispatchEntry, 'attestation'> | Omit<DispatchEntry, 'attestation'>): unknown {
+  const { attestation: _a, evidenceTier, sealVersion, ...rest } = e as StoredDispatchEntry
   // v1 entries were sealed with evidenceTier excluded. Recomputing them WITH it would
   // report every historical entry as tampered, so the version selects the body shape.
   return sealVersion === undefined ? rest : { ...rest, evidenceTier, sealVersion }
@@ -194,7 +211,10 @@ export function replayLedger(): ReplayResult {
   try {
     const lines = readFileSync(log, 'utf8').trim().split('\n').filter(Boolean)
     for (const line of lines) {
-      const e = JSON.parse(line) as DispatchEntry
+      // StoredDispatchEntry, not DispatchEntry: rows on disk may predate the factors, and
+      // casting to the stricter type is how an unguarded `e.law` compiles against data that
+      // does not have one.
+      const e = JSON.parse(line) as StoredDispatchEntry
       if (e.prev !== prev) return { ok: false, count, brokenAt: e.seq, reason: 'prev-link mismatch' }
       const recomputed = ledgerHash(bodyOf(e))
       if (recomputed !== e.attestation) return { ok: false, count, brokenAt: e.seq, reason: 'attestation mismatch (tampered)' }
@@ -227,16 +247,6 @@ export function replayLedger(): ReplayResult {
 
 /** SEAM-C convenience: content hash of a string (request/answer bodies). */
 export function contentHash(s: string): string { return ledgerHash(s) }
-
-/** What is actually ON DISK, which is not what `recordDispatch` returns. Entries written
- *  before the derived verdict carry no `law`/`evidence`/`sealVersion`, so a reader typed as
- *  `DispatchEntry` was being handed a guarantee the data does not honour — and
- *  `truthProduct(e.law, e.evidence)` on such an entry passed the type checker while
- *  multiplying undefined. Optional here so consumers are FORCED to handle legacy rows;
- *  `replayLedger` already does, by skipping them as unverifiable rather than tampered. */
-export type StoredDispatchEntry =
-  Omit<DispatchEntry, 'law' | 'evidence' | 'sealVersion'>
-  & Partial<Pick<DispatchEntry, 'law' | 'evidence' | 'sealVersion'>>
 
 /** Read recorded dispatch entries (most-recent `limit`) — e.g. for energy accounting. */
 export function readDispatches(limit = 10_000): StoredDispatchEntry[] {

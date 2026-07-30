@@ -87,6 +87,27 @@ export interface SeamBindings {
  *  correct output is "unestablished", not a number with wide error bars presented bare. */
 const MIN_SUPPORT = 30
 
+/** Parent-stratum index, memoised per log. `sortVerb` is called once per candidate verb and
+ *  `independenceEstimate` once per call, so a naive `log.filter()` re-scanned the entire episode
+ *  log every time — O(|log| x |verbs|) on a log that is expected to be large once it exists.
+ *  Keyed on the log OBJECT so a caller passing a new log gets a fresh index, and a WeakMap so
+ *  retaining the index never keeps a discarded log alive. */
+const stratumCache = new WeakMap<object, Map<string, readonly Episode[]>>()
+
+function parentStratum(log: readonly Episode[], parentId: string): readonly Episode[] {
+  let byParent = stratumCache.get(log as unknown as object)
+  if (!byParent) {
+    byParent = new Map()
+    stratumCache.set(log as unknown as object, byParent)
+  }
+  let hit = byParent.get(parentId)
+  if (!hit) {
+    hit = log.filter((e) => e.fired.includes(parentId))
+    byParent.set(parentId, hit)
+  }
+  return hit
+}
+
 /** Binary entropy, in bits. */
 function binaryEntropy(p: number): number {
   return p <= 0 || p >= 1 ? 0 : -(p * Math.log2(p) + (1 - p) * Math.log2(1 - p))
@@ -138,7 +159,7 @@ export function independenceEstimate(v: Verb, seams?: SeamBindings): SeamEstimat
 
   if (!seams?.log) return { value: v.independence, source: 'declared', n: 0, reason: 'no episode log supplied' }
 
-  const stratum = seams.log.filter((e) => e.fired.includes(v.id))
+  const stratum = parentStratum(seams.log, v.id)
   if (stratum.length < MIN_SUPPORT) {
     return { value: v.independence, source: 'declared', n: stratum.length,
       reason: `parent stratum n=${stratum.length} < ${MIN_SUPPORT}` }
@@ -243,10 +264,16 @@ export function sortVerb(v: Verb, tau: number, seams?: SeamBindings): Verdict {
     const s = separability(v, tau, seams)
     // Provenance travels with the verdict, so an auditor reading a T2 can see WHICH seam
     // was unbound and why, rather than having to know this module's history.
+    // Everything the separability decision consumed, so an auditor can re-derive the verdict
+    // from the witness alone. An earlier revision recorded historySource but not the history
+    // VALUE or its support — which meant the witness could not reproduce the decision it was
+    // supposed to justify, and `tau` (the threshold ι was compared against) was absent too.
     const seamWitness = {
-      iota: s.iota.value,
-      iotaSource: s.iota.source, iotaN: s.iota.n, ...(s.iota.reason ? { iotaReason: s.iota.reason } : {}),
-      historySource: s.history.source, ...(s.history.reason ? { historyReason: s.history.reason } : {}),
+      iota: s.iota.value, iotaSource: s.iota.source, iotaN: s.iota.n,
+      ...(s.iota.reason ? { iotaReason: s.iota.reason } : {}),
+      historyDependent: s.history.value, historySource: s.history.source, historyN: s.history.n,
+      ...(s.history.reason ? { historyReason: s.history.reason } : {}),
+      tau,
     }
     const tier: 'T1' | 'T2' = s.measured ? 'T1' : 'T2'
     const unmeasured = s.measured ? '' : ' [T2: seam declared, not measured]'

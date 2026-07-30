@@ -86,6 +86,7 @@ test('CI-5 seam-isolation: a verb with no decomposition is invariant to SEAM-A/B
 // construction, not by whatever the code happens to output.
 
 import { independenceEstimate, historyDependenceEstimate, type Episode, type SeamBindings } from './verb-sort.js'
+import { type Verb as _V } from './verb-sort.js'
 
 /** Deterministic LCG — a seeded generator, so a failure is reproducible rather than flaky. */
 function lcg(seed: number): () => number {
@@ -287,4 +288,50 @@ test('CI-5 holds and is now visible: ORDER and MINIMALITY verdicts are seam-inva
   // And a PRIMITIVE (irreducible, no decomposition) never reads a seam at all.
   const prim: Verb = { id: 'create', label: 'create', operandType: 'topic', decomposition: null, independence: 1, historyDependent: false }
   assert.equal(sortVerb(prim, TAU).tier, sortVerb(prim, TAU, seams).tier)
+})
+
+test('SEAM-A: memoising the parent stratum does not change any result', () => {
+  // The cache exists because a naive log.filter() re-scanned the whole episode log on every
+  // (verb, action) call. A cache that changed an answer would be worse than the scan, so: warm
+  // it, then confirm every reading is identical, and that a DIFFERENT log object is not served
+  // the previous log's index.
+  const mk = (n: number, coupled: boolean) => episodes(n, (r) =>
+    coupled ? (r() < 0.5 ? ['retrieve', 'evaluate'] : []) : [
+      ...(r() < 0.5 ? ['retrieve'] : []), ...(r() < 0.5 ? ['evaluate'] : []),
+    ], 11)
+
+  const logA = mk(300, true)
+  const first = independenceEstimate(parentVerb(), { log: logA })
+  for (let i = 0; i < 5; i++) {
+    assert.deepEqual(independenceEstimate(parentVerb(), { log: logA }), first,
+      'repeated reads of the same log must be identical')
+  }
+
+  // A structurally different log must produce a different reading — proving the cache is keyed
+  // on the log object and not silently reused across logs.
+  const logB = mk(300, false)
+  const other = independenceEstimate(parentVerb(), { log: logB })
+  assert.notEqual(other.value, first.value, 'a different log must not be served the cached index')
+  assert.ok(first.value < 0.05 && other.value > 0.9, 'and each must read its own coupling')
+
+  // And back to the first log: still the original answer.
+  assert.deepEqual(independenceEstimate(parentVerb(), { log: logA }), first)
+})
+
+test('the FACTORIZATION witness lets an auditor re-derive the separability decision', () => {
+  // A witness that omits an input cannot justify the verdict it accompanies. An earlier version
+  // recorded historySource but neither the history VALUE nor tau — so the reader could see that
+  // ι was 0.92 and the tier was T2, and still not reconstruct why the verb was ENTANGLEMENT.
+  const seams: SeamBindings = {
+    log: episodes(400, (r) => (r() < 0.5 ? ['retrieve', 'evaluate'] : [])),
+    historyProbe: () => true,
+  }
+  const w = sortVerb(parentVerb(), TAU, seams).witness
+  for (const k of ['iota', 'iotaSource', 'iotaN', 'historyDependent', 'historySource', 'tau']) {
+    assert.ok(k in w, `witness must carry '${k}'`)
+  }
+  // Re-derive the decision from the witness alone.
+  const separable = (w['iota'] as number) >= (w['tau'] as number) && !(w['historyDependent'] as boolean)
+  assert.equal(separable, false, 'and the recomputation must agree with the verdict')
+  assert.equal(w['tau'], TAU)
 })
