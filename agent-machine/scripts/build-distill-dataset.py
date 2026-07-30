@@ -194,6 +194,21 @@ def main() -> None:
             continue
         seen.add(key)
         rows.append(r)
+    # Provenance gate, BEFORE the write. This was a bare `assert` placed after
+    # the file had already been written: `python -O` stripped it, so unverified
+    # pairs were emitted into dist/distill-sft.jsonl while the run still printed
+    # "all pairs from AUTHORITATIVE sources ... 0 from the local 7B" — the exact
+    # claim the check exists to substantiate. gcp-distill-train.sh then trains a
+    # LoRA on whatever this wrote. Even unstripped, asserting after the write
+    # left a poisoned artifact on disk. Check first, then write.
+    unverified = [r for r in rows if not r['meta'].get('verified')]
+    if unverified:
+        srcs = sorted({r['meta'].get('source', '?') for r in unverified})
+        raise SystemExit(
+            f'refusing to write {OUT}: {len(unverified)} of {len(rows)} pairs are not from a '
+            f'verified/authoritative source (sources: {srcs}) — every pair must be'
+        )
+
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, 'w') as fh:
         for r in rows:
@@ -201,7 +216,6 @@ def main() -> None:
 
     by_source = Counter(r['meta']['source'] for r in rows)
     by_domain = Counter(r['meta']['domain'] for r in rows)
-    assert all(r['meta']['verified'] for r in rows), 'every pair must be from a verified/authoritative source'
     print(f'wrote {len(rows)} SFT pairs -> {os.path.relpath(OUT, HERE)}', file=sys.stderr)
     print(f'  by source: {dict(by_source)}', file=sys.stderr)
     print(f'  by domain: {dict(by_domain)}', file=sys.stderr)
