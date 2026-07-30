@@ -1651,6 +1651,20 @@ function requireApiToken(req: http.IncomingMessage, res: http.ServerResponse): b
   return false
 }
 
+/** Validate a caller-supplied A2A trust `floor` at the wire boundary.
+ *
+ *  The A2A bodies are a bare JSON.parse with a TS `as` cast, and `as` erases at runtime: a declared
+ *  `floor?: number` was accepting null / "abc" / [] / {} / false / "" straight from a remote peer. Those
+ *  then compared FALSE inside `r.score < floor` and GRANTED a degraded peer. Reject a malformed floor
+ *  LOUDLY here (400) rather than coercing it; a floor that is merely too permissive is clamped by
+ *  a2a-trust.checkActorGrant, which holds TRUST_FLOOR as a one-way ratchet for every caller.
+ *  The advisory /api/a2a/trust/check sibling already guarded its floor — this closes the drift. */
+function wireTrustFloor(v: unknown): number | undefined {
+  if (v === undefined) return undefined
+  if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error('floor must be a finite number')
+  return v
+}
+
 /** Does the request carry the loopback local-auth secret? Used by the origin guard to admit a no-Origin
  *  (native/CLI/sidecar) MUTATING caller only when it authenticates. Separate from NOETICA_API_TOKEN so
  *  it never trips the requireApiToken route gate that the browser UI does not send a bearer for. */
@@ -9793,6 +9807,8 @@ Question: ${question}`
   // score + audit federated capability requests on the BACKEND (the browser grant ledger can't decide a remote
   // peer). EGRESS stays scope-d's job, composed separately. All token-gated like /api/tool.
   //   POST /api/a2a/grant/validate { actor:{spiffe_id}, capability, floor? } → GrantDecision (+ authority_status)
+  //     `floor` is a one-way ratchet: it may only RAISE the bar above TRUST_FLOOR (checkActorGrant clamps),
+  //     and a non-numeric floor is a 400, not a coercion. The peer being judged does not set its own grade.
   //   POST /api/a2a/outcome        { spiffe_id, outcome:{ok,up,threat,integrityViolation} } → updated TrustOps state
   //   GET  /api/a2a/peers          → the trust ledger (Govern surface)
   if (req.method === 'POST' && (url.pathname === '/api/a2a/grant/validate' || url.pathname === '/api/a2a/outcome')) {
@@ -9802,12 +9818,12 @@ Question: ${question}`
     req.on('data', (c: Buffer) => chunks.push(c))
     req.on('end', () => { void (async () => {
       try {
-        const body = JSON.parse(Buffer.concat(chunks).toString() || '{}') as { actor?: { spiffe_id?: string }; spiffe_id?: string; capability?: string; floor?: number; outcome?: import('./lib/a2a-trust.js').TrustOutcome }
+        const body = JSON.parse(Buffer.concat(chunks).toString() || '{}') as { actor?: { spiffe_id?: string }; spiffe_id?: string; capability?: string; floor?: unknown; outcome?: import('./lib/a2a-trust.js').TrustOutcome }
         const a2a = await import('./lib/a2a-trust.js')
         if (url.pathname === '/api/a2a/grant/validate') {
           const spiffe = body.actor?.spiffe_id
           if (!spiffe || !body.capability) throw new Error('actor.spiffe_id and capability required')
-          const decision = a2a.checkActorGrant(spiffe, body.capability, body.floor)
+          const decision = a2a.checkActorGrant(spiffe, body.capability, wireTrustFloor(body.floor))
           res.writeHead(decision.valid ? 200 : 403, { 'content-type': 'application/json' })
           res.end(JSON.stringify({ ...decision, grant_id: a2a.newGrantId(), authority_state: a2a.authorityState(spiffe) }))
         } else {
@@ -9847,7 +9863,7 @@ Question: ${question}`
     req.on('data', (c: Buffer) => chunks.push(c))
     req.on('end', () => { void (async () => {
       try {
-        const b = JSON.parse(Buffer.concat(chunks).toString() || '{}') as { spiffe_id?: string; command?: string; args?: string[]; env?: Record<string, string>; tool?: string; args_obj?: Record<string, unknown>; floor?: number }
+        const b = JSON.parse(Buffer.concat(chunks).toString() || '{}') as { spiffe_id?: string; command?: string; args?: string[]; env?: Record<string, string>; tool?: string; args_obj?: Record<string, unknown>; floor?: unknown }
         const fed = await import('./lib/federated-mcp.js')
         if (url.pathname === '/api/a2a/peer/connect') {
           if (!b.spiffe_id || !b.command) throw new Error('spiffe_id and command required')
@@ -9855,7 +9871,8 @@ Question: ${question}`
           res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(r))
         } else {
           if (!b.spiffe_id || !b.tool) throw new Error('spiffe_id and tool required')
-          const r = await fed.callPeerTool(b.spiffe_id, b.tool, b.args_obj, b.floor)
+          // Same caller-supplied floor, same gate (federated-mcp → checkActorGrant), same 200/403 authority.
+          const r = await fed.callPeerTool(b.spiffe_id, b.tool, b.args_obj, wireTrustFloor(b.floor))
           res.writeHead(r.ok ? 200 : 403, { 'content-type': 'application/json' }); res.end(JSON.stringify(r))
         }
       } catch (e) {
