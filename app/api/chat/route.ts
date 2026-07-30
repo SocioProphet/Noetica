@@ -17,6 +17,7 @@ import { streamMistral } from '@/lib/providers/mistral'
 import { streamOllama } from '@/lib/providers/ollama'
 import { submitTask } from '@/lib/superconscious/adapter'
 import { routeModel } from '@/lib/model-router/adapter'
+import { wireDefaultHostedBudget, recordSpend } from '@/lib/governance/budget'
 import { resolveProviderModelId } from '@/lib/providers/resolver'
 import { recallMemory, storeMemoryContent, proposeMemoryWrite } from '@/lib/memory-mesh/adapter'
 import { checkContentPolicy } from '@/lib/policy/contentPolicy'
@@ -26,6 +27,20 @@ import type { SteeringResult } from '@/lib/types/steering'
 import { ingestInteraction, ingestMessage, ingestMemory } from '@socioprophet/hellgraph'
 
 export const runtime = 'nodejs'
+
+// Declare the hosted-egress budget at MODULE LOAD, before any request lands. Any
+// declare-on-first-request pattern would let the very first hosted call through
+// unchecked — the exact defect budget.ts exists to fix, resurrected by a race.
+// wireDefaultHostedBudget() is idempotent + a no-op when the env var is unset, so
+// dev/tests are unaffected. See lib/governance/budget.ts:wireDefaultHostedBudget.
+const HOSTED_BUDGET_REF = wireDefaultHostedBudget()
+
+// Rough per-turn projected cost (USD) for a hosted call — enough to make the
+// pre-egress check meaningful without pretending to be a precise price sheet.
+// Refined via recordSpend() below once the response completes and token counts
+// are known. Keep this small: overestimating denies too aggressively; the
+// mechanism's teeth come from recorded spend accumulating, not the estimate.
+const PROJECTED_HOSTED_TURN_USD = 0.01
 
 // Browser/dev fallback implementation of the Noetica chat service contract.
 // The static desktop UI must call this through lib/client/noeticaTransport.ts,
@@ -162,6 +177,14 @@ export async function POST(request: Request) {
     task_class: 'standalone-chat',
     model_hint: model.id,
     available_providers: availableProviders.length > 0 ? availableProviders : undefined,
+    // The three fields that make `budget_ref` mean something end-to-end. Unset when
+    // NOETICA_DAILY_HOSTED_USD_CEILING is not configured (both are undefined and
+    // consultBudget() returns 'no budget declared', preserving the pre-fix behaviour
+    // for callers who never opted in). When set, routeModel() consults the ceiling
+    // BEFORE any hosted route and refuses the request with a LimitReceipt if the
+    // projected spend would exceed it — a check formerly missing altogether.
+    budget_ref: HOSTED_BUDGET_REF,
+    projected_cost_usd: HOSTED_BUDGET_REF ? PROJECTED_HOSTED_TURN_USD : undefined,
   })
 
   if (routeDecision.status === 'blocked') {
@@ -394,6 +417,18 @@ export async function POST(request: Request) {
         }
         if (toolCalls?.length) {
           send('tool_calls', { tool_calls: toolCalls })
+        }
+
+        // Attribute realised spend to the hosted-daily budget so subsequent turns
+        // see the accumulated total. recordSpend() is a no-op when the ref is
+        // undefined (opt-in) or unknown, so this line adds zero surface for callers
+        // that never wired a ceiling. Estimate: input @ $3/M + output @ $15/M
+        // roughly averages current mid-tier hosted rates — precise per-provider
+        // pricing is a follow-up; the mechanism's teeth come from cumulative
+        // spend crossing the ceiling, not from the exact rate.
+        if (HOSTED_BUDGET_REF && (inputTokens || outputTokens)) {
+          const cost = ((inputTokens ?? 0) * 3 + (outputTokens ?? 0) * 15) / 1_000_000
+          recordSpend(HOSTED_BUDGET_REF, cost)
         }
 
         const latency_ms = Date.now() - started

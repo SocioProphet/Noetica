@@ -56,6 +56,35 @@ export function declareBudget(b: Budget): void {
   _budgets.set(b.ref, { ...b })
 }
 
+/** Reference name of the default hosted-egress budget wired from environment. */
+export const DEFAULT_HOSTED_BUDGET_REF = 'noetica:hosted-daily-usd'
+
+/** Idempotent wiring: read `NOETICA_DAILY_HOSTED_USD_CEILING` and declare a default
+ *  hosted-egress budget. Called at chat/route.ts module load so the ceiling exists
+ *  by the time the FIRST request lands (a budget declared later would let the
+ *  earliest hosted spend through unchecked — the exact defect this exists to fix,
+ *  reproduced by a race). Silently no-ops when the env var is unset (dev/tests),
+ *  and never resets an existing budget's observed spend on re-import.
+ *
+ *  This is the caller wiring the reviewer asked for: `declareBudget` and
+ *  `recordSpend` used to be dead exports; the whole flow — declare-on-boot,
+ *  consult-before-egress, record-after-response — is now traceable end to end. */
+export function wireDefaultHostedBudget(): string | undefined {
+  const raw = process.env.NOETICA_DAILY_HOSTED_USD_CEILING
+  const ceiling = raw ? Number(raw) : NaN
+  if (!raw || !Number.isFinite(ceiling) || ceiling <= 0) return undefined
+  if (!_budgets.has(DEFAULT_HOSTED_BUDGET_REF)) {
+    declareBudget({
+      ref: DEFAULT_HOSTED_BUDGET_REF,
+      limitType: 'daily-external-egress-usd',
+      limitValue: ceiling,
+      observedValue: 0,
+      windowStartedAt: new Date().toISOString(),
+    })
+  }
+  return DEFAULT_HOSTED_BUDGET_REF
+}
+
 export function getBudget(ref: string): Budget | undefined {
   const b = _budgets.get(ref)
   return b ? { ...b } : undefined

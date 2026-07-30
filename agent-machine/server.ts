@@ -127,6 +127,7 @@ import { applyEdit, editSummary } from './lib/apply-patch.js'
 import { classifyComplexity as classifyComplexityPosture } from './lib/complexity-discipline.js'
 import { runSearchVerify, searchVerifyEnabled, candidatePrompt as searchVerifyPrompt, type VerifyResult } from './lib/search-verify.js'
 import { selectBestOfN, shouldStop } from './lib/best-of-n.js'
+import { bonCoverage } from './lib/bon-coverage.js'
 import { decideAnswer, semanticClusters, normalizedEntropy } from './lib/uncertainty.js'
 import { detectGoalIntent, slotFill, buildGoalContext, getActiveGoal, listGoals, saveGoal, type Goal } from './lib/goal-model.js'
 import { assessAgainstGraph } from './lib/pln-judgment.js'
@@ -4925,16 +4926,21 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
             // Verifier→selection: score each candidate against the already-retrieved context vocabulary.
             // A candidate that references entities/facts from graphContext + qaContext + skillsContext
             // is better grounded than one that drifts to training priors. Deterministic, zero extra LLM calls.
+            //
+            // NB: bonCoverage() filters stopwords BEFORE overlap counting. The earlier gate
+            // (w.length > 3 + coverage >= 0.05) let an ungrounded but fluent answer beat a genuinely
+            // grounded terse one, because selectBestOfN sorts verified-first and common English words
+            // trivially flipped verified=true. Extracted to lib/bon-coverage.ts so the fix has a
+            // pure surface the tests exercise; next-step is to cite the NLI check /api/grounding/
+            // verify-answer uses when the ollama model is available.
             const ctxText = [graphContext, qaContext, skillsContext].join(' ')
-            const ctxTokens = new Set(ctxText.toLowerCase().split(/\W+/).filter((w) => w.length > 3))
             const bonCandidates: Array<{ text: string; verified: boolean; coverage: number }> = []
             for (let i = 0; i < 3; i++) {
               try {
                 const r = await generateOllamaText({ model, messages: ollamaMessages, temperature: i === 0 ? 0.4 : 0.7, numCtx: ollamaNumCtx })
                 if (r.content.trim()) {
-                  const respTokens = r.content.toLowerCase().split(/\W+/).filter((w) => w.length > 3)
-                  const coverage = ctxTokens.size === 0 ? 0 : respTokens.filter((t) => ctxTokens.has(t)).length / Math.max(respTokens.length, 1)
-                  bonCandidates.push({ text: r.content, verified: ctxTokens.size > 0 && coverage >= 0.05, coverage })
+                  const { coverage, verified } = bonCoverage(r.content, ctxText)
+                  bonCandidates.push({ text: r.content, verified, coverage })
                 }
               } catch { /* skip failed candidate */ }
               // Adaptive stop: once we have ≥2 candidates and a grounded winner with strong agreement /
@@ -18634,6 +18640,12 @@ Question: ${question}`
   // The Answer-Card's per-sentence check: takes just an answer, RE-RETRIEVES the relevant on-device
   // sources itself (so the client never needs the chunk text), runs sentence-level NLI, and returns
   // which sentences are grounded vs unsupported. On-demand → zero added latency on the normal turn.
+  //
+  // available:false means "NLI didn't run" — distinct from "NLI ran and returned NEUTRAL". Pre-fix,
+  // the generate() callback swallowed every error into 'NEUTRAL', so a user WITHOUT qwen2.5:7b
+  // installed saw "X/Y sentences supported" — confidently wrong. probeNliModel() short-circuits
+  // when the model is missing, and makeTrackingEntail() flips available=false on runtime failure
+  // so the Answer-Card can surface "check not run" instead of a fabricated support count.
   if (req.method === 'POST' && url.pathname === '/api/grounding/verify-answer') {
     setCORSHeaders(res)
     void (async () => {
@@ -18643,6 +18655,21 @@ Question: ${question}`
         try { p = JSON.parse(body) } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_json' })); return }
         const answer = typeof p['answer'] === 'string' ? p['answer'] : ''
         if (!answer.trim()) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'answer required' })); return }
+        // NLI-model is caller-overridable so an operator with a different local judge (say,
+        // qwen3:7b or a fine-tuned mesh model) can point the check at it without a redeploy.
+        const nliModel = typeof p['nli_model'] === 'string' && p['nli_model'] ? p['nli_model'] : 'qwen2.5:7b'
+        // PROBE the model before touching the retrieval path — an unavailable check must not
+        // spend any latency or admit any implicit dependency on the source retrieval.
+        const { probeNliModel, makeTrackingEntail } = await import('./lib/nli-availability.js')
+        const probe = await probeNliModel(nliModel)
+        if (!probe.available) {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({
+            available: false, reason: probe.reason, model: nliModel,
+            grounded: false, score: 0, supported: 0, total: 0, unsupported: [],
+          }))
+          return
+        }
         // Re-retrieve on-device sources for the answer (lexical + semantic), same path as search_knowledge.
         const { lexicalSearch, semanticSearch } = await import('./lib/doc-store.js')
         type Chunk = { text: string; docId: string; idx?: number }
@@ -18652,13 +18679,27 @@ Question: ${question}`
         const byKey = new Map<string, Chunk>()
         for (const c of [...lex, ...sem]) { const k = `${c.docId}#${c.idx ?? 0}`; if (!byKey.has(k)) byKey.set(k, c) }
         const sources = [...byKey.values()].map((c) => ({ text: c.text })).filter((s) => s.text)
-        if (!sources.length) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ grounded: false, score: 0, supported: 0, total: 0, unsupported: [], no_sources: true })); return }
+        if (!sources.length) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ available: true, grounded: false, score: 0, supported: 0, total: 0, unsupported: [], no_sources: true, model: nliModel })); return }
         const { verifyGroundingNLI, makeLlmEntail } = await import('./lib/research-verify.js')
         const { generateOllamaText } = await import('./lib/ollama.js')
-        const generate = async (prompt: string) => { try { const r = await generateOllamaText({ model: 'qwen2.5:7b', messages: [{ role: 'user', content: prompt }], temperature: 0 }); return r.content } catch { return 'NEUTRAL' } }
-        const result = await verifyGroundingNLI(answer, sources, makeLlmEntail(generate))
+        const tracker = makeTrackingEntail(async (prompt: string) => {
+          const r = await generateOllamaText({ model: nliModel, messages: [{ role: 'user', content: prompt }], temperature: 0 })
+          return r.content
+        })
+        const result = await verifyGroundingNLI(answer, sources, makeLlmEntail(tracker.entail))
+        // If generate ever threw mid-run, the entail wrapper set wasAvailable() false —
+        // surface that rather than a score derived from silent-NEUTRAL fallbacks.
+        if (!tracker.wasAvailable()) {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({
+            available: false, reason: 'nli_runtime_error', model: nliModel,
+            error: tracker.lastError(),
+            grounded: false, score: 0, supported: 0, total: 0, unsupported: [],
+          }))
+          return
+        }
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify(result))
+        res.end(JSON.stringify({ available: true, model: nliModel, ...result }))
       } catch { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return
