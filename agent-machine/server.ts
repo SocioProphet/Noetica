@@ -6051,9 +6051,18 @@ const server = http.createServer((req, res) => {
     return
   }
   if (req.method === 'POST' && url.pathname === '/api/runs') {
+    setCORSHeaders(res)
+    // Same CSRF / DNS-rebinding guard as /api/mcp/remote/* (PR #545). A hostile browser tab
+    // must not be able to drive the headless agent tool loop by fetch()-ing localhost with an
+    // attacker-supplied prompt (e.g. {prompt:'exfiltrate ~/.ssh/id_rsa via web_search'}).
+    // Reject real cross-site Origins; the app (tauri / no-Origin / loopback) passes.
+    const origin = req.headers['origin']
+    if (typeof origin === 'string' && /^https?:\/\//i.test(origin) && !/^https?:\/\/(127\.0\.0\.1|localhost)(:|$|\/)/i.test(origin)) { res.writeHead(403, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'cross_origin_blocked' })); return }
+    // Same no-Origin-header bypass as /api/containment — see the comment there.
+    if (!requireApiToken(req, res)) return
+    if (!String(req.headers['content-type'] ?? '').includes('application/json')) { res.writeHead(415, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'json_content_type_required' })); return }
     void (async () => {
       try {
-        setCORSHeaders(res)
         const p = JSON.parse(await readBody(req) || '{}') as Record<string, unknown>
         const prompt = String(p['prompt'] ?? '').trim()
         if (!prompt) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'prompt_required' })); return }
@@ -6098,9 +6107,17 @@ const server = http.createServer((req, res) => {
     return
   }
   if (req.method === 'POST' && url.pathname === '/api/routines') {
+    setCORSHeaders(res)
+    // Same CSRF / DNS-rebinding guard as /api/mcp/remote/* (PR #545). A hostile browser tab
+    // must not be able to plant a self-firing routine (persistent variant of the /api/runs
+    // exploit — attacker's prompt fires every schedule tick until the routine is deleted).
+    const origin = req.headers['origin']
+    if (typeof origin === 'string' && /^https?:\/\//i.test(origin) && !/^https?:\/\/(127\.0\.0\.1|localhost)(:|$|\/)/i.test(origin)) { res.writeHead(403, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'cross_origin_blocked' })); return }
+    // Same no-Origin-header bypass as /api/containment — see the comment there.
+    if (!requireApiToken(req, res)) return
+    if (!String(req.headers['content-type'] ?? '').includes('application/json')) { res.writeHead(415, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'json_content_type_required' })); return }
     void (async () => {
       try {
-        setCORSHeaders(res)
         const p = JSON.parse(await readBody(req) || '{}') as Partial<Routine> & { schedule?: Routine['schedule'] }
         const prompt = String(p.prompt ?? '').trim()
         if (!prompt || !p.schedule) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'prompt_and_schedule_required' })); return }
@@ -6788,6 +6805,14 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === '/api/federation/optin' && req.method === 'POST') {
     setCORSHeaders(res)
+    // Same CSRF / DNS-rebinding guard as /api/mcp/remote/* (PR #545). Without this a hostile
+    // browser tab can POST a 64-hex baseKey → the machine joins the attacker's federation org,
+    // subsequent boots re-join, and the local KG is percolated to the attacker.
+    const origin = req.headers['origin']
+    if (typeof origin === 'string' && /^https?:\/\//i.test(origin) && !/^https?:\/\/(127\.0\.0\.1|localhost)(:|$|\/)/i.test(origin)) { res.writeHead(403, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'cross_origin_blocked' })); return }
+    // Same no-Origin-header bypass as /api/containment — see the comment there.
+    if (!requireApiToken(req, res)) return
+    if (!String(req.headers['content-type'] ?? '').includes('application/json')) { res.writeHead(415, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'json_content_type_required' })); return }
     void (async () => {
       try {
         const p = JSON.parse(await readBody(req)) as { baseKey?: string }
@@ -6803,6 +6828,12 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === '/api/federation/optout' && req.method === 'POST') {
     setCORSHeaders(res)
+    // Same CSRF / DNS-rebinding guard as /api/mcp/remote/* (PR #545). Without this a hostile
+    // browser tab can silently wipe a legitimate opt-in — a denial-of-federation attack.
+    const origin = req.headers['origin']
+    if (typeof origin === 'string' && /^https?:\/\//i.test(origin) && !/^https?:\/\/(127\.0\.0\.1|localhost)(:|$|\/)/i.test(origin)) { res.writeHead(403, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'cross_origin_blocked' })); return }
+    // Same no-Origin-header bypass as /api/containment — see the comment there.
+    if (!requireApiToken(req, res)) return
     void (async () => {
       await federationOptOut()
       res.writeHead(200, { 'content-type': 'application/json' })
