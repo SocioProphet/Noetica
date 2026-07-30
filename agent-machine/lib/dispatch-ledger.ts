@@ -200,6 +200,89 @@ export function recordDispatch(input: DispatchInput): DispatchEntry {
   return entry
 }
 
+/**
+ * A COMPOSED receipt over multiple dispatches — the shape Michael's `extract_multi_intent`
+ * produces when one utterance fans out to primary + secondary + tertiary dispatches.
+ *
+ * The composition rule is: each member is recorded as its own DispatchEntry with its own
+ * attestation, so replay verifies every member individually. The composite verdict is the
+ * TRUTH-PRODUCT (meet) over the members. That means the composed turn is POS only when every
+ * member is POS; a single ZERO drags the whole set to ZERO; a single NEG drags it to NEG.
+ *
+ * Why the meet and not, say, the max: a turn that answered primary intent but couldn't
+ * establish secondary is not "successful" — it delivered a partial answer where a receipt-
+ * chained one would state what it did and did not do. Reporting the max would leak "PASS"
+ * on a partially-refuted turn, which is the exact defect the whole ledger exists to remove.
+ *
+ * `attestation` here is the SEAM-C hash over the ORDERED member attestations, so a caller
+ * can verify the composite by re-hashing them without re-loading every DispatchInput.
+ */
+export interface ComposedDispatchReceipt {
+  turnId: string
+  members: DispatchEntry[]
+  law: Verdict
+  evidence: Verdict
+  verdict: Verdict
+  /** Which member drove the composite verdict — the first (highest-scoring) member whose
+   *  own verdict equals the composite. Attribution matters: 'why is this turn ZERO' should
+   *  answer with the specific member, not with 'the truth-product'. */
+  drivingMember: { seq: number; name: string; verdict: Verdict } | null
+  attestation: string
+}
+
+/**
+ * Record N dispatches as ONE composed receipt. Each dispatch is chained individually into
+ * the ledger (same replay, same tamper-evidence), and the composite result carries the
+ * truth-product over their verdicts.
+ *
+ * `intentNames` names each dispatch so the driving-member attribution reads sensibly on
+ * replay. Length must match `inputs.length` — a mismatch is caller error, not silent drop.
+ */
+export function recordDispatchSet(
+  turnId: string,
+  intentNames: readonly string[],
+  inputs: readonly DispatchInput[],
+): ComposedDispatchReceipt {
+  if (inputs.length === 0) throw new TypeError('recordDispatchSet: empty input set')
+  if (inputs.length !== intentNames.length) {
+    throw new TypeError(
+      `recordDispatchSet: intentNames.length (${intentNames.length}) must equal inputs.length (${inputs.length}). ` +
+      'Names attribute each member of the composite; a mismatch would misidentify the driving member.')
+  }
+
+  const members: DispatchEntry[] = []
+  for (const inp of inputs) members.push(recordDispatch(inp))
+
+  // Left-fold the truth-product across every member's factors — the meet is associative
+  // and commutative, so the order affects only attribution, not the result.
+  let composedLaw: Verdict = 'POS'
+  let composedEvidence: Verdict = 'POS'
+  for (const m of members) {
+    composedLaw = truthProduct(composedLaw, m.law)
+    composedEvidence = truthProduct(composedEvidence, m.evidence)
+  }
+  const composedVerdict = truthProduct(composedLaw, composedEvidence)
+
+  // Driving member: the FIRST member whose own verdict is the composite. First rather than
+  // any because members arrive in priority order (primary → secondary → tertiary), so
+  // attribution favours the most important intent that caused the composite grade.
+  const drivingIdx = members.findIndex((m) => m.verdict === composedVerdict)
+  const drivingMember = drivingIdx >= 0
+    ? { seq: members[drivingIdx]!.seq, name: intentNames[drivingIdx]!, verdict: composedVerdict }
+    : null
+
+  // Attestation covers turnId + the ORDERED member attestations. A caller with just the
+  // composite can verify by hashing (turnId, [m.attestation for m in members]) — no need to
+  // rehydrate every DispatchInput.
+  const attestation = ledgerHash({
+    turnId,
+    members: members.map((m) => m.attestation),
+    intentNames: [...intentNames],
+  })
+
+  return { turnId, members, law: composedLaw, evidence: composedEvidence, verdict: composedVerdict, drivingMember, attestation }
+}
+
 export interface ReplayResult { ok: boolean; count: number; brokenAt?: number; reason?: string }
 
 /** Replay the chain: recompute each attestation from its body + prev, and verify the

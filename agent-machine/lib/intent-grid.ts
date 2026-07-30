@@ -17,7 +17,7 @@
  * Read/write within a substrate is a ℤ/2 polarity involution, NOT a group inverse: `retrieve`
  * does not undo `create`. The adjoint pairs the columns; it does not cancel them.
  */
-import { allIntents, type Intent, type Tool, type Retrieval, type Capability } from './intent-router.js'
+import { allIntents, intentByName, type Intent, type IntentPlan, type Tool, type Retrieval, type Capability } from './intent-router.js'
 import { ACTION_SIGNATURE, type Substrate, type Polarity } from './verb-sort.js'
 import { ledgerHash } from './verb-sort.js'
 
@@ -376,6 +376,97 @@ export function asymmetryRobustness(report: GridReport = buildCanonicalGrid()): 
       `whether web_search and brain_status are store:read or world:read — reclassifying both ` +
       `moves the minimum from sense to execute — but the gap between the read/generate half and ` +
       `the sense/persist/act half survives every variant.`,
+  }
+}
+
+/**
+ * The response of `dispatchSet` — one row per (intent, action) that is valid across the
+ * requested plan set. Michael's `extract_multi_intent` produces a set of IntentPlans; this
+ * turns each into its admissible cells. The consumer then dispatches each cell (as its own
+ * DispatchInput) and composes the receipts via the truth-product in dispatch-ledger.
+ *
+ * Empties are signal: a plan whose topic has ZERO valid cells across the requested actions
+ * appears in `emptyPlans` with a reason, not silently dropped. That preserves the
+ * "empties are gaps we can name" discipline established by the base grid.
+ */
+export interface DispatchSetPlan {
+  intent: string
+  score: number
+  cells: GridCell[]
+}
+export interface DispatchSetResult {
+  plans: DispatchSetPlan[]
+  emptyPlans: { intent: string; score: number; reason: string }[]
+  /** Total valid cells across every plan — an at-a-glance measure of dispatch fanout. */
+  cellCount: number
+  /** Every ABB substrate this set touches, unique. A caller can pre-warm ABB catalogue
+   *  lookups (Michael's route_by_abb) from this. */
+  substrates: readonly Substrate[]
+}
+
+/**
+ * Fan a set of IntentPlans out to their admissible grid cells.
+ *
+ * Given `plans = [primary, secondary, tertiary]` and `actions` (defaults to all six),
+ * returns per-plan `cells` — the (topic × action) entries valid for that plan's intent.
+ * Plans whose topic is not in the canonical grid, or whose topic admits none of the
+ * requested actions, land in `emptyPlans` with a specific reason.
+ *
+ * Two behavioural choices this pins:
+ * - Ordering is preserved from the input plan order (usually descending by score), so
+ *   downstream composition applies primary → secondary → tertiary in the caller's intent.
+ * - `everyday` is COLLAPSED into `explain_teach` per the canonical grid's MINIMALITY test
+ *   (see buildCanonicalGrid). A plan whose intent is `everyday` is redirected to
+ *   `explain_teach`'s row rather than dropped — the algebra recognises it as a
+ *   specialisation, not a distinct primitive.
+ */
+export function dispatchSet(
+  plans: readonly IntentPlan[],
+  actions: readonly GridAction[] = ACTIONS,
+): DispatchSetResult {
+  const grid = buildCanonicalGrid()
+  const gridRowSet = new Set(grid.rows)
+  const validPlans: DispatchSetPlan[] = []
+  const emptyPlans: DispatchSetResult['emptyPlans'] = []
+
+  for (const p of plans) {
+    // MINIMALITY collapse: `everyday` was demonstrated to be a slot-binding specialization
+    // of `explain_teach` (buildCanonicalGrid discards it). A caller-supplied plan with that
+    // intent must redirect rather than fail — the canon says these are the same row.
+    const topic = p.name === 'everyday' ? 'explain_teach' : p.name
+
+    if (!gridRowSet.has(topic)) {
+      emptyPlans.push({
+        intent: p.name, score: p.score,
+        reason: `intent '${p.name}' is not a canonical grid row — no cells to dispatch. `
+          + `Every canonical intent must have a corresponding grid row; a missing row means `
+          + `intent-router and intent-grid have drifted and one needs updating.`,
+      })
+      continue
+    }
+
+    const cells = grid.cells.filter((c) => c.topic === topic && c.valid && actions.includes(c.action))
+    if (cells.length === 0) {
+      emptyPlans.push({
+        intent: p.name, score: p.score,
+        reason: `intent '${p.name}' has no valid cells for the requested actions `
+          + `[${actions.join(', ')}]. Widen the action set or accept that this plan `
+          + `contributes nothing to the dispatch — silent dropping would misrepresent the algebra.`,
+      })
+      continue
+    }
+
+    validPlans.push({ intent: p.name, score: p.score, cells })
+  }
+
+  const substrateSet = new Set<Substrate>()
+  for (const vp of validPlans) for (const c of vp.cells) substrateSet.add(c.substrate)
+
+  return {
+    plans: validPlans,
+    emptyPlans,
+    cellCount: validPlans.reduce((n, vp) => n + vp.cells.length, 0),
+    substrates: Object.freeze([...substrateSet]),
   }
 }
 
