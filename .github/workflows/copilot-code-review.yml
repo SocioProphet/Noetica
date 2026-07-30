@@ -1,0 +1,70 @@
+# copilot-code-review — give Copilot's review a runner, so it stops reviewing blind.
+#
+# Every Copilot review this repo has ever received carries the same banner:
+#
+#   > Copilot couldn't run its full agentic review because it didn't start before
+#   > the timeout. Make sure your repository has a runner available, or add a
+#   > `copilot-code-review.yml` file specifying one with the `runs-on` attribute.
+#
+# Copilot code review runs its agentic half — the part that gathers project context
+# rather than just reading the diff — as a GitHub Actions job. With no runner
+# resolved before the timeout it silently degrades to a diff-only read and still
+# posts a review that LOOKS complete. That is the failure mode worth naming: not a
+# missing review, but a partial one presenting as whole.
+#
+# This file exists to name the runner. Copilot requires the job to be called
+# `copilot-setup-steps` exactly, and only `steps`, `permissions`, `runs-on`,
+# `services`, `snapshot` and `timeout-minutes` are honoured.
+#
+# WHY THE STEPS ARE HERE AND NOT EMPTY: the review's context gathering runs the
+# same resolution the typecheck does, and agent-machine's deps (mammoth, unpdf,
+# fflate) are not in the root node_modules — the exact trap #566 fixed for the app
+# job. Without both installs, a review that tries to resolve those imports sees
+# TS2307 rather than the code.
+#
+# CAVEAT, stated rather than buried: a workflow file does not take effect until it
+# is on the DEFAULT BRANCH. Nothing in this PR can demonstrate the banner is gone —
+# that can only be observed on the first review requested after this merges. The
+# check is: request a review on any PR and confirm the review body no longer opens
+# with the "couldn't run its full agentic review" note.
+name: copilot-code-review
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-code-review.yml
+  pull_request:
+    paths:
+      - .github/workflows/copilot-code-review.yml
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+
+    # Least-privilege, matching ci.yml: context gathering reads, it does not write.
+    # Declared at JOB level — Copilot honours `steps`, `permissions`, `runs-on`,
+    # `services`, `snapshot` and `timeout-minutes` on this job and nothing else, so
+    # a workflow-level key here would be silently dropped. For the same reason
+    # HUSKY is set on the step rather than as a job-level `env:` block.
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            agent-machine/package-lock.json
+
+      - name: Install dependencies
+        env:
+          HUSKY: 0
+        run: |
+          npm ci
+          npm --prefix agent-machine ci
