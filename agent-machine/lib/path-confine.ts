@@ -6,10 +6,12 @@
  * SIBLINGS: `/Users/alice-evil/...` passes the `/Users/alice` prefix, and `/tmpfoo/...` passes `/tmp`.
  * Anchoring on `path.sep` (and matching the exact root) closes the traversal-confinement gap.
  *
- * SCOPE: this is a purely LEXICAL containment check. It does not resolve symlinks, so a link *inside*
- * an allowed root that points outside it still passes. Callers that go on to open the path need
- * `fs.realpathSync` re-validation on top — see `app/api/agent-tool/route.ts` for that pattern.
+ * SCOPE: `isConfinedToHomeOrTmp` / `isWithinRoot` are purely LEXICAL. They do not resolve symlinks, so
+ * a link *inside* an allowed root that points outside it still passes them. Any caller that goes on to
+ * OPEN the path must use `confinedRealPath` / `realPathWithinRoot` below, which run the lexical barrier
+ * first and then re-validate through `fs.realpathSync`.
  */
+import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
@@ -41,4 +43,75 @@ export function confinementRoots(): string[] {
  */
 export function isConfinedToHomeOrTmp(resolved: string): boolean {
   return confinementRoots().some((r) => isWithinRoot(resolved, r))
+}
+
+/**
+ * `fs.realpathSync(p)`, but tolerant of a path that does not exist YET.
+ *
+ * This is the whole difficulty of symlink-hardening a WRITE path. `write_file` and `edit_file` create
+ * files, so `realpathSync` on the full path throws ENOENT and a naive hardening breaks every legitimate
+ * write. So: walk up to the nearest ancestor that DOES resolve, realpath that, and re-attach the
+ * not-yet-existing tail to the real ancestor. `~/newdir/new.txt` under a real `~` yields
+ * `<realhome>/newdir/new.txt`; `~/link-to-etc/new.txt` yields `/private/etc/new.txt` — which the caller
+ * then rejects. Checking only `existsSync(full)` and falling back to the lexical value (the shape in
+ * `app/api/agent-tool/route.ts`) misses exactly that second case: a symlinked PARENT directory.
+ *
+ * Returns null if a component is a DANGLING symlink — it lstat()s but does not realpath(), so we cannot
+ * prove where a create through it would land, and it would land at the link target, not inside the root.
+ */
+function realPathOfNearestExisting(p: string): string | null {
+  const tail: string[] = []
+  let probe = p
+  for (;;) {
+    try {
+      return tail.length ? path.join(fs.realpathSync(probe), ...tail) : fs.realpathSync(probe)
+    } catch {
+      /* `probe` does not exist (yet) — keep walking up. */
+    }
+    try {
+      if (fs.lstatSync(probe).isSymbolicLink()) return null // dangling link: unverifiable target
+    } catch {
+      /* genuinely absent, which is fine — it is the path being created. */
+    }
+    const parent = path.dirname(probe)
+    if (parent === probe) return null // walked off the filesystem root without resolving anything
+    tail.unshift(path.basename(probe))
+    probe = parent
+  }
+}
+
+/**
+ * The symlink-safe form of `isWithinRoot`: returns the REAL path to operate on, or null if it escapes.
+ *
+ * Order matters. The lexical barrier runs FIRST, so nothing touches the filesystem on an unvalidated
+ * path (this is also the shape CodeQL recognises as a barrier for `js/path-injection`). Only then do we
+ * resolve symlinks and re-check. `root` is realpath'd too: an allowed root is itself frequently a link
+ * (`/tmp` → `/private/tmp` on macOS, `$TMPDIR` under `/var/folders` → `/private/var/folders`), so
+ * comparing a resolved target against an unresolved root would reject legitimate paths.
+ */
+export function realPathWithinRoot(resolved: string, root: string): string | null {
+  if (!isWithinRoot(resolved, root)) return null
+  const real = realPathOfNearestExisting(resolved)
+  if (real === null) return null
+  const realRoot = realPathOfNearestExisting(root)
+  if (realRoot === null) return null
+  return isWithinRoot(real, realRoot) ? real : null
+}
+
+/**
+ * The symlink-safe form of `isConfinedToHomeOrTmp`: returns the REAL path to operate on, or null.
+ *
+ * `isConfinedToHomeOrTmp` alone is bypassable — a symlink INSIDE an allowed root that points outside it
+ * passes a lexical check, so `~/escape → /etc` turned `~/escape/passwd` into an arbitrary read. Callers
+ * must use the returned path for the actual fs operation; the lexical one is the attacker's spelling.
+ */
+export function confinedRealPath(resolved: string): string | null {
+  if (!isConfinedToHomeOrTmp(resolved)) return null // lexical barrier FIRST — no fs access before this
+  const real = realPathOfNearestExisting(resolved)
+  if (real === null) return null
+  return confinementRoots()
+    .map(realPathOfNearestExisting)
+    .some((r) => r !== null && isWithinRoot(real, r))
+    ? real
+    : null
 }
