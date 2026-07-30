@@ -19,6 +19,7 @@ import { runDetectors, rulesetHash, RULESET_SEMVER, type DetectorHit } from './d
 import {
   reason, type ReasonerInput, type DetectorFiring, type GroundedEvidence,
   type PolicyHardConstraint, type ClaimVerdict, DEFAULT_THRESHOLDS,
+  type CounterTestResult,
 } from './reasoner.js'
 import type { SeverityThresholds } from './mln.js'
 
@@ -35,6 +36,9 @@ export interface DebateInput {
   /** Calibrated implication strength per detector rule (learned; §2 ED-1). Absent → 1 (raw score used).
    *  A rule mapped to <ε_zero here self-abstains (audited, no force) — the ED-2 property. */
   implicationStrengths?: Record<string, number>
+  /** Counter-test results for this pass. Absent = not run, which means no detection can escalate a
+   *  claim to warn or block (counter_tests_required_for_warn_or_block). */
+  counterTests?: CounterTestResult[]
 }
 
 export interface ClaimAnalysis extends ClaimVerdict {
@@ -75,6 +79,7 @@ export function analyzeDebate(input: DebateInput): DebateVerdict {
     groundedEvidence: input.groundedEvidence,
     policyConstraints: input.policyConstraints,
     thresholds: input.thresholds ?? DEFAULT_THRESHOLDS,
+    counterTests: input.counterTests,
   }
   const verdict = reason(reasonerInput)
   if (verdict.hcViolation) {
@@ -97,5 +102,10 @@ export function explainClaim(a: ClaimAnalysis): string {
   const bits = a.hits.map((h) => `${h.ruleId}(${h.score.toFixed(2)})`).join(', ')
   const q = a.measurementQuality === 'fallback' ? ' [deterministic fallback: small-N]' : a.measurementQuality === 'limited' ? ' [limited-N]' : ''
   const policy = a.policyBlocked ? ' [POLICY hard-block]' : ''
-  return `${a.severity.toUpperCase()} (P_sound=${a.pSound.toFixed(2)})${policy}${q} — ${bits || 'no detections'}`
+  // Make a gate downgrade visible: without this the surface reads plain INFO and the suppressed
+  // warn/block — and the counter-test that would have justified it — is invisible to the reader.
+  const gate = a.counterTestGate?.downgradedFrom
+    ? ` [${a.counterTestGate.downgradedFrom.toUpperCase()} withheld: counter-test not confirmed — ${a.counterTestGate.missing.join(', ')}]`
+    : ''
+  return `${a.severity.toUpperCase()} (P_sound=${a.pSound.toFixed(2)})${policy}${q}${gate} — ${bits || 'no detections'}`
 }

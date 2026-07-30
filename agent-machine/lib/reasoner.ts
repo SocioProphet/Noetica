@@ -41,22 +41,46 @@ export interface PolicyHardConstraint {
   reason: string
 }
 
+export type CounterTestOutcome = 'confirmed' | 'refuted' | 'inconclusive'
+
+export interface CounterTestResult {
+  ctestId: string         // e.g. 'CTEST.STEELMAN.CONFIRM.V2'
+  targetClaim: string     // the claim the counter-test was run against
+  outcome: CounterTestOutcome
+}
+
 export interface ReasonerInput {
   claims: string[]
   detectorFirings: DetectorFiring[]
   groundedEvidence?: GroundedEvidence[]
   policyConstraints?: PolicyHardConstraint[]
   thresholds?: SeverityThresholds
+  /** Counter-test results available for this pass. Absent = not run. A detection whose required
+   *  counter-tests have not CONFIRMED cannot escalate a claim to warn or block (see the gate below). */
+  counterTests?: CounterTestResult[]
+  /** Override the detector -> required-counter-test map (defaults to REQUIRED_COUNTER_TESTS). Injectable
+   *  so a caller pinned to a different ruleset version supplies its own pairings rather than silently
+   *  inheriting these. */
+  requiredCounterTests?: Record<string, readonly string[]>
 }
 
 export const DEFAULT_THRESHOLDS: SeverityThresholds = { block: 0.3, warn: 0.55, ok: 0.8 }
 
 const soundAtom = (claim: string): string => `IsSound(${claim})`
 
+export interface CounterTestGate {
+  satisfied: boolean                   // every required counter-test for the contributing firings CONFIRMED
+  required: string[]                   // counter-test ids the contributing detections require
+  missing: string[]                    // required but not confirmed: absent, refuted, inconclusive, undeclared
+  downgradedFrom?: Severity            // set when the gate suppressed a warn/block
+}
+
 export interface ClaimVerdict {
   claim: string
   pSound: number                       // marginal P(IsSound(claim)) — the number §9 thresholds against
-  severity: Severity
+  severity: Severity                   // AUTHORITATIVE: composition result AFTER the counter-test gate
+  provisionalSeverity: Severity        // what composition produced BEFORE gating (the §9 math, unchanged)
+  counterTestGate: CounterTestGate     // why severity does or does not equal provisionalSeverity
   measurementQuality: 'full' | 'limited' | 'fallback'   // §9 Rule SEV-3 small-N gate
   contributingFirings: number          // how many detector firings bore on this claim (the "N" for the gate)
   policyBlocked: boolean               // a hard POLICY.* constraint forces block regardless of pSound (§5)
@@ -67,6 +91,7 @@ export interface ReasonerVerdict {
   clear: boolean                       // conform to the existing scope-d/action-cell verdict shape
   verdicts: ClaimVerdict[]
   hcViolation?: string                 // §3.2 Rule DG-2: network wasn't a valid Gibbs distribution
+  gatedDowngrades: number              // claims that would have warned/blocked but lacked counter-tests
 }
 
 /** Build the per-claim ground network for one claim: all firings + grounded evidence weighting its
@@ -114,11 +139,12 @@ function hcValidate(input: ReasonerInput): string | null {
  *  falling back to deterministic worst-detector severity below N≤10 (§9 Rule SEV-3). */
 export function reason(input: ReasonerInput): ReasonerVerdict {
   const hc = hcValidate(input)
-  if (hc) return { clear: false, verdicts: [], hcViolation: hc }
+  if (hc) return { clear: false, verdicts: [], hcViolation: hc, gatedDowngrades: 0 }
 
   const thresholds = input.thresholds ?? DEFAULT_THRESHOLDS
   const policyClaims = new Set((input.policyConstraints ?? []).map((p) => p.claim))
   const verdicts: ClaimVerdict[] = []
+  let gatedDowngrades = 0
 
   for (const claim of input.claims) {
     const { net, firingCount, abstained } = claimNetwork(claim, input)
@@ -126,24 +152,142 @@ export function reason(input: ReasonerInput): ReasonerVerdict {
     const quality = canUseMapSeverity(firingCount)
     const policyBlocked = policyClaims.has(claim)
 
-    let severity: Severity
+    let provisionalSeverity: Severity
     if (policyBlocked) {
-      severity = 'block'                                  // §5: a hard POLICY constraint blocks regardless of P
+      provisionalSeverity = 'block'                       // §5: a hard POLICY constraint blocks regardless of P
     } else if (quality === 'fallback') {
       // §9 Rule SEV-3: below N≤10, do NOT issue a MAP-generalized severity — fall back to the deterministic
       // worst single detector (the original per-detector behavior). This is the anti-clustering-illusion gasket.
-      severity = deterministicFallbackSeverity(claim, input, thresholds)
+      provisionalSeverity = deterministicFallbackSeverity(claim, input, thresholds)
     } else {
-      severity = classifySeverity(pSound, thresholds)     // full or limited: MAP-based, limited is stamped as such
+      provisionalSeverity = classifySeverity(pSound, thresholds)   // full or limited: MAP-based, limited stamped
     }
 
-    verdicts.push({ claim, pSound, severity, measurementQuality: quality, contributingFirings: firingCount, policyBlocked, abstainedFirings: abstained })
+    const counterTestGate = evaluateCounterTestGate(claim, provisionalSeverity, policyBlocked, input)
+    const severity = counterTestGate.downgradedFrom ? GATE_DOWNGRADE_SEVERITY : provisionalSeverity
+    if (counterTestGate.downgradedFrom) gatedDowngrades++
+
+    verdicts.push({
+      claim, pSound, severity, provisionalSeverity, counterTestGate,
+      measurementQuality: quality, contributingFirings: firingCount, policyBlocked, abstainedFirings: abstained,
+    })
   }
 
   // clear = no claim is blocked (the verdict is fail-closed: a single block fails the whole set, matching
   // scope-d's fail-closed posture).
   const clear = !verdicts.some((v) => v.severity === 'block')
-  return { clear, verdicts }
+  return { clear, verdicts, gatedDowngrades }
+}
+
+// ─── the counter-test gate (epistemic-governance: counter_tests_required_for_warn_or_block) ───────────
+//
+// The ruleset states three principles together: detector_findings_are_hypotheses,
+// repair_before_punishment, and counter_tests_required_for_warn_or_block. Read as one, a detector firing
+// is a HYPOTHESIS until its required counter-test confirms it — so escalating a claim to warn or block on
+// an un-counter-tested detection asserts a finding that was never earned.
+//
+// Before this gate existed, reason() issued warn and block purely off composed detector weights while the
+// ruleset declared counter-tests mandatory for exactly those two severities, and no counter-test runner
+// existed at all (routeCtest returns a routing row, not a result). The system gated without the gate.
+//
+// Downgrading is NOT fail-open. The ruleset's own `info` tier means "log or gently surface; no
+// interruption by default" — the right posture for an unverified hypothesis. The detection is still
+// reported, with downgradedFrom naming the severity it could not justify, so the missing counter-test is
+// visible in the verdict rather than silently absent.
+//
+// POLICY hard constraints are deliberately NOT gated: §5 grants them independent authority and they are
+// not detector hypotheses.
+
+/** Severity an un-certified warn/block collapses to — the ruleset's "surface, do not interrupt" tier. */
+const GATE_DOWNGRADE_SEVERITY: Severity = 'info'
+
+/**
+ * Canonical detector -> required counter-test pairings, transcribed from
+ * sociosphere/standards/epistemic-governance/detector-countertest-map.yaml (ruleset_semver 1.3.0).
+ *
+ * KNOWN VERSION DIVERGENCE: that ruleset declares V2-era ids (LOGFALL.ADHOM.V2) while
+ * lib/debate-detectors.ts implements V1 ids (LOGFALL.ADHOMINEM.V1) under RULESET_SEMVER '0.1.0'. These
+ * are two different id namespaces, not two versions of one list. This map is transcribed VERBATIM and
+ * deliberately does NOT guess aliases between them: a detector with no entry here has an UNDECLARED
+ * requirement, which cannot certify warn/block either (unknown is not satisfied). That makes the
+ * divergence produce visible downgrades instead of hiding it — reconciling the namespaces is the
+ * follow-up this gate exists to force.
+ */
+export const REQUIRED_COUNTER_TESTS: Record<string, readonly string[]> = {
+  'LOGFALL.STRAWMAN.V2':    ['CTEST.STEELMAN.CONFIRM.V2'],
+  'LOGFALL.ADHOM.V2':       ['CTEST.REFOCUS.PROPOSITION.V1'],
+  'LOGFALL.EMOTION.V2':     ['CTEST.BASELINE.DATA.V1'],
+  'LOGFALL.FALSECAUSE.V2':  ['CTEST.CAUSAL.DO/COUNTERFACTUAL.V1'],
+  'LOGFALL.GISH.V1':        ['CTEST.ACYCLIC.PROOF.V1'],
+  'LOGFALL.SHARPSHOOT.V2':  ['CTEST.PREREG/MTP.V2'],
+  'LOGFALL.LOADED.V1':      ['CTEST.PRESUP.EXPOSE.V1'],
+  'LOGFALL.BURDEN.V1':      ['CTEST.BURDEN.REASSIGN.V1'],
+  'LOGFALL.EQUIV.V1':       ['CTEST.TERMS.LOCK.V1'],
+  'LOGFALL.MOTTEBAILEY.V1': ['CTEST.CRITERIA.PRE-REGISTER.V1'],
+  'COGBIAS.ANCHORING.V2':   ['CTEST.COUNTER-ANCHOR.V1'],
+  'COGBIAS.CONFIRM.V1':     ['CTEST.DEVIL-S.LIST.V1'],
+  'COGBIAS.OVERCONF.V1':    ['CTEST.CALIBRATION-20Q.V1'],
+  'COGBIAS.REACTDEV.V1':    ['CTEST.ATTRIBUTION-BLIND.A/B.V1'],
+}
+
+/** Marker placed in `missing` for a detector with no declared counter-test requirement. */
+export const undeclaredRequirement = (ruleId: string): string => `<undeclared:${ruleId}>`
+
+/** Decide whether a provisional warn/block has earned the right to stand. */
+function evaluateCounterTestGate(
+  claim: string,
+  provisional: Severity,
+  policyBlocked: boolean,
+  input: ReasonerInput,
+): CounterTestGate {
+  // §5 POLICY authority is not a detector hypothesis — ungated by design.
+  if (policyBlocked) return { satisfied: true, required: [], missing: [] }
+  if (provisional !== 'warn' && provisional !== 'block') return { satisfied: true, required: [], missing: [] }
+
+  const map = input.requiredCounterTests ?? REQUIRED_COUNTER_TESTS
+
+  // Certification is CONFLICT-INTOLERANT: a counter-test counts as confirmed only
+  // when every result for that (claim, ctestId) says so. Taking "any confirmed"
+  // would let a single confirmed entry certify past a refuted one — an unearned
+  // certification, which is exactly what this gate exists to prevent. Conflicting
+  // evidence is not evidence of soundness.
+  const outcomes = new Map<string, Set<CounterTestOutcome>>()
+  for (const t of input.counterTests ?? []) {
+    if (t.targetClaim !== claim) continue
+    const seen = outcomes.get(t.ctestId) ?? new Set<CounterTestOutcome>()
+    seen.add(t.outcome)
+    outcomes.set(t.ctestId, seen)
+  }
+  const isConfirmed = (ctestId: string): boolean => {
+    const seen = outcomes.get(ctestId)
+    return seen !== undefined && seen.size === 1 && seen.has('confirmed')
+  }
+
+  // Group firings by claim once: the gate is called per claim and would otherwise
+  // rescan every firing for each one.
+  const requiredSet = new Set<string>()
+  const missingSet = new Set<string>()
+  const seenRules = new Set<string>()
+
+  for (const f of input.detectorFirings) {
+    if (f.targetClaim !== claim || seenRules.has(f.ruleId)) continue
+    seenRules.add(f.ruleId)
+
+    const needed = map[f.ruleId]
+    if (needed === undefined) {
+      missingSet.add(undeclaredRequirement(f.ruleId))   // cannot certify what the ruleset never specified
+      continue
+    }
+    for (const ctestId of needed) {
+      requiredSet.add(ctestId)
+      if (!isConfirmed(ctestId)) missingSet.add(ctestId)
+    }
+  }
+
+  const required = [...requiredSet]
+  const missing = [...missingSet]
+  if (missing.length === 0) return { satisfied: true, required, missing }
+  return { satisfied: false, required, missing, downgradedFrom: provisional }
 }
 
 /** §9 Rule SEV-3 fallback: with too few groundings to trust MAP composition, map the single strongest
