@@ -37,8 +37,8 @@ const SELF = 'store-path-guard.ts'
  * review, and a stale entry FAILS the last test in this file rather than rotting quietly.
  */
 const DEFERRED: Record<string, string> = {
-  // Owned by a concurrent lane (fix/dispatch-ledger-home-and-replay) — editing it here would collide.
-  'dispatch-ledger.ts': 'live in another lane; convert there',
+  // (dispatch-ledger.ts was deferred to fix/dispatch-ledger-home-and-replay; that lane landed in #575
+  //  which converted it to noeticaHome() — no longer hazardous, so removed from DEFERRED here.)
   // Not in the original sweep's write-capable set; found by this scanner because at-rest.appendJsonl
   // and the device/model/voice writers count as writes. Real, unfixed, and each needs its own review.
   'device-attestation.ts': 'device keypair dir — needs its own review of the key-rotation path',
