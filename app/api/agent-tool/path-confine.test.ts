@@ -123,3 +123,29 @@ test('realPathWithinRoot allows a symlink that stays INSIDE the root, resolved t
     path.join(fs.realpathSync(realDir), 'new.txt'),
   )
 })
+
+test('realPathWithinRoot REFUSES a component it cannot RESOLVE, instead of assuming it is absent', {
+  // Permission bits do not bind uid 0, so under root the fixture is not hostile and this would pass
+  // while proving nothing. Declare that rather than run a decorative assertion.
+  skip: process.platform === 'win32' || process.getuid?.() === 0 ? 'needs a non-root POSIX uid' : false,
+}, () => {
+  const { root } = freshRoot('eacces')
+  const opaque = path.join(root, 'opaque')
+  fs.mkdirSync(opaque)
+  fs.writeFileSync(path.join(opaque, 'inner.txt'), 'x')
+  const target = path.join(opaque, 'inner.txt')
+  fs.chmodSync(opaque, 0o000)
+  try {
+    // The fixture must genuinely be unresolvable, or the assertion below is vacuous.
+    assert.throws(
+      () => fs.realpathSync(target),
+      (err: unknown) => (err as NodeJS.ErrnoException).code === 'EACCES',
+      'the fixture must actually be unreadable',
+    )
+    // Walking up on EACCES would realpath the parent, re-attach `inner.txt` and hand back a path
+    // that was never validated. "I could not look" is not "it is not there".
+    assert.equal(realPathWithinRoot(target, root), null)
+  } finally {
+    fs.chmodSync(opaque, 0o700)
+  }
+})

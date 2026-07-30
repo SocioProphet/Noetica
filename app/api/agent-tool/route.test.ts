@@ -72,12 +72,31 @@ async function callTool(
   return { status: res.status, body: (await res.json()) as Record<string, string> }
 }
 
+/**
+ * Plant `~/escape` → `outside`, idempotently.
+ *
+ * Each test that needs the link creates it itself rather than inheriting it from whichever test
+ * happened to run first. Order-dependent setup fails in a particularly unhelpful way here: without
+ * the link, `~/escape/ABS.txt` is just an ordinary not-yet-existing path INSIDE the root, so the
+ * route legitimately allows it, `outside` stays empty, and the "nothing landed outside" assertions
+ * pass for entirely the wrong reason — leaving only the status assertion to notice. Selective runs
+ * (`--test-name-pattern`) hit exactly that.
+ */
+function ensureEscapeLink(): void {
+  const link = path.join(sandboxHome, 'escape')
+  // lstat, not exists: `existsSync` follows the link, so it reports false for a DANGLING one and we
+  // would then try to re-create a link that is already sitting there (EEXIST).
+  if (!fs.lstatSync(link, { throwIfNoEntry: false })) fs.symlinkSync(outside, link)
+  // The fixture must actually be a link to OUTSIDE the root, or every assertion below is vacuous.
+  assert.equal(fs.realpathSync(link), fs.realpathSync(outside), 'escape link does not point outside the root')
+}
+
 // ─── 1. the hole: a new file under a symlinked parent ────────────────────────
 
 test('write_file REFUSES a new file under a SYMLINKED PARENT, and nothing lands outside the root', {
   skip: NO_SYMLINKS,
 }, async () => {
-  fs.symlinkSync(outside, path.join(sandboxHome, 'escape'))
+  ensureEscapeLink()
   const escapeTarget = path.join(outside, 'PROOF.txt')
 
   // The precondition that made the old code fail open: the FULL path does not exist, so `existsSync`
@@ -102,6 +121,7 @@ test('write_file REFUSES a new file under a SYMLINKED PARENT, and nothing lands 
 
 test('write_file REFUSES the same escape spelled as an absolute path', { skip: NO_SYMLINKS }, async () => {
   // `~/` expansion is not the barrier; the absolute spelling must be refused identically.
+  ensureEscapeLink()
   const { status, body } = await callTool('write_file', {
     path: path.join(sandboxHome, 'escape', 'ABS.txt'),
     content: 'implanted',
@@ -113,6 +133,7 @@ test('write_file REFUSES the same escape spelled as an absolute path', { skip: N
 
 test('write_file REFUSES a new file SEVERAL segments below a symlinked parent', { skip: NO_SYMLINKS }, async () => {
   // mkdirSync({recursive:true}) would have created the whole chain inside the escape target.
+  ensureEscapeLink()
   const { status } = await callTool('write_file', { path: '~/escape/x/y/DEEP.txt', content: 'implanted' })
   assert.equal(fs.existsSync(path.join(outside, 'x')), false, 'a directory tree was created OUTSIDE the root')
   assert.deepEqual(fs.readdirSync(outside), [], 'something landed OUTSIDE the root')
