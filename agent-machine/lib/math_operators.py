@@ -429,6 +429,19 @@ def r_squared(xs: list, ys: list) -> float:
 
 
 if __name__ == '__main__':
+    # This block is a test suite, so `assert` is the right tool — but only when
+    # assertions are live. Under `python -O` every assert below is stripped and
+    # the block falls straight through to the final print, announcing
+    # "all math_operators unit tests PASS" having verified not one operator.
+    # This is the verified-operator library the compute posture routes to, so a
+    # false PASS here is a claim that the math was checked when it was not.
+    # Refuse to run rather than report a pass we did not earn.
+    if not __debug__:
+        raise SystemExit(
+            'math_operators self-test refuses to run under `python -O`: assertions are '
+            'stripped, so every check below would be skipped and the suite would still '
+            'print PASS. Re-run without -O (or set PYTHONOPTIMIZE=0).'
+        )
     assert permutation_index('(1,2,5,4)(2,3)', 5) == 24
     assert finite_field_zeros([1, 0, 1], 2) == [1]
     assert mod_pow(3, 47, 23) == 4
