@@ -79,14 +79,33 @@ export function authorityStatus(spiffeId: string): AuthorityStatus {
 }
 
 export interface GrantDecision { valid: boolean; authority_status: AuthorityStatus; trust: number; reason: string }
+
+/** TRUST_FLOOR is the estate MINIMUM, and `floor` is a ONE-WAY RATCHET on top of it: a caller may demand a
+ *  higher bar for a sensitive capability, never a lower one.
+ *
+ *  This is not defensive decoration. `floor` arrives from a remote peer over the wire
+ *  (/api/a2a/grant/validate, /api/a2a/peer/call), so a floor that could go DOWN lets the actor being judged
+ *  set its own passing grade — `{"floor":0}` turned a 0.40-scored peer into a 200 GRANT. And the previous
+ *  `floor: number = TRUST_FLOOR` default only fired on `undefined`, so every non-number JSON value
+ *  (null, "abc", [], {}, false, "") sailed past it and then compared FALSE in `r.score < floor` — a NaN or
+ *  coerced-0 comparison reading as "granted". Clamping HERE (not only at the route) is deliberate: it covers
+ *  federated-mcp.callPeerTool and any future caller, which is where the second live bypass was hiding. */
+function effectiveFloor(floor?: number): number {
+  // Non-finite / non-numeric is IGNORED, never coerced — a garbage floor must not weaken the gate.
+  const requested = typeof floor === 'number' && Number.isFinite(floor) ? floor : TRUST_FLOOR
+  return Math.max(TRUST_FLOOR, requested)
+}
+
 /** The federation gate: identity + behavioral trust → an allow/deny with the canonical authority status.
- *  `floor` lets a sensitive capability demand a higher bar. EGRESS (scope-d) is a SEPARATE, later gate. */
-export function checkActorGrant(spiffeId: string, capability: string, floor: number = TRUST_FLOOR): GrantDecision {
+ *  `floor` lets a sensitive capability demand a HIGHER bar (see effectiveFloor — it can only ever tighten).
+ *  EGRESS (scope-d) is a SEPARATE, later gate. */
+export function checkActorGrant(spiffeId: string, capability: string, floor?: number): GrantDecision {
   const r = load().get(spiffeId) ?? fresh(spiffeId)
   const status = authorityStatus(spiffeId)
+  const bar = effectiveFloor(floor)
   if (status === 'revoked') return { valid: false, authority_status: status, trust: r.score, reason: `${capability}: actor revoked (integrity) — restoration required` }
   if (status === 'suspended') return { valid: false, authority_status: status, trust: r.score, reason: `${capability}: actor suspended (threat) — not recovered` }
-  if (r.score < floor) return { valid: false, authority_status: status, trust: r.score, reason: `${capability}: trust ${r.score.toFixed(2)} below floor ${floor.toFixed(2)}` }
+  if (r.score < bar) return { valid: false, authority_status: status, trust: r.score, reason: `${capability}: trust ${r.score.toFixed(4)} below floor ${bar.toFixed(4)}` }
   return { valid: true, authority_status: status, trust: r.score, reason: 'granted' }
 }
 
