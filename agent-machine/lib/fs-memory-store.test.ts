@@ -53,6 +53,23 @@ test('fsMemoryStore refuses to open a store outside the memory root', () => {
   assert.throws(() => fsMemoryStore('../../../../etc'), /invalid memory namespace/)
 })
 
+test('a memory root at the filesystem root still admits its namespaces', () => {
+  // Regression: the containment check used to be `startsWith(confined + path.sep)`,
+  // which doubles the separator when the base IS a root ("/" + "/" = "//") and so
+  // rejected the legitimate "/self". A confinement check that fails closed on valid
+  // input is still broken. Same shape on Windows drive roots ("C:\" + "\").
+  const fsRoot = path.parse(process.cwd()).root
+  const saved = process.env.NOETICA_MEMORY_DIR
+  try {
+    process.env.NOETICA_MEMORY_DIR = fsRoot
+    assert.equal(memoryRoot('self'), path.join(fsRoot, 'self'))
+    assert.equal(memoryRoot(), path.resolve(fsRoot))
+    assert.throws(() => memoryRoot('..'), /invalid memory namespace/)
+  } finally {
+    process.env.NOETICA_MEMORY_DIR = saved
+  }
+})
+
 test('topic round-trips through .md frontmatter (links/score/provenance)', async () => {
   const s = fsMemoryStore()
   await s.writeTopic(doc('auth', 'Auth uses JWT.', { links: ['session'], score: 3, provenance: 'design', updatedAt: 5 }))

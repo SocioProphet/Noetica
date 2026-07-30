@@ -41,7 +41,14 @@ export function memoryRoot(namespace = 'default'): string {
   const confined = path.resolve(base)
   // Belt and braces: the charset above already excludes separators, but the
   // containment assertion is what actually states the guarantee.
-  if (root !== confined && !root.startsWith(confined + path.sep)) {
+  //
+  // Via path.relative rather than `startsWith(confined + path.sep)`: when the base
+  // IS a filesystem root, that prefix doubles the separator ("/" + "/" = "//") and
+  // the check rejects the legitimate "/self". NOETICA_MEMORY_DIR="/" is a strange
+  // thing to set, but a confinement check that fails closed on valid input is still
+  // a broken check, and the Windows drive-root case ("C:\" + "\") has the same shape.
+  const rel = path.relative(confined, root)
+  if (rel !== "" && (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel))) {
     throw new Error(`invalid memory namespace ${JSON.stringify(namespace)}: escapes the memory root`)
   }
   return root
