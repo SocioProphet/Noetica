@@ -8,7 +8,7 @@
     "build": "esbuild server.ts --bundle --platform=node --target=node18 --outfile=dist/server.js --external:node:* --external:child_process --external:vm --external:fs --external:path --external:http --external:url --external:crypto --external:stream --external:os --external:net",
     "start": "node dist/server.js",
     "start:dev": "tsx server.ts",
-    "test": "node --import tsx --test lib/*.test.ts",
+    "test": "node --import tsx --test --test-timeout=60000 lib/*.test.ts",
     "test:integration": "node --import tsx --test --test-force-exit --test-timeout=120000 scripts/integration.test.ts",
     "test:integration:rocks": "node --import tsx --test --test-force-exit --test-timeout=120000 scripts/integration-rocks.test.ts",
     "test:integration:fallback": "node --import tsx --test --test-force-exit --test-timeout=120000 scripts/integration-fallback.test.ts",
