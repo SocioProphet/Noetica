@@ -77,16 +77,24 @@ export function redactMany(texts: string[], policy?: RedactPolicy): { redacted: 
 import * as os from 'node:os'
 import * as path from 'node:path'
 import * as fs from 'node:fs'
-const POLICY_FILE = path.join(os.homedir(), '.noetica', 'privacy-policy.json')
+/** Where the user's redaction policy lives. Resolved on EVERY access — never frozen into a module-load
+ *  constant — and overridable with NOETICA_PRIVACY_POLICY. savePolicy() writes, and a full-suite run on
+ *  2026-07-29 was OBSERVED rewriting the operator's real ~/.noetica/privacy-policy.json. This one is
+ *  fail-open in the same way the A2A ledger is: the policy names what must NOT leave the machine, so
+ *  overwriting it with a fixture silently widens cloud egress. See lib/store-path-guard.ts. */
+export function _policyPath(): string {
+  return process.env['NOETICA_PRIVACY_POLICY'] || path.join(os.homedir(), '.noetica', 'privacy-policy.json')
+}
 let _policy: RedactPolicy | null | undefined
 export function loadPolicy(): RedactPolicy {
   if (_policy !== undefined) return _policy ?? {}
-  try { _policy = JSON.parse(fs.readFileSync(POLICY_FILE, 'utf8')) as RedactPolicy } catch { _policy = null }
+  try { _policy = JSON.parse(fs.readFileSync(_policyPath(), 'utf8')) as RedactPolicy } catch { _policy = null }
   return _policy ?? {}
 }
 export function savePolicy(p: RedactPolicy): void {
   _policy = { disabled: Array.isArray(p.disabled) ? p.disabled : [], terms: Array.isArray(p.terms) ? p.terms.filter(Boolean).slice(0, 200) : [] }
-  try { fs.mkdirSync(path.dirname(POLICY_FILE), { recursive: true }); fs.writeFileSync(POLICY_FILE, JSON.stringify(_policy)) } catch { /* best-effort */ }
+  const policyFile = _policyPath()
+  try { fs.mkdirSync(path.dirname(policyFile), { recursive: true }); fs.writeFileSync(policyFile, JSON.stringify(_policy)) } catch { /* best-effort */ }
 }
 
 /** Restore placeholders → original values (for un-redacting a vendor response). */

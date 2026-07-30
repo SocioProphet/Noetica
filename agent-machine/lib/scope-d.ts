@@ -65,7 +65,17 @@ interface EngagementPolicy {
 }
 
 const POLICY_PATH = process.env['SCOPED_ENGAGEMENT_POLICY'] ?? ''
-const EVENTS_PATH = process.env['SCOPED_EVENTS'] ?? path.join(os.homedir(), '.noetica', 'scope-d', 'events.jsonl')
+/** Where the egress audit chain lives. Resolved on EVERY access — never frozen into a module-load
+ *  constant — still overridable with the pre-existing SCOPED_EVENTS (name kept; only the timing changed).
+ *
+ *  Having an override was NOT enough, and this module is the clearest proof of it: the override was read
+ *  ONCE at import, so a test that sets SCOPED_EVENTS in a before() hook — after the import — silently
+ *  kept writing the operator's real chain. appendChained() appends the events file AND rewrites
+ *  chain-head/.sig beside it, so a stray run does not merely add rows, it re-anchors the tamper-evidence
+ *  head and strands every prior signature. See lib/store-path-guard.ts. */
+export function _eventsPath(): string {
+  return process.env['SCOPED_EVENTS'] ?? path.join(os.homedir(), '.noetica', 'scope-d', 'events.jsonl')
+}
 
 // Categories a cloud LLM egress is treated as, for targetBoundary matching.
 const CLOUD_CATEGORIES = ['third-party-services', 'public-internet', 'third_party', 'cloud']
@@ -343,14 +353,15 @@ export function emitScopedTelemetry(event: {
 // hashRecord links each event to the previous (prevHash → hash); the head is Ed25519-signed with the device
 // key so the log can't be silently edited/truncated. Was built (audit-chain.ts) but never wired.
 let _chainHead: string | null = null
-const headPath = () => path.join(path.dirname(EVENTS_PATH), 'chain-head')
+const headPath = () => path.join(path.dirname(_eventsPath()), 'chain-head')
 function loadHead(): string {
   if (_chainHead) return _chainHead
   try { _chainHead = fs.readFileSync(headPath(), 'utf8').trim() || undefined as never } catch { /* */ }
   return _chainHead ?? '0'.repeat(64)
 }
 function appendChained(record: Record<string, unknown>): void {
-  fs.mkdirSync(path.dirname(EVENTS_PATH), { recursive: true })
+  const eventsPath = _eventsPath()
+  fs.mkdirSync(path.dirname(eventsPath), { recursive: true })
   const { hashRecord } = require('./audit-chain.js') as typeof import('./audit-chain.js')
   const prevHash = loadHead()
   // Encrypt the record at rest, then chain the hash over the CIPHERTEXT unit `{ enc }` — so the audit trail is
@@ -366,7 +377,7 @@ function appendChained(record: Record<string, unknown>): void {
     }
   } catch { /* at-rest unavailable → plaintext unit, still chained */ }
   const hash = hashRecord(prevHash, unit)
-  fs.appendFileSync(EVENTS_PATH, `${JSON.stringify({ ...unit, prevHash, hash })}\n`)
+  fs.appendFileSync(eventsPath, `${JSON.stringify({ ...unit, prevHash, hash })}\n`)
   _chainHead = hash
   try { fs.writeFileSync(headPath(), hash) } catch { /* */ }
   try {
@@ -393,7 +404,7 @@ export async function verifyAuditChain(): Promise<{ entries: number; chainValid:
   let entries = 0, chainValid = true, firstBreakAt: number | undefined
   let prev = '0'.repeat(64), last = prev
   try {
-    const raw = fs.readFileSync(EVENTS_PATH, 'utf8').trim()
+    const raw = fs.readFileSync(_eventsPath(), 'utf8').trim()
     if (raw) for (const line of raw.split('\n')) {
       entries++
       let obj: Record<string, unknown>

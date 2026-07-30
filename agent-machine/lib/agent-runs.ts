@@ -45,13 +45,22 @@ export interface Routine {
   nextRun: number
 }
 
-const RUNS_PATH = path.join(os.homedir(), '.noetica', 'agent-runs.json')
-const ROUTINES_PATH = path.join(os.homedir(), '.noetica', 'routines.json')
+/** Where the run + routine stores live. Resolved on EVERY access — never frozen into module-load
+ *  constants — and overridable with NOETICA_AGENT_RUNS_STORE / NOETICA_ROUTINES_STORE. saveRuns() and
+ *  saveRoutines() write, so paths baked in at import time let `npm test` overwrite the operator's real
+ *  run history and scheduled routines. saveRuns() also truncates to the last MAX_RUNS, so a handful of
+ *  fixture runs is enough to age out the operator's genuine history. See lib/store-path-guard.ts. */
+export function _runsPath(): string {
+  return process.env['NOETICA_AGENT_RUNS_STORE'] || path.join(os.homedir(), '.noetica', 'agent-runs.json')
+}
+export function _routinesPath(): string {
+  return process.env['NOETICA_ROUTINES_STORE'] || path.join(os.homedir(), '.noetica', 'routines.json')
+}
 const MAX_RUNS = 200   // keep the store bounded — oldest runs age out
 
 // ── Runs ────────────────────────────────────────────────────────────────────
-export function loadRuns(): AgentRun[] { return readJson<AgentRun[]>(RUNS_PATH) ?? [] }
-function saveRuns(runs: AgentRun[]): void { writeJson(RUNS_PATH, runs.slice(-MAX_RUNS)) }
+export function loadRuns(): AgentRun[] { return readJson<AgentRun[]>(_runsPath()) ?? [] }
+function saveRuns(runs: AgentRun[]): void { writeJson(_runsPath(), runs.slice(-MAX_RUNS)) }
 export function listRuns(limit = 50): AgentRun[] { return loadRuns().slice(-limit).reverse() }
 export function getRun(id: string): AgentRun | null { return loadRuns().find((r) => r.id === id) ?? null }
 export function upsertRun(run: AgentRun): void {
@@ -63,8 +72,8 @@ export function upsertRun(run: AgentRun): void {
 }
 
 // ── Routines ──────────────────────────────────────────────────────────────────
-export function loadRoutines(): Routine[] { return readJson<Routine[]>(ROUTINES_PATH) ?? [] }
-function saveRoutines(rs: Routine[]): void { writeJson(ROUTINES_PATH, rs) }
+export function loadRoutines(): Routine[] { return readJson<Routine[]>(_routinesPath()) ?? [] }
+function saveRoutines(rs: Routine[]): void { writeJson(_routinesPath(), rs) }
 export function upsertRoutine(r: Routine): void {
   const rs = loadRoutines()
   const i = rs.findIndex((x) => x.id === r.id)

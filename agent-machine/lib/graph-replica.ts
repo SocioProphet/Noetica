@@ -50,15 +50,22 @@ export function applyReplicaToGraph(r: Replica, g: GraphLike): number {
 
 // ── singleton replica (persisted structure only; the CRDT log is rebuilt from capture on load) ──
 let _replica: Replica | null = null
-const FILE = path.join(os.homedir(), '.noetica', 'graph-replica.json')
+/** Where the persisted replica structure lives. Resolved on EVERY access — never frozen into a
+ *  module-load constant — and overridable with NOETICA_GRAPH_REPLICA_STORE. saveGraphReplica() writes
+ *  the WHOLE structure (not a delta), so one stray call from a fixture graph replaces the operator's
+ *  real node/edge set outright. See lib/store-path-guard.ts. */
+export function _replicaPath(): string {
+  return process.env['NOETICA_GRAPH_REPLICA_STORE'] || path.join(os.homedir(), '.noetica', 'graph-replica.json')
+}
 
 export function getGraphReplica(id?: string): Replica {
   if (_replica) return _replica
   const rid = id || process.env['GRAPH_SYNC_SOVEREIGN_ID'] || 'local'
   _replica = createReplica(rid)
   try {
-    if (fs.existsSync(FILE)) {
-      const saved = JSON.parse(fs.readFileSync(FILE, 'utf8')) as { nodes?: string[]; edges?: [string, string, string][] }
+    const file = _replicaPath()
+    if (fs.existsSync(file)) {
+      const saved = JSON.parse(fs.readFileSync(file, 'utf8')) as { nodes?: string[]; edges?: [string, string, string][] }
       for (const nid of saved.nodes ?? []) addNode(_replica, nid)
       for (const [f, l, t] of saved.edges ?? []) addEdge(_replica, f, l, t)
     }
@@ -69,8 +76,9 @@ export function getGraphReplica(id?: string): Replica {
 /** Persist the replica's present structure (compact; the op-log is regenerated on load). */
 export function saveGraphReplica(r: Replica): void {
   try {
-    fs.mkdirSync(path.dirname(FILE), { recursive: true })
+    const file = _replicaPath()
+    fs.mkdirSync(path.dirname(file), { recursive: true })
     const edges = presentEdgesWithLabel(r).map((e) => [e.from, e.label, e.to])
-    fs.writeFileSync(FILE, JSON.stringify({ nodes: presentNodes(r), edges }))
+    fs.writeFileSync(file, JSON.stringify({ nodes: presentNodes(r), edges }))
   } catch { /* fail-open */ }
 }

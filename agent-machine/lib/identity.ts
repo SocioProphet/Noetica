@@ -13,7 +13,15 @@ import * as path from 'node:path'
 
 export interface UserIdentity { displayName: string; email: string; slug: string }
 
-const IDENTITY_PATH = path.join(os.homedir(), '.noetica', 'identity.json')
+/** Where the identity file lives. Resolved on EVERY access — never frozen into a module-load constant —
+ *  and overridable with NOETICA_IDENTITY_STORE. See lib/store-path-guard.ts for why this shape is
+ *  mandatory: setUserIdentity() writes, so a path baked in at import time pointed `npm test` at the
+ *  operator's REAL ~/.noetica/identity.json. Late resolution also means an override applies to a module
+ *  that is already imported — a module-load constant made import ORDER load-bearing, which is how a
+ *  test-side `process.env.HOME` sandbox silently misses. */
+export function _identityPath(): string {
+  return process.env['NOETICA_IDENTITY_STORE'] || path.join(os.homedir(), '.noetica', 'identity.json')
+}
 
 // A fresh install is NOT anyone in particular until the user sets their profile.
 const DEFAULT_IDENTITY: UserIdentity = { displayName: 'You', email: '', slug: 'user' }
@@ -30,7 +38,7 @@ export function getUserIdentity(): UserIdentity {
   if (_cache) return _cache
   let id: UserIdentity = { ...DEFAULT_IDENTITY }
   try {
-    const raw = JSON.parse(fs.readFileSync(IDENTITY_PATH, 'utf8')) as Partial<UserIdentity>
+    const raw = JSON.parse(fs.readFileSync(_identityPath(), 'utf8')) as Partial<UserIdentity>
     id = {
       displayName: raw.displayName?.trim() || DEFAULT_IDENTITY.displayName,
       email: raw.email?.trim() || '',
@@ -55,8 +63,9 @@ export function setUserIdentity(partial: Partial<UserIdentity>): UserIdentity {
     slug: partial.slug?.trim() || slugify(displayName),
   }
   try {
-    fs.mkdirSync(path.dirname(IDENTITY_PATH), { recursive: true })
-    fs.writeFileSync(IDENTITY_PATH, JSON.stringify(next, null, 2))
+    const p = _identityPath()
+    fs.mkdirSync(path.dirname(p), { recursive: true })
+    fs.writeFileSync(p, JSON.stringify(next, null, 2))
   } catch { /* best-effort */ }
   _cache = next
   return next
