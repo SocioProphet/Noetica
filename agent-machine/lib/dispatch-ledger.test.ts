@@ -37,12 +37,16 @@ const entries = (home: string): DispatchEntry[] =>
   fs.readFileSync(logPath(home), 'utf8').trim().split('\n').filter(Boolean)
     .map((l) => JSON.parse(l) as DispatchEntry)
 
-/** Re-seal an entry exactly as recordDispatch does: hash every field except the
- *  attestation itself and the evidence tier. A forger with this function can rewrite
- *  history so the hash chain still verifies — which is the point of using it below. */
+/** Re-seal an entry exactly as recordDispatch does, mirroring the module's version-aware
+ *  body rule: v2 seals include evidenceTier, v1 excluded it. A forger with this function can
+ *  rewrite history so the hash chain still verifies — which is the point of using it below,
+ *  since it forces the product and tier checks to earn their place independently. */
+function bodyForTest(e: DispatchEntry): unknown {
+  const { attestation: _a, evidenceTier, sealVersion, ...rest } = e
+  return sealVersion === undefined ? rest : { ...rest, evidenceTier, sealVersion }
+}
 function reseal(e: DispatchEntry): DispatchEntry {
-  const { attestation: _a, evidenceTier: _t, ...body } = e
-  return { ...e, attestation: ledgerHash(body) }
+  return { ...e, attestation: ledgerHash(bodyForTest(e)) }
 }
 
 const H = (s: string): string => contentHash(s)
@@ -215,8 +219,7 @@ test('a re-sealed entry whose verdict does not follow from its factors is still 
   fs.writeFileSync(logPath(home), JSON.stringify(forged) + '\n')
 
   // Confirm the forgery defeats the hash chain, so the next assertion is not vacuous.
-  const { attestation: _a, evidenceTier: _t, ...body } = forged
-  assert.equal(ledgerHash(body), forged.attestation, 'the forged seal is self-consistent')
+  assert.equal(ledgerHash(bodyForTest(forged)), forged.attestation, 'the forged seal is self-consistent')
   assert.equal(forged.prev, 'genesis', 'and no prev-link is disturbed')
 
   const r = replayLedger()
@@ -232,7 +235,7 @@ test('entries predating the derived verdict are skipped, not failed', () => {
   const home = freshHome('legacy')
   const e = lawful()
   const { law: _l, evidence: _e, ...legacy } = e
-  fs.writeFileSync(logPath(home), JSON.stringify(reseal(legacy as DispatchEntry)) + '\n')
+  fs.writeFileSync(logPath(home), JSON.stringify(reseal(legacy as unknown as DispatchEntry)) + '\n')
   assert.deepEqual(replayLedger(), { ok: true, count: 1 })
 })
 
@@ -286,4 +289,126 @@ test('contentHash is a SEAM-C digest: deterministic, sensitive, canonically pref
   assert.equal(contentHash('abc'), contentHash('abc'), 'deterministic')
   assert.notEqual(contentHash('abc'), contentHash('abd'), 'sensitive')
   assert.match(contentHash('abc'), /^sha256:[0-9a-f]{64}$/, 'and shaped so evidenceVerdict accepts it')
+})
+
+// ── cross-language conformance against the estate's shared vectors ──────────────
+// The vectors live in sourceos-spec and are consumed by BOTH implementations: this one and
+// prophet-platform's libs/python/lawful-verdict. Two implementations that each pass their
+// own unit tests can still disagree with each other; only a shared vector set makes that
+// detectable. Truth = Law × Evidence is estate governance, not a Noetica feature — Noetica
+// is one conformant emitter, and this file is where it proves it.
+//
+// If sourceos-spec is not checked out these tests are SKIPPED WITH A LOUD REASON. They must
+// never silently pass: a conformance suite reporting green when it never loaded the vectors
+// converts an unknown into a false assurance, which is the defect class this whole change
+// is about.
+
+const VECTOR_CANDIDATES = [
+  path.join(os.homedir(), 'dev', 'sourceos-spec', 'conformance', 'lawful-verdict-vectors.json'),
+  path.resolve(process.cwd(), '..', '..', 'sourceos-spec', 'conformance', 'lawful-verdict-vectors.json'),
+]
+
+interface Vectors {
+  product: { table: { law: Verdict; evidence: Verdict; verdict: Verdict }[]
+             mustNotHold: { law: Verdict; evidence: Verdict; verdict: Verdict; why: string }[] }
+  lawFactor: { barCleared: boolean; residual: string[]; expect: Verdict; why: string }[]
+  evidenceFactor: { requestHash: string; answerHash: string; grounded: boolean; refuted?: boolean; expect: Verdict; why: string }[]
+  tier: { lawSource: string; evidenceSource: string; expect: 'T1' | 'T2'; why: string }[]
+}
+
+function loadVectors(t: { skip: (m?: string) => void }): Vectors | null {
+  for (const p of VECTOR_CANDIDATES) if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8')) as Vectors
+  t.skip(`sourceos-spec conformance vectors not found — cross-language agreement is UNVERIFIED in this run. Looked in: ${VECTOR_CANDIDATES.join(', ')}`)
+  return null
+}
+
+test('conformance: the product table matches the shared vectors exactly', (t) => {
+  const v = loadVectors(t); if (!v) return
+  assert.equal(v.product.table.length, 9, 'the product is total on a 3-element chain')
+  for (const row of v.product.table) {
+    assert.equal(truthProduct(row.law, row.evidence), row.verdict,
+      `${row.law} × ${row.evidence} must be ${row.verdict}`)
+  }
+})
+
+test('conformance: the sign-multiplication trap is pinned by the shared vectors', (t) => {
+  const v = loadVectors(t); if (!v) return
+  assert.ok(v.product.mustNotHold.length > 0, 'the vectors must carry the NEG × NEG counter-case')
+  for (const bad of v.product.mustNotHold) {
+    assert.notEqual(truthProduct(bad.law, bad.evidence), bad.verdict, bad.why)
+  }
+})
+
+test('conformance: the Law factor matches the shared vectors', (t) => {
+  const v = loadVectors(t); if (!v) return
+  for (const row of v.lawFactor) {
+    assert.equal(lawVerdict({ barCleared: row.barCleared, residual: row.residual }), row.expect, row.why)
+  }
+})
+
+test('conformance: the Evidence factor matches the shared vectors', (t) => {
+  const v = loadVectors(t); if (!v) return
+  for (const row of v.evidenceFactor) {
+    assert.equal(evidenceVerdict({
+      requestHash: row.requestHash, answerHash: row.answerHash,
+      grounded: row.grounded, ...(row.refuted === undefined ? {} : { refuted: row.refuted }),
+    }), row.expect, row.why)
+  }
+})
+
+test('conformance: the estate\'s sealed example receipt verifies under THIS canonicaliser', (t) => {
+  // The cross-language seal test. sourceos-spec's example was sealed in one language and is
+  // re-verified here; if canonical JSON disagreed by key order or whitespace this fails,
+  // which is exactly what must be caught, since a receipt sealed by prophet-workspace has
+  // to verify inside Noetica and vice versa.
+  const candidates = VECTOR_CANDIDATES.map((p) =>
+    path.join(path.dirname(path.dirname(p)), 'examples', 'lawful-dispatch-receipt.example.json'))
+  const found = candidates.find((p) => fs.existsSync(p))
+  if (!found) { t.skip('sourceos-spec example receipt not found — seal agreement UNVERIFIED'); return }
+
+  const receipt = JSON.parse(fs.readFileSync(found, 'utf8')) as Record<string, unknown>
+  const sealObj = receipt['seal'] as Record<string, unknown>
+  const recorded = sealObj['attestation'] as string
+  delete sealObj['attestation']
+  assert.equal(ledgerHash(receipt), recorded, 'canonical-JSON seal must agree across languages')
+})
+
+// ── the tier is derived and sealed ──────────────────────────────────────────────
+
+test('evidenceTier is DERIVED, not the literal T1 it used to be', () => {
+  freshHome('tier')
+  assert.equal(lawful().evidenceTier, 'T1', 'well-formed digests ⇒ instrumented')
+  assert.equal(lawful({ answerHash: '' }).evidenceTier, 'T2', 'nothing captured is not instrumented')
+  assert.equal(lawful({ requestHash: 'deadbeef' }).evidenceTier, 'T2', 'a malformed digest instruments nothing')
+})
+
+test('a forged tier upgrade is rejected even when the seal is recomputed', () => {
+  // evidenceTier is inside the v2 seal, so editing it breaks the attestation; and even a
+  // re-sealed forgery is caught by re-deriving the tier from the digests.
+  const home = freshHome('tier-forge')
+  const real = lawful({ answerHash: '' })
+  assert.equal(real.evidenceTier, 'T2')
+
+  const forged = reseal({ ...real, evidenceTier: 'T1' })
+  fs.writeFileSync(logPath(home), JSON.stringify(forged) + '\n')
+  const { attestation: _a, ...b } = forged
+  assert.equal(ledgerHash(bodyForTest(forged)), forged.attestation, 'the forged seal is self-consistent')
+  void b
+
+  const r = replayLedger()
+  assert.equal(r.ok, false, 'T1 without digests to instrument must be rejected')
+  assert.match(r.reason!, /claims T1 without well-formed/)
+})
+
+test('v1 entries stay verifiable: the seal version selects the hashed body', () => {
+  // Without the version branch, every pre-existing entry would recompute WITH evidenceTier
+  // and report as tampered — a checker crying wolf on all of history.
+  const home = freshHome('v1')
+  const e = lawful()
+  const { sealVersion: _sv, attestation: _a2, ...v1rest } = e
+  const v1 = { ...v1rest, evidenceTier: 'T1' as const }
+  const { evidenceTier: _et, ...v1body } = v1
+  const legacy = { ...v1, attestation: ledgerHash(v1body) }   // v1 rule: tier outside the seal
+  fs.writeFileSync(logPath(home), JSON.stringify(legacy) + '\n')
+  assert.deepEqual(replayLedger(), { ok: true, count: 1 })
 })
