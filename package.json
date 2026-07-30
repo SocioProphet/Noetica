@@ -24,7 +24,8 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit && npm --prefix agent-machine run typecheck",
-    "test": "cd agent-machine && npm test",
+    "test": "npm run test:app && cd agent-machine && npm test",
+    "test:app": "test -n \"$(find app -name '*.test.ts')\" && find app -name '*.test.ts' -exec node --import tsx --test {} +",
     "icons:generate": "node scripts/generate-icons.mjs",
     "packaging:validate": "npm run icons:generate && node scripts/validate-packaging-metadata.mjs",
     "sourceos:events:export": "node scripts/export-sourceos-interaction-events.mjs",
@@ -89,6 +90,7 @@
     "husky": "9.1.7",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
+    "tsx": "4.23.1",
     "typescript": "^5.7.2"
   }
 }
