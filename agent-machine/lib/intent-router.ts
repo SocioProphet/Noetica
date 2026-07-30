@@ -95,6 +95,12 @@ export function classifyIntent(text: string, ctx: { hasDoc?: boolean } = {}): In
 }
 
 /** Look up an intent definition by name (for the embedding classifier's label). */
+/** Every intent in the canon, in id order. Exposed so the 23x6 action grid can be DERIVED
+ *  from this file rather than authored alongside it — a hand-maintained copy of the row set
+ *  would drift the moment an intent was added here, and the grid's whole value is that it
+ *  cannot disagree with the canon. */
+export function allIntents(): readonly Intent[] { return INTENTS }
+
 export function intentByName(name: string): Intent | undefined {
   return INTENTS.find((i) => i.name === name)
 }
