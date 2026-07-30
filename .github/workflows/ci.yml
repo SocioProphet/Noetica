@@ -36,6 +36,21 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # The top-level lib/**/*.test.ts files were executed by NO job. Root `npm test` is
+      # `cd agent-machine && npm test`, and #589's `test:app` is scoped to app/ — so 58
+      # assertions across 11 files, covering the autonomy ladder, the spend ceiling, the
+      # egress audit, the A2A grant check and the chat secret scanner, were being written,
+      # reviewed and merged without ever running. A test that nothing executes is a comment.
+      #
+      # A step in an already-required job rather than a job of its own, on purpose: branch
+      # protection pins required contexts by NAME ("app static build", "agent-machine build
+      # and test"), so a new job would report but could not block until someone edited
+      # protection — declared-unenforced, which is the shape of defect this step exists to
+      # end. Placed before the static build so a logic failure reports in seconds rather
+      # than after the Next.js compile.
+      - name: Unit tests (lib/ — governance, chat, a2a, security)
+        run: npm run test:lib
+
       - name: Static build
         run: npm run build:static
 

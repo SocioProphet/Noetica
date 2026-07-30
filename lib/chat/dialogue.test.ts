@@ -3,7 +3,21 @@ import assert from 'node:assert/strict'
 import { matchDialogue } from './dialogue'
 
 // matchDialogue returns null when the deterministic layer should NOT handle it (→ falls through to the model).
-const is8ball = (s: string) => /🎱/.test(matchDialogue(s)?.reply ?? '')
+//
+// This probe used to be `/🎱/.test(...)`, looking for an emoji that dialogue.ts has never
+// emitted — its decision replies are plain text. So `is8ball` answered false for EVERY input:
+// the two "must not be 8-balled" tests below passed vacuously and would have kept passing if
+// the 8-ball had hijacked every message on the surface, which is the exact live misfire they
+// were written to guard. Probe for what the implementation actually returns instead: the
+// closed set of decision replies. Anything else — including null — means it did not fire.
+const EIGHT_BALL_REPLIES = new Set([
+  'Yes.', 'No.', 'Maybe — your call.', 'Signs point to yes.',
+  'I wouldn’t count on it.', 'Ask again later.', 'Definitely.', 'Better not tell you now.',
+])
+const is8ball = (s: string) => {
+  const reply = matchDialogue(s)?.reply
+  return reply !== undefined && EIGHT_BALL_REPLIES.has(reply)
+}
 
 test('a genuine "will it…" question is NOT hijacked by the magic-8-ball', () => {
   // The exact phrasing that mis-fired in the live app.
