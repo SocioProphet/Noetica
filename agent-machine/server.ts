@@ -7112,7 +7112,17 @@ const server = http.createServer((req, res) => {
     setCORSHeaders(res)
     void (async () => {
       try {
-        const store = fsMemoryStore(url.searchParams.get('namespace') || 'default')
+        // The namespace is caller-supplied. memoryRoot() confines it to a single
+        // segment under the memory root; a rejection is the caller's bad request,
+        // not a server fault, and its message must not echo host paths back out.
+        let store
+        try {
+          store = fsMemoryStore(url.searchParams.get('namespace') || 'default')
+        } catch {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'invalid namespace: expected a single path segment' }))
+          return
+        }
         const names = await store.listTopics()
         const docs: BandedDoc[] = []
         for (const n of names) { const t = await store.readTopic(n); if (t) docs.push(t as BandedDoc) }
