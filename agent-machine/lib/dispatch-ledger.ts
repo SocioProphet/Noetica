@@ -51,7 +51,18 @@ const RANK: Record<Verdict, 0 | 1 | 2> = { NEG: 0, ZERO: 1, POS: 2 }
 const BY_RANK: readonly Verdict[] = ['NEG', 'ZERO', 'POS']
 
 export function truthProduct(law: Verdict, evidence: Verdict): Verdict {
-  return BY_RANK[Math.min(RANK[law], RANK[evidence])]!
+  // Throws rather than returning undefined on an unrecognised factor. TypeScript cannot
+  // stop a legacy JSONL entry — which carries no `law` at all — reaching here through an
+  // `as` cast or a loosely typed read, and the previous version silently produced
+  // `undefined`: an unverdict that compares unequal to everything and would read as a
+  // mismatch, or worse be written back. A governance primitive must fail loudly.
+  const l = RANK[law], e = RANK[evidence]
+  if (l === undefined || e === undefined) {
+    throw new TypeError(
+      `truthProduct: not a verdict (law=${JSON.stringify(law)}, evidence=${JSON.stringify(evidence)}). ` +
+      `Legacy ledger entries carry no factors — guard with 'law !== undefined' before multiplying.`)
+  }
+  return BY_RANK[Math.min(l, e)]!
 }
 
 const SEALED = /^sha256:[0-9a-f]{64}$/
@@ -217,7 +228,17 @@ export function replayLedger(): ReplayResult {
 /** SEAM-C convenience: content hash of a string (request/answer bodies). */
 export function contentHash(s: string): string { return ledgerHash(s) }
 
+/** What is actually ON DISK, which is not what `recordDispatch` returns. Entries written
+ *  before the derived verdict carry no `law`/`evidence`/`sealVersion`, so a reader typed as
+ *  `DispatchEntry` was being handed a guarantee the data does not honour — and
+ *  `truthProduct(e.law, e.evidence)` on such an entry passed the type checker while
+ *  multiplying undefined. Optional here so consumers are FORCED to handle legacy rows;
+ *  `replayLedger` already does, by skipping them as unverifiable rather than tampered. */
+export type StoredDispatchEntry =
+  Omit<DispatchEntry, 'law' | 'evidence' | 'sealVersion'>
+  & Partial<Pick<DispatchEntry, 'law' | 'evidence' | 'sealVersion'>>
+
 /** Read recorded dispatch entries (most-recent `limit`) — e.g. for energy accounting. */
-export function readDispatches(limit = 10_000): DispatchEntry[] {
-  return readJsonl<DispatchEntry>(ledgerLog(), { limit })
+export function readDispatches(limit = 10_000): StoredDispatchEntry[] {
+  return readJsonl<StoredDispatchEntry>(ledgerLog(), { limit })
 }

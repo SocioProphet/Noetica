@@ -20,6 +20,7 @@ import {
   truthProduct, lawVerdict, evidenceVerdict, type Verdict, type DispatchEntry,
 } from './dispatch-ledger.js'
 import { ledgerHash } from './verb-sort.js'
+import { createHash } from 'node:crypto'
 
 const logPath = (home = process.env['NOETICA_HOME']!): string =>
   path.join(home, 'ledger', 'dispatch.jsonl')
@@ -149,6 +150,10 @@ test('recordDispatch derives the verdict from its factors; a caller cannot asser
   // `verdict: 'POS'` literally on every dispatch, so 100% of recorded history read as
   // true by construction. Every verdict above is now a consequence of the record.
   for (const e of readDispatches()) {
+    // The guard is not ceremony: readDispatches is typed to admit legacy rows with no
+    // factors, and tsc rejected this line without it. That is the honest type earning its
+    // keep — the previous signature let the same call compile while multiplying undefined.
+    assert.ok(e.law !== undefined && e.evidence !== undefined, `seq ${e.seq} is a v2 entry`)
     assert.equal(e.verdict, truthProduct(e.law, e.evidence), `seq ${e.seq} verdict must follow`)
   }
 })
@@ -411,4 +416,89 @@ test('v1 entries stay verifiable: the seal version selects the hashed body', () 
   const legacy = { ...v1, attestation: ledgerHash(v1body) }   // v1 rule: tier outside the seal
   fs.writeFileSync(logPath(home), JSON.stringify(legacy) + '\n')
   assert.deepEqual(replayLedger(), { ok: true, count: 1 })
+})
+
+// ── adversarial: the primitive must fail loudly, and the read type must not lie ──
+
+test('truthProduct throws on a non-verdict instead of returning undefined', () => {
+  // A legacy JSONL row carries no `law`. The previous version silently produced `undefined`:
+  // an unverdict that compares unequal to everything, and could be written back into a
+  // ledger. TypeScript cannot prevent it reaching here through a cast or an untyped read, so
+  // the primitive guards itself.
+  for (const [l, e] of [[undefined, 'POS'], ['POS', undefined], [undefined, undefined], ['MAYBE', 'POS']]) {
+    assert.throws(() => truthProduct(l as Verdict, e as Verdict), /not a verdict/,
+      `truthProduct(${JSON.stringify(l)}, ${JSON.stringify(e)}) must throw`)
+  }
+  assert.equal(truthProduct('POS', 'POS'), 'POS', 'and still works on real input')
+})
+
+test('readDispatches types legacy rows honestly, and replay skips them', () => {
+  // The type used to claim law/evidence were always present. They are not, and a consumer
+  // trusting that claim would multiply undefined — which now throws, so the type has to be
+  // right or the code cannot compile against it.
+  const home = freshHome('stored')
+  const modern = lawful()                       // v2: carries factors and a sealed tier
+  const { law: _l, evidence: _ev, sealVersion: _sv, attestation: _a, ...rest } = modern
+  // A correctly chained v1 successor: seq 1, prev = the v2 entry's attestation, and sealed
+  // under the v1 rule (evidenceTier OUTSIDE the body). Chaining it properly matters — an
+  // unchained row would fail on the prev-link and the legacy path would never be reached,
+  // making this test pass for the wrong reason.
+  const legacyBody = { ...rest, seq: 1, prev: modern.attestation, evidenceTier: 'T1' as const }
+  const { evidenceTier: _et, ...v1Sealed } = legacyBody
+  fs.appendFileSync(logPath(home),
+    JSON.stringify({ ...legacyBody, attestation: ledgerHash(v1Sealed) }) + '\n')
+
+  const rows = readDispatches()
+  assert.equal(rows.length, 2, 'a real ledger is MIXED: v2 entries and legacy ones')
+  assert.notEqual(rows[0]!.law, undefined, 'the v2 row has factors')
+  assert.equal(rows[1]!.law, undefined, 'the legacy row genuinely has none')
+
+  // The honest type forces this guard; without it truthProduct throws on the legacy row.
+  const verdicts = rows.map((r) => (r.law !== undefined && r.evidence !== undefined)
+    ? truthProduct(r.law, r.evidence) : null)
+  assert.deepEqual(verdicts, ['POS', null], 'derived where derivable, null where not — never guessed')
+  assert.deepEqual(replayLedger(), { ok: true, count: 2 },
+    'replay verifies BOTH seals across the version boundary, checking the product only where it exists')
+})
+
+// ── the SEAL functions, pinned by the shared vectors ────────────────────────────
+// Added after review found TWO cross-language divergences that every receipt-shaped test
+// missed. The schema only checks that a digest is WELL-FORMED, and a wrong digest is still
+// well-formed, so nothing above could detect that the digest function itself disagreed.
+
+interface SealVectors {
+  canonicalJson: { cases: { input: unknown; expected: string; why?: string }[] }
+  contentHash: { cases: { input: string; expected: string; why?: string }[] }
+}
+
+test('conformance: canonicalJson matches the shared vectors, including non-ASCII', (t) => {
+  const v = loadVectors(t) as unknown as SealVectors | null; if (!v) return
+  const cases = v.canonicalJson.cases
+  assert.ok(cases.some((c) => /[^\x00-\x7F]/.test(JSON.stringify(c.input))),
+    'vectors must include a non-ASCII case or this cannot catch the ensure_ascii trap')
+  for (const c of cases) {
+    // ledgerHash canonicalises then hashes; compare the canonical FORM by re-deriving the
+    // digest of the expected string, which is the only externally visible handle on it.
+    assert.equal(ledgerHash(c.input), 'sha256:' + createHash('sha256').update(c.expected).digest('hex'),
+      `${c.why ?? ''}: canonical form must be ${c.expected}`)
+  }
+})
+
+test('conformance: contentHash matches the shared vectors', (t) => {
+  const v = loadVectors(t) as unknown as SealVectors | null; if (!v) return
+  for (const c of v.contentHash.cases) {
+    assert.equal(contentHash(c.input), c.expected,
+      `${c.why ?? ''}: contentHash(${JSON.stringify(c.input)})`)
+  }
+})
+
+test('a dispatch carrying non-ASCII content seals reproducibly', () => {
+  // The divergence's real consequence: a receipt that would not verify in another language
+  // the moment it carried an accented character, CJK text or an emoji.
+  const home = freshHome('non-ascii')
+  const e = lawful({ requestHash: H('qué es la capital de España?'), answerHash: H('Madrid — 中文 🔒') })
+  assert.equal(e.verdict, 'POS')
+  assert.deepEqual(replayLedger(), { ok: true, count: 1 }, 'and it replays')
+  assert.ok(!JSON.stringify(entries(home)[0]).includes('\\u00'),
+    'the persisted form carries raw non-ASCII, not \\uXXXX escapes')
 })
