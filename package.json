@@ -45,6 +45,7 @@
     "cli": "node cli/noetica.mjs",
     "cli:doctor": "node cli/noetica.mjs doctor --json",
     "cli:smoke": "node cli/noetica.mjs smoke --dry-run",
+    "cli:test": "node --test cli/*.test.mjs",
     "agent-machine": "cd agent-machine && npx tsx server.ts",
     "dev:app": "bash scripts/dev-app.sh",
     "agent-machine:install": "cd agent-machine && npm install",

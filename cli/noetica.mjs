@@ -7,10 +7,12 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   CONFIG_PATH,
+  PRODUCTION_BUILD_MARKER,
   defaultConfig,
   localUrl,
   providerStatuses,
   readConfig,
+  resolveStartServer,
   writeDefaultConfig,
 } from './noetica-config.mjs'
 import { service as serviceCommand } from './noetica-service.mjs'
@@ -217,16 +219,27 @@ async function start(args = []) {
     process.exit(1)
   }
 
+  // `noetica start` is the operational service: serve the production build when one
+  // exists (next start), else fall back to the dev server with a visible warning.
+  // Previously this always ran `npm run dev`, making `start` identical to `dev`.
+  const productionBuildExists = existsSync(join(repoRoot, PRODUCTION_BUILD_MARKER))
+  const { npmScript, server } = resolveStartServer(productionBuildExists)
+
   console.log(JSON.stringify({
     kind: 'NoeticaStart',
     mode: 'foreground_operational_service',
+    server,
+    productionBuild: productionBuildExists,
     url: localUrl(config),
     configPath: configState.path,
+    ...(server === 'development'
+      ? { hint: `No production build (${PRODUCTION_BUILD_MARKER} missing) — running the dev server. Run \`npm run build\` for the operational production server.` }
+      : {}),
     productHint: 'Use noetica app for desktop, noetica web for browser fallback, and noetica dev for developer-only Next output.',
     nextArgs,
   }, null, 2))
 
-  await run('npm', ['run', 'dev', '--', ...nextArgs], { cwd: repoRoot })
+  await run('npm', ['run', npmScript, '--', ...nextArgs], { cwd: repoRoot })
 }
 
 async function openNoetica() {

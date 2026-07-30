@@ -37,6 +37,8 @@ jobs:
         run: npm run cli:doctor
       - name: CLI smoke
         run: npm run cli:smoke
+      - name: CLI unit tests
+        run: npm run cli:test
       - name: SourceOS interaction export path check
         run: npm run sourceos:events:path:check
       - name: SourceOS interaction artifact export

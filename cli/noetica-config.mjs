@@ -214,3 +214,23 @@ export function localUrl(config) {
   const port = config?.server?.port ?? 3737
   return `http://${host}:${port}`
 }
+
+/**
+ * Resolve which Next.js server `noetica start` should run.
+ *
+ * `noetica start` is the OPERATIONAL service command; `noetica dev` is the developer
+ * dev server. They are meant to differ — an operational start should serve the
+ * PRODUCTION build (`next start`) so it gets production performance and behaviour.
+ * `next start` requires a prior `next build`, so when no production build is present
+ * (`.next/BUILD_ID` missing) we fall back to the dev server with a warning rather than
+ * crash. Pure on the boolean so the decision is unit-testable; the filesystem probe
+ * stays at the call site.
+ */
+export function resolveStartServer(productionBuildExists) {
+  return productionBuildExists
+    ? { npmScript: 'start', server: 'production' }
+    : { npmScript: 'dev', server: 'development' }
+}
+
+/** Path, relative to the repo root, of Next's production-build marker. */
+export const PRODUCTION_BUILD_MARKER = '.next/BUILD_ID'
