@@ -12,6 +12,10 @@ jobs:
   app:
     name: app static build
     runs-on: ubuntu-latest
+    # Without this a wedged step burns GitHub's 6-hour default and then reports
+    # conclusion=cancelled — a required check that is neither green nor red, so it
+    # silently stops gating instead of failing. Bound it so a stall is a RED check.
+    timeout-minutes: 20
     env:
       HUSKY: 0
       NOETICA_STATIC_EXPORT: 1
@@ -45,6 +49,8 @@ jobs:
   agent-machine:
     name: agent-machine build and test
     runs-on: ubuntu-latest
+    # See the `app` job — a hang must fail the required check, not expire as "cancelled".
+    timeout-minutes: 25
     env:
       HUSKY: 0
     steps:
@@ -70,9 +76,13 @@ jobs:
         working-directory: agent-machine
         run: npm run build
 
+      # `timeout` (coreutils) makes a wedged suite exit 124 — a FAILED step — rather than
+      # sitting until the job limit, where the conclusion is "cancelled" and the required
+      # check reports no verdict at all. The suite runs in well under a minute; 15m is pure
+      # headroom, so this only ever fires on a genuine hang.
       - name: Test agent-machine
         working-directory: agent-machine
-        run: npm test
+        run: timeout --kill-after=30s 15m npm test
 
       # The verified-operator library is the ground truth the compute lane trusts blindly; a wrong
       # operator = confident wrong answers (the moat inverts). Guard it in CI — point tests + property
