@@ -12,9 +12,12 @@ jobs:
   app:
     name: app static build
     runs-on: ubuntu-latest
-    # Without this a wedged step burns GitHub's 6-hour default and then reports
-    # conclusion=cancelled — a required check that is neither green nor red, so it
-    # silently stops gating instead of failing. Bound it so a stall is a RED check.
+    # A job-level cap is a BACKSTOP, not a red verdict: when a job exceeds
+    # `timeout-minutes` Actions concludes it `cancelled`, which is exactly the
+    # neither-green-nor-red non-verdict this PR exists to remove. Measured here —
+    # run 30461822497 hit the 360-minute default and reported conclusion=cancelled.
+    # So this only bounds the SPEND; the red comes from the step-level `timeout`
+    # wrappers below, which exit 124 and fail the step for real.
     timeout-minutes: 20
     env:
       HUSKY: 0
@@ -37,19 +40,24 @@ jobs:
           # node_modules, where they are absent, and fails with TS2307.
           npm --prefix agent-machine ci
 
+      # Same reasoning as the agent-machine suite: a wedged build must exit 124 (a FAILED
+      # step) rather than sit until the job cap, where the conclusion is `cancelled` and
+      # this required check reports no verdict at all. These steps take ~1-2 minutes, so
+      # 15m is pure headroom and only ever fires on a genuine hang.
       - name: Typecheck
-        run: npm run typecheck
+        run: timeout --verbose --kill-after=30s 15m npm run typecheck
 
       - name: Static build
-        run: npm run build:static
+        run: timeout --verbose --kill-after=30s 15m npm run build:static
 
       - name: Static export probe
-        run: npm run build:static:probe
+        run: timeout --verbose --kill-after=30s 15m npm run build:static:probe
 
   agent-machine:
     name: agent-machine build and test
     runs-on: ubuntu-latest
-    # See the `app` job — a hang must fail the required check, not expire as "cancelled".
+    # See the `app` job — a backstop on spend only. `cancelled` is not a verdict; the
+    # step-level `timeout` on the suite below is what turns a hang into a RED check.
     timeout-minutes: 25
     env:
       HUSKY: 0
@@ -79,10 +87,11 @@ jobs:
       # `timeout` (coreutils) makes a wedged suite exit 124 — a FAILED step — rather than
       # sitting until the job limit, where the conclusion is "cancelled" and the required
       # check reports no verdict at all. The suite runs in well under a minute; 15m is pure
-      # headroom, so this only ever fires on a genuine hang.
+      # headroom, so this only ever fires on a genuine hang. `--verbose` makes the kill
+      # say so on stderr, so a 124 is never mistaken for an ordinary test failure.
       - name: Test agent-machine
         working-directory: agent-machine
-        run: timeout --kill-after=30s 15m npm test
+        run: timeout --verbose --kill-after=30s 15m npm test
 
       # The verified-operator library is the ground truth the compute lane trusts blindly; a wrong
       # operator = confident wrong answers (the moat inverts). Guard it in CI — point tests + property
