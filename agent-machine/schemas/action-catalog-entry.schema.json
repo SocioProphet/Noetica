@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.socioprophet.io/noetica/action-catalog-entry.schema.json",
+  "title": "ActionCatalogEntry",
+  "description": "One typed action the agent may take. Apple's AppIntentSchemas.sqlite ships a queryable table of 203 intents; this is the equivalent for the Noetica agent — declared once, exported as data, validated by a checker so a drift between the TypeScript catalogue and the wire is caught in CI rather than in production. Each entry names the underlying tool, its parameters (typed by the ValueType algebra where possible), whether the effect is reversible, and whether a consent record is required before execution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "label", "description", "actionClass", "reversible", "tool", "params"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "description": "Stable machine identifier — snake_case ASCII, matches ACTION_CATALOG's id field."
+    },
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Short human-readable name shown in the approve UX."
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One-sentence explanation of what the action does and (if load-bearing) its reversibility. Read by users before approval."
+    },
+    "actionClass": {
+      "enum": ["read", "write", "exec", "net", "memory"],
+      "description": "Coarse effect posture used by policy gates. Kept small on purpose — a finer classification lives in the tool contract, not here."
+    },
+    "reversible": {
+      "type": "boolean",
+      "description": "Whether the action has a defined inverse (backup kept, undo path exists). Drives the confirm-UX weight and audit expectations."
+    },
+    "tool": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Underlying built-in tool this action maps to. Multiple actions may map to one tool (e.g. write_file / append_note both back to write_file) — the action id is the caller-visible identity, the tool is the executor."
+    },
+    "consentRequired": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether a signed consent record must be presented before execution (mirrors the agent-machine consent-before-fetch discipline — see ArtifactConsentRecord). Defaults to false so the field is explicit for actions that opt in."
+    },
+    "capabilityRef": {
+      "type": "string",
+      "description": "URN of the capability-ledger entry gating this action. Present means assertEnabled is called on this id before execution; absent means gating is left to the tool contract."
+    },
+    "params": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/param" },
+      "description": "Ordered input slots. Empty array allowed for parameter-less actions."
+    }
+  },
+  "$defs": {
+    "param": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "required", "description"],
+      "description": "One input slot. Legacy actions carry `type` as a bare string (string/number/boolean); new actions carry `valueType` — a ValueType-algebra term composed from the 12 scalars + 8 composites. Both are accepted transitionally so the migration is one entry at a time, not one big rewrite. At least one of them MUST be present, so no slot is untyped.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z][a-zA-Z0-9_]*$"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "enum": ["string", "number", "boolean"],
+          "description": "Legacy scalar type marker. Retained because existing entries carry it; prefer valueType for new entries, which composes and covers array/entity/enumeration/measurement/etc."
+        },
+        "valueType": {
+          "$ref": "https://schemas.srcos.ai/v2/ValueType.json",
+          "description": "Structural type from the ValueType algebra. Authoritative when present."
+        }
+      },
+      "anyOf": [
+        { "required": ["type"] },
+        { "required": ["valueType"] }
+      ]
+    }
+  }
+}
