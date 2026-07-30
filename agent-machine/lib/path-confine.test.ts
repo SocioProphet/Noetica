@@ -56,10 +56,3 @@ test('the real roots include home and the tmp dirs', () => {
 test('rejects an unrelated absolute path', () => {
   assert.equal(isConfinedToHomeOrTmp('/etc/passwd'), false)
 })
-
-// TEMPORARY — CI gate proof. This asserts something false on purpose to demonstrate that the
-// required "agent-machine build and test" check actually executes lib/path-confine.test.ts and
-// goes red on a failing assertion. Reverted in the next commit.
-test('CI-GATE-PROOF deliberate failure — must be reverted', () => {
-  assert.equal(isWithinRoot('/home/user/inside', '/home/user'), false)
-})
