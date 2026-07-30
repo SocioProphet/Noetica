@@ -60,6 +60,11 @@ const WRITE_CALL =
 /** A module-scope declaration whose right-hand side is evaluated AT IMPORT (not wrapped in a function). */
 const DECL = /^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+?)?=\s*(.+)$/
 const LAZY_RHS = /^\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::[^=]+?)?=>|[A-Za-z_$][\w$]*\s*=>)/
+/** A per-module env override read on the line — the seam's escape hatch (`process.env['NOETICA_X'] || …`
+ *  or the `noeticaHome()` resolver's `process.env.NOETICA_HOME || …`). Its PRESENCE on a lazy home binding
+ *  is what makes it safe: the sandbox preload sets that var and a late-resolving reader picks it up. Its
+ *  ABSENCE on an otherwise-lazy raw-homedir binding is the hazard the lazy tooth (below) adds. */
+const ENV_OVERRIDE = /process\s*\.\s*env\b/
 
 export interface Binding { file: string; line: number; name: string; text: string }
 
@@ -77,6 +82,32 @@ export function isEagerHomeBinding(line: string): boolean {
   return !LAZY_RHS.test(m[2] as string)
 }
 
+/**
+ * The blind spot `isEagerHomeBinding` deliberately leaves: a module-scope LAZY resolver (arrow or
+ * `function`) that reads a RAW home call for a `~/.noetica` path and carries NO env override.
+ *
+ * WHY LATE-RESOLVING IS NOT ENOUGH HERE. The eager ratchet passes on lazy shapes because "resolve on every
+ * access" is half the fix (PR #581). But the OTHER half is the sandbox preload (test-store-sandbox.ts),
+ * and it redirects `NOETICA_HOME` (+ per-store vars) — it deliberately does NOT move `$HOME`. So a lazy
+ * resolver that reads raw `homedir()` re-resolves late to the SAME real `~/.noetica` every time, and
+ * `npm test` writes the operator's real store. swarm-volume.ts (`const ROOT = () => join(homedir(),
+ * '.noetica', …)`) and cloud-provision.ts (`const FLEET = () => join(homedir(), '.noetica', …)`) were
+ * exactly this — lazy, so the eager ratchet was green while the suite kept rewriting fleet/inventory.json
+ * and swarm-volumes/.
+ *
+ * NOT flagged (the two safe shapes): `() => process.env['NOETICA_X'] || join(homedir(), '.noetica', …)`
+ * carries an override, and `() => join(noeticaHome(), …)` reads neither a raw home call nor a '.noetica'
+ * literal. The discriminator is the env override, not eager-vs-lazy.
+ */
+export function isLazyRawHomeBinding(line: string): boolean {
+  if (/^\s/.test(line)) return false                       // module top level only
+  if (!NOETICA_LIT.test(line) || !HOME_CALL.test(line)) return false
+  if (ENV_OVERRIDE.test(line)) return false                // reads a NOETICA_* override → the seam, safe
+  const m = DECL.exec(line)
+  if (m) return LAZY_RHS.test(m[2] as string)              // const/let/var whose RHS is an arrow/function
+  return /^(?:export\s+)?(?:async\s+)?function\s+[A-Za-z_$][\w$]*/.test(line) // top-level `function name(){…}`
+}
+
 /** Every eager module-scope `~/.noetica` binding in `libDir`. Includes THIS FILE — callers exclude it. */
 export function scanBindings(libDir: string): Binding[] {
   const st = fs.statSync(libDir)
@@ -87,6 +118,24 @@ export function scanBindings(libDir: string): Binding[] {
     src.split('\n').forEach((line, i) => {
       const m = DECL.exec(line)
       if (isEagerHomeBinding(line)) out.push({ file, line: i + 1, name: (m?.[1] ?? '?'), text: line.trim() })
+    })
+  }
+  return out
+}
+
+/** Every module-scope LAZY-raw `~/.noetica` binding in `libDir` — the seam-evading shape `scanBindings`
+ *  misses. Same walk, different predicate. This file's only `~/.noetica` binding is the eager
+ *  REAL_NOETICA_DIR, which `isLazyRawHomeBinding` does NOT match, so there is nothing here to self-exclude. */
+export function scanLazyRawBindings(libDir: string): Binding[] {
+  const st = fs.statSync(libDir)
+  if (!st.isDirectory()) throw new Error(`scanLazyRawBindings expects a DIRECTORY, got: ${libDir}`)
+  const out: Binding[] = []
+  for (const file of fs.readdirSync(libDir).filter((f) => f.endsWith('.ts')).sort()) {
+    const src = fs.readFileSync(path.join(libDir, file), 'utf8')
+    src.split('\n').forEach((line, i) => {
+      if (!isLazyRawHomeBinding(line)) return
+      const name = DECL.exec(line)?.[1] ?? /function\s+([A-Za-z_$][\w$]*)/.exec(line)?.[1] ?? '?'
+      out.push({ file, line: i + 1, name, text: line.trim() })
     })
   }
   return out

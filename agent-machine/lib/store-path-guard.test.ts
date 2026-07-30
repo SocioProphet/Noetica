@@ -20,6 +20,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import {
   REAL_NOETICA_DIR, isInsideRealNoetica, isEagerHomeBinding, scanBindings, writingFiles,
+  isLazyRawHomeBinding, scanLazyRawBindings,
 } from './store-path-guard.js'
 
 const LIB_DIR = __dirname   // CommonJS build target (house pattern; see canon-lookup.ts) — not import.meta
@@ -53,6 +54,24 @@ const DEFERRED: Record<string, string> = {
 /** Eager module-scope `~/.noetica` bindings that only ever READ. Lower priority than the writers, but
  *  tracked so the set cannot grow unnoticed. `SELF` is excluded before this comparison. */
 const READ_ONLY_EAGER = ['academic-graph.ts']
+
+/**
+ * The LAZY-raw analogue of DEFERRED (see the isLazyRawHomeBinding tooth): modules that carry the
+ * seam-EVADING lazy shape — a `() => homedir()` resolver with NO env override — and are NOT converted by
+ * this change. Same RATCHET discipline: it may only ever shrink, a stale entry FAILS the last lazy test,
+ * and a new entry must be argued for in review. These three were invisible to the eager ratchet and are
+ * surfaced here for the first time — none writes the real store in the suite TODAY, but each is one step
+ * from doing so and should be converted to noeticaHome() in its own lane.
+ */
+const DEFERRED_LAZY: Record<string, string> = {
+  // Sandboxes itself by MOVING $HOME in its test — but the preload moves NOETICA_HOME, not $HOME, and the
+  // module still reads raw homedir(). Convert to noeticaHome() rather than rely on the $HOME move.
+  'agent-registry.ts': 'agents.json store — self-sandboxes via a $HOME move; route through noeticaHome()',
+  // Production singletons (getArtifactCMS / getSwarm) that unit tests do not exercise, so they do not fire
+  // against real ~/.noetica in the suite today — but the raw-homedir writer is latent.
+  'artifact-cms.ts': 'artifacts/index.json singleton — latent (getArtifactCMS); route through noeticaHome()',
+  'artifact-swarm.ts': 'swarm/index.json singleton — latent (getSwarm); route through noeticaHome()',
+}
 
 // ── 0. the detector itself, before any zero from it is trusted ──────────────────────────────────
 // A scanner that has only ever reported "clean" proves nothing, and a mangled pattern reports clean.
@@ -226,4 +245,70 @@ test('store-path guard: REAL_NOETICA_DIR ignores $HOME', () => {
   } finally {
     if (saved === undefined) delete process.env['HOME']; else process.env['HOME'] = saved
   }
+})
+
+// ── 5. the LAZY-raw tooth — the ratchet's blind spot (swarm-volume.ts / cloud-provision.ts) ──────────
+// The eager ratchet (test 2) passes on lazy shapes by construction, so `const ROOT = () => join(homedir(),
+// '.noetica', …)` stayed green while `npm test` rewrote fleet/inventory.json and swarm-volumes/. The
+// sandbox preload redirects NOETICA_HOME, NOT $HOME (test-store-sandbox.ts), so "resolves late" does not
+// save a raw-homedir reader. This section gives that shape its own detector, scanner, and ratchet.
+
+test('store-path guard: the LAZY-raw detector recognises the seam-evading shape (known positives)', () => {
+  const positives = [
+    `const ROOT = () => join(homedir(), '.noetica', 'swarm-volumes')`,                // swarm-volume.ts
+    `const FLEET = () => join(homedir(), '.noetica', 'fleet', 'inventory.json')`,      // cloud-provision.ts
+    `const swarmIndexPath = () => join(homedir(), '.noetica', 'swarm', 'index.json')`, // artifact-swarm.ts
+    `const STORE = (): string => path.join(os.homedir(), '.noetica', 'agents.json')`,  // agent-registry.ts
+  ]
+  for (const p of positives) assert.equal(isLazyRawHomeBinding(p), true, `MISSED a known positive: ${p}`)
+})
+
+test('store-path guard: the LAZY-raw detector does not fire on the safe shapes (known negatives)', () => {
+  const negatives = [
+    // The seam itself — a per-module env override makes the lazy resolver redirectable by the preload.
+    `const blobDir = (): string => process.env['NOETICA_BLOB_DIR'] || join(homedir(), '.noetica', 'blobs')`,
+    `function noeticaHome(): string { return process.env.NOETICA_HOME || join(homedir(), '.noetica') }`,
+    // The FIX shape: resolve through noeticaHome() — no raw home call, no '.noetica' literal on the line.
+    `const ROOT = () => join(noeticaHome(), 'swarm-volumes')`,
+    // Eager is test 2's job (isEagerHomeBinding), not this tooth's.
+    `const STORE = path.join(os.homedir(), '.noetica', 'a2a-trust.json')`,
+    // A local inside a function, and the scanner's own eager ground-truth binding.
+    `  const p = path.join(os.homedir(), '.noetica', 'x')`,
+    `export const REAL_NOETICA_DIR = path.join(os.userInfo().homedir, '.noetica')`,
+  ]
+  for (const n of negatives) assert.equal(isLazyRawHomeBinding(n), false, `FALSE POSITIVE on: ${n}`)
+})
+
+test('store-path guard: the LAZY-raw scanner rejects a file where a directory is required', () => {
+  assert.throws(() => scanLazyRawBindings(path.join(LIB_DIR, SELF)), /DIRECTORY/)
+})
+
+test('store-path guard: no lib module has a LAZY-raw ~/.noetica writer except the deferred set', () => {
+  const bindings = scanLazyRawBindings(LIB_DIR).filter((b) => !b.file.endsWith('.test.ts'))
+  const writers = writingFiles(LIB_DIR)
+
+  const hazards = [...new Set(bindings.filter((b) => writers.has(b.file)).map((b) => b.file))].sort()
+  const unregistered = hazards.filter((f) => !(f in DEFERRED_LAZY))
+
+  const detail = unregistered
+    .map((f) => `  ${f}\n` + bindings.filter((b) => b.file === f).map((b) => `      line ${b.line}: ${b.text}`).join('\n'))
+    .join('\n')
+
+  assert.deepEqual(unregistered, [],
+    `\n${unregistered.length} module(s) bind a ~/.noetica path to a LAZY resolver that reads RAW homedir() ` +
+    `with no env override, AND write to it.\nThe eager ratchet misses this, but the sandbox preload moves ` +
+    `NOETICA_HOME (not $HOME), so npm test writes the OPERATOR'S REAL STATE.\n\n${detail}\n\n` +
+    `Fix: resolve through noeticaHome() (the local-state.ts seam) so the NOETICA_HOME sandbox covers it —\n\n` +
+    `    import { noeticaHome } from './local-state.js'\n` +
+    `    const ROOT = () => join(noeticaHome(), 'swarm-volumes')\n`)
+})
+
+test('store-path guard: every DEFERRED_LAZY entry still actually carries the lazy-raw hazard', () => {
+  const bindings = scanLazyRawBindings(LIB_DIR).filter((b) => !b.file.endsWith('.test.ts'))
+  const writers = writingFiles(LIB_DIR)
+  const stillHazardous = new Set(bindings.filter((b) => writers.has(b.file)).map((b) => b.file))
+  const fixed = Object.keys(DEFERRED_LAZY).filter((f) => !stillHazardous.has(f)).sort()
+  assert.deepEqual(fixed, [],
+    `these no longer carry the lazy-raw hazard — good. Delete them from DEFERRED_LAZY so the list keeps ` +
+    `shrinking instead of quietly blessing modules that were converted: ${fixed.join(', ')}`)
 })

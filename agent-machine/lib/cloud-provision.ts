@@ -7,9 +7,9 @@
  * Every placement is meant to flow through scope-d egress + a lattice-forge provenance manifest.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { ComputeSku } from './cloud-broker.js'
+import { noeticaHome } from './local-state.js'
 
 export type ProvisionState = 'planned' | 'provisioning' | 'ready' | 'failed' | 'terminated'
 export interface ProvisionRecord {
@@ -113,11 +113,14 @@ export function teardownCommand(provider: ComputeSku['provider'], name: string, 
   }
 }
 
-const FLEET = () => join(homedir(), '.noetica', 'fleet', 'inventory.json')
+// Resolved LAZILY through noeticaHome() (local-state.ts), NOT raw homedir(): the test sandbox preload
+// redirects NOETICA_HOME, so registerExecutor() under `npm test` no longer rewrites the operator's real
+// ~/.noetica/fleet/inventory.json. (Reading raw homedir() here evaded the store-path guard.)
+const FLEET = () => join(noeticaHome(), 'fleet', 'inventory.json')
 
 /** Register the (planned/ready) box as an agentplane-shaped executor in the local fleet inventory. */
 export function registerExecutor(rec: ProvisionRecord): void {
-  const p = FLEET(); mkdirSync(join(homedir(), '.noetica', 'fleet'), { recursive: true })
+  const p = FLEET(); mkdirSync(join(noeticaHome(), 'fleet'), { recursive: true })
   let inv: { executors: Array<Record<string, unknown>>; defaultExecutor?: string } = { executors: [] }
   if (existsSync(p)) { try { inv = JSON.parse(readFileSync(p, 'utf8')) } catch { /* recreate */ } }
   inv.executors = inv.executors.filter((e) => e['name'] !== rec.executor.name)
@@ -183,7 +186,7 @@ export async function executeProvision(rec: ProvisionRecord): Promise<ProvisionR
   const { promisify } = await import('node:util')
   try { execFileSync('/usr/bin/env', ['sh', '-c', `command -v ${cli}`], { stdio: 'ignore' }) }
   catch { const failed = { ...rec, state: 'failed' as const, error: `${cli} not installed / not authenticated` }; registerExecutor(failed); return failed }
-  const tmpDir = join(homedir(), '.noetica', 'fleet', rec.id); mkdirSync(tmpDir, { recursive: true })
+  const tmpDir = join(noeticaHome(), 'fleet', rec.id); mkdirSync(tmpDir, { recursive: true })
   writeFileSync(join(tmpDir, 'cloud-init.sh'), rec.cloudInit)
   const provisioning = { ...rec, state: 'provisioning' as const }; registerExecutor(provisioning)
   try {

@@ -7,16 +7,19 @@
  * blackboard dir) so dispatched agents discover each other and share state — the substrate for swarming.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { noeticaHome } from './local-state.js'
 
 export type VolumeBackend = 'lvm' | 'directory'
 export interface SwarmVolume { swarmId: string; backend: VolumeBackend; path: string; sizeGiB: number; vg?: string; lv?: string; mounted: boolean }
 export interface SwarmMember { agentId: string; role?: string; joinedAt: number; lastSeen: number }
 export interface SwarmManifest { swarmId: string; createdAt: number; volume: SwarmVolume; members: SwarmMember[] }
 
-const ROOT = () => join(homedir(), '.noetica', 'swarm-volumes')
+// Resolved LAZILY through noeticaHome() — the single source of truth for local state (local-state.ts) —
+// NOT raw homedir(): the test sandbox preload redirects NOETICA_HOME, so `npm test` no longer writes the
+// operator's real ~/.noetica/swarm-volumes. (Reading raw homedir() here evaded the store-path guard.)
+const ROOT = () => join(noeticaHome(), 'swarm-volumes')
 const slug = (s: string) => (String(s).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'swarm')
 
 /** Is LVM available (a node we could carve a real logical volume on)? Best-effort, never throws. */
