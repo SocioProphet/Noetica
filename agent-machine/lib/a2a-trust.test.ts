@@ -1,6 +1,26 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { recordOutcome, checkActorGrant, authorityStatus, authorityState, _reset, TRUST_FLOOR } from './a2a-trust.js'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import { recordOutcome, checkActorGrant, authorityStatus, authorityState, _reset, _storePath, TRUST_FLOOR } from './a2a-trust.js'
+
+// ── Point the ledger at a throwaway file BEFORE any test runs ───────────────────────────────────
+// Every test here calls _reset() (and recordOutcome() in 120-iteration loops), and BOTH persist. Without
+// this redirect the suite writes the operator's real ~/.noetica/a2a-trust.json — the ledger that
+// /api/a2a/grant/validate makes live authorization decisions from. It did: a run on 2026-07-29 left the
+// real ledger holding nothing but this file's PEER fixture.
+const TMP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'noetica-a2a-trust-'))
+process.env['NOETICA_A2A_STORE'] = path.join(TMP_HOME, 'a2a-trust.json')
+process.on('exit', () => { try { fs.rmSync(TMP_HOME, { recursive: true, force: true }) } catch { /* best effort */ } })
+
+/** The operator's REAL ledger path, resolved from the passwd database rather than $HOME.
+ *  os.homedir() honours $HOME, so a test that moved HOME could "pass" while still aimed at the real
+ *  file (or mask a regression). os.userInfo().homedir cannot be talked out of the truth. */
+const REAL_LEDGER = path.join(os.userInfo().homedir, '.noetica', 'a2a-trust.json')
+/** exists/size/mtime fingerprint — null when absent. Never writes. */
+const fingerprint = (p: string): string =>
+  { try { const s = fs.statSync(p); return `${s.size}:${s.mtimeMs}` } catch { return 'ABSENT' } }
 
 const PEER = 'spiffe://aiwg.io/server/sdlc-1'
 
@@ -110,5 +130,67 @@ test('a2a: revoked/suspended are decided BEFORE the floor — no floor value rea
       assert.equal(d.valid, false, `strike state must deny regardless of floor=${JSON.stringify(v)}`)
       assert.ok(/revoked|suspended/.test(d.reason), 'denied by the strike state, not the floor')
     }
+  }
+})
+
+// ── the store path must never be the operator's real ledger ─────────────────────────────────────
+// Regression for a data-destructive test hazard: the store path was a module-load constant
+// (`const STORE = path.join(os.homedir(), …)`), so _reset()/recordOutcome() persisted straight into
+// ~/.noetica/a2a-trust.json. A run wiped the real ledger down to this file's fixtures. Erasure is
+// FAIL-OPEN — an absent record falls back to fresh() at score 0.64, over TRUST_FLOOR — so the suite
+// silently re-granted authority to revoked peers. These tests are the reason it cannot come back.
+
+test('a2a store path: the ledger under test is NEVER the operator real ~/.noetica ledger', () => {
+  const store = path.resolve(_storePath())
+  assert.notEqual(store, REAL_LEDGER, 'the suite must not be pointed at the production trust ledger')
+
+  // Containment, not string-prefix: anything under the real ~/.noetica is off limits.
+  const realDir = path.join(os.userInfo().homedir, '.noetica')
+  const rel = path.relative(realDir, store)
+  const inside = rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)
+  assert.equal(inside, false, `store resolved inside the real sovereign data dir: ${store}`)
+})
+
+test('a2a store path: persisting writes the override and leaves the real ledger untouched', () => {
+  const before = fingerprint(REAL_LEDGER)
+
+  // The two functions that persist — exactly what every test above calls.
+  _reset()
+  recordOutcome(PEER, { ok: true, up: true })
+
+  const store = _storePath()
+  assert.ok(fs.existsSync(store), 'the override path is what actually received the write')
+  assert.equal(fingerprint(REAL_LEDGER), before,
+    'the real ledger was modified by the test suite — the store path leaked back to $HOME')
+})
+
+test('a2a store path: with no override the default IS the production ledger (teeth both ways)', () => {
+  // The fix must not be a blanket redirect: with nothing injected, production still resolves to
+  // ~/.noetica/a2a-trust.json. _storePath() is pure, so reading it here writes nothing.
+  const saved = process.env['NOETICA_A2A_STORE']
+  try {
+    delete process.env['NOETICA_A2A_STORE']
+    assert.equal(_storePath(), path.join(os.homedir(), '.noetica', 'a2a-trust.json'))
+  } finally {
+    if (saved === undefined) delete process.env['NOETICA_A2A_STORE']
+    else process.env['NOETICA_A2A_STORE'] = saved
+  }
+  // …and the redirect is live again for anything that runs after this test.
+  assert.equal(_storePath(), path.join(TMP_HOME, 'a2a-trust.json'))
+})
+
+test('a2a store path: resolution is LATE — an override set after import still takes effect', () => {
+  // The original bug was a module-load constant, which made import ORDER load-bearing. Prove the path
+  // is read at call time so a redirect works on an already-imported module.
+  const saved = process.env['NOETICA_A2A_STORE']
+  const late = path.join(TMP_HOME, 'late-override.json')
+  try {
+    process.env['NOETICA_A2A_STORE'] = late
+    assert.equal(_storePath(), late, 'store path was frozen at import — the hazard has regressed')
+    _reset()
+    assert.ok(fs.existsSync(late), 'persist() honours the late override')
+  } finally {
+    if (saved === undefined) delete process.env['NOETICA_A2A_STORE']
+    else process.env['NOETICA_A2A_STORE'] = saved
   }
 })
