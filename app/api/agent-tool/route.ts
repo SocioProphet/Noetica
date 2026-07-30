@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
+import { realPathWithinRoot } from './path-confine'
 
 export const runtime = 'nodejs'
 
@@ -22,18 +23,22 @@ function resolvePath(p: string): string {
   if (rel.startsWith('..') || path.isAbsolute(rel)) {
     throw new Error('path escapes the permitted root')
   }
-  // `resolved` is now confined to ROOT. Symlink hardening: if it already exists,
-  // resolve symlinks and re-check the real target is still inside ROOT (a symlink
-  // inside ROOT could otherwise redirect the op outside it — a lexical resolve
-  // misses that). New paths (e.g. a file being created) keep the validated value.
-  let real = resolved
-  if (fs.existsSync(resolved)) {
-    const realResolved = fs.realpathSync(resolved)
-    const realRel = path.relative(ROOT, realResolved)
-    if (realRel.startsWith('..') || path.isAbsolute(realRel)) {
-      throw new Error('path escapes the permitted root')
-    }
-    real = realResolved
+  // `resolved` is now LEXICALLY confined to ROOT, which is not the same as actually confined: a
+  // symlink inside ROOT that points outside it satisfies every lexical check.
+  //
+  // This used to read `if (fs.existsSync(resolved)) { ...realpath... }` and otherwise keep the lexical
+  // value. That guarded reads of EXISTING files and left the CREATE path wide open: with `~/escape`
+  // symlinked to somewhere outside the home tree, `write_file` to `~/escape/new.txt` has a full path
+  // that does not exist, so `existsSync` was false, the lexical value survived, and `writeFileSync`
+  // followed the symlinked PARENT and wrote outside ROOT.
+  //
+  // `realPathWithinRoot` resolves the nearest EXISTING ancestor instead of requiring the whole path to
+  // exist, so the symlinked parent is caught while a genuine create still resolves. It is a verbatim
+  // mirror of `agent-machine/lib/path-confine.ts` (#584) — see that file's header for the duplication
+  // rationale and the drift risk.
+  const real = realPathWithinRoot(resolved, ROOT)
+  if (real === null) {
+    throw new Error('path escapes the permitted root')
   }
   return real
 }
