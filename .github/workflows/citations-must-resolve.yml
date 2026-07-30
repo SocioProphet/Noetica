@@ -1,0 +1,60 @@
+name: citations must resolve
+
+# Structural anti-hallucination gate: every [id] a choir answer cites must
+# resolve to a real node in the grounded context. checkGrounding
+# (choir-grounding.ts) enforces this at unit level, and grounded-answer.ts
+# adds the stronger inline-binding form (evidence_id → resolved AND entailed).
+# This workflow makes both a NAMED, PATH-FILTERED, REQUIRED-CANDIDATE check —
+# so a change to either surface fails CI on its own row, not buried in the
+# general test suite.
+#
+# The claim is: no answer Noetica ships can cite a node that isn't in the
+# grounded context. Turning that claim into a required status check is what
+# makes "structurally anti-hallucinating" a property of the pipeline rather
+# than a note in a comment.
+
+on:
+  pull_request:
+    paths:
+      - 'agent-machine/lib/choir-grounding.ts'
+      - 'agent-machine/lib/choir-grounding.test.ts'
+      - 'agent-machine/lib/grounded-answer.ts'
+      - 'agent-machine/lib/grounded-answer.test.ts'
+      - 'agent-machine/lib/knowledge-graph.ts'
+      - 'agent-machine/lib/knowledge-graph.test.ts'
+      - '.github/workflows/citations-must-resolve.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'agent-machine/lib/choir-grounding.ts'
+      - 'agent-machine/lib/choir-grounding.test.ts'
+      - 'agent-machine/lib/grounded-answer.ts'
+      - 'agent-machine/lib/grounded-answer.test.ts'
+      - 'agent-machine/lib/knowledge-graph.ts'
+      - 'agent-machine/lib/knowledge-graph.test.ts'
+      - '.github/workflows/citations-must-resolve.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  citations-must-resolve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install deps
+        working-directory: agent-machine
+        run: npm ci
+      - name: choir-grounding — the checkGrounding unit gate
+        working-directory: agent-machine
+        run: node --import tsx --test lib/choir-grounding.test.ts
+      - name: grounded-answer — inline binding (resolved AND entailed)
+        working-directory: agent-machine
+        run: node --import tsx --test lib/grounded-answer.test.ts
+      - name: knowledge-graph — the resolvable-id substrate
+        working-directory: agent-machine
+        run: node --import tsx --test lib/knowledge-graph.test.ts
