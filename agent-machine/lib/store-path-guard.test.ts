@@ -49,6 +49,11 @@ const DEFERRED: Record<string, string> = {
   'qa-pairs.ts': 'training corpus (appendJsonl); mis-classified read-only in the original sweep',
   'stt.ts': 'models dir, shared with managed-ollama',
   'voice-runtime.ts': 'voice dir',
+  // Surfaced for the first time by the AST scanner (this PR). `DEFAULT_DB_PATH = path.join(os.homedir(),
+  // '.noetica', 'hellgraph', …)` is MULTI-LINE, so no single line carried both `homedir()` and '.noetica'
+  // and the old line scanner reported it clean — while the module opens+writes a real sqlite DB there
+  // (new Database + mkdirSync + exec(SCHEMA)). Genuine hazard; convert to noeticaHome() in its own lane.
+  'sqlite-backend.ts': 'hellgraph sqlite DB path frozen at module load (multi-line join) + writes it — AST-scanner catch',
 }
 
 /** Eager module-scope `~/.noetica` bindings that only ever READ. Lower priority than the writers, but
@@ -71,6 +76,18 @@ const DEFERRED_LAZY: Record<string, string> = {
   // against real ~/.noetica in the suite today — but the raw-homedir writer is latent.
   'artifact-cms.ts': 'artifacts/index.json singleton — latent (getArtifactCMS); route through noeticaHome()',
   'artifact-swarm.ts': 'swarm/index.json singleton — latent (getSwarm); route through noeticaHome()',
+  // Surfaced for the first time by the AST scanner (this PR) — each has a module-scope resolver whose
+  // BODY reads raw homedir() for a '.noetica' path with no env-override fallback, across lines the old
+  // per-line scanner never joined:
+  'encrypted-vector-store.ts': 'also in DEFERRED (eager DB path): a helper resolves the at-rest.key path from raw homedir() — route through noeticaHome()',
+  'managed-ollama.ts': 'also in DEFERRED (eager models/runtime dirs): a helper resolves a raw-homedir .noetica path — route through noeticaHome()',
+  // NOT a store writer: code-sandbox references ~/.noetica only to build sandbox DENY-rules (deny
+  // file-read* of the at-rest key + sidecar-token) — it PROTECTS the dir. It satisfies the guard's
+  // syntactic shape (raw-homedir '.noetica' in a module-scope resolver + a write call elsewhere in the
+  // file), so it is tracked HERE — visibly, with this reason — rather than silently excluded via an
+  // allowlist (the "ratchet that counts its own allowlist" anti-pattern). A path-flow refinement of the
+  // guard that proves the '.noetica' value never reaches a write would remove it; that is its own lane.
+  'code-sandbox.ts': 'builds sandbox deny-rules referencing ~/.noetica — protects, does not write the store; guard shape-match only',
 }
 
 // ── 0. the detector itself, before any zero from it is trusted ──────────────────────────────────
@@ -99,6 +116,32 @@ test('store-path guard: the detector does not fire on the safe shapes (known neg
     `const DEV_ROOT = path.join(os.homedir(), 'dev')`,
   ]
   for (const n of negatives) assert.equal(isEagerHomeBinding(n), false, `FALSE POSITIVE on: ${n}`)
+})
+
+test('store-path guard: the SCANNER catches a MULTI-LINE binding the per-line check misses (AST teeth)', () => {
+  // The blind spot this PR closes. A `join()` split across lines has no single line carrying BOTH the
+  // home call and '.noetica', so the old `.split('\n')` scanner reported clean while the module still
+  // froze / lazily-resolved the operator's real store. The AST scanner reads the whole initializer.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'noetica-guard-multiline-'))
+  try {
+    fs.writeFileSync(path.join(dir, 'eager.ts'),
+      `import * as os from 'node:os'\nimport * as path from 'node:path'\nexport const STORE = path.join(\n  os.homedir(),\n  '.noetica', 'x.json',\n)\nexport function w() { require('node:fs').writeFileSync(STORE, '') }\n`)
+    fs.writeFileSync(path.join(dir, 'lazy.ts'),
+      `import { homedir } from 'node:os'\nimport { join } from 'node:path'\nexport const ROOT = () => join(\n  homedir(),\n  '.noetica',\n  'swarm',\n)\nexport function w() { require('node:fs').mkdirSync(ROOT()) }\n`)
+
+    assert.ok(scanBindings(dir).some((b) => b.file === 'eager.ts' && b.name === 'STORE'),
+      'the AST scanner MISSED a multi-line eager ~/.noetica binding — the regression this PR closes reopened')
+    assert.ok(scanLazyRawBindings(dir).some((b) => b.file === 'lazy.ts' && b.name === 'ROOT'),
+      'the AST scanner MISSED a multi-line lazy-raw ~/.noetica binding')
+
+    // Prove the miss was real, not incidental: the single-line predicate, fed the same source line by
+    // line, finds nothing — so the scanner's win is genuinely the AST, not a lucky regex.
+    const lines = fs.readFileSync(path.join(dir, 'eager.ts'), 'utf8').split('\n')
+    assert.ok(!lines.some((l) => isEagerHomeBinding(l)),
+      'the per-line predicate caught the multi-line binding — this teeth demo no longer demonstrates the gap')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('store-path guard: the scanner rejects a file where a directory is required', () => {
