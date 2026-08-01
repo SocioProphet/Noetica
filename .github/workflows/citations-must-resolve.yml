@@ -45,7 +45,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          # Align with every other workflow (ci/validate/release/windows all use 20).
+          # node 22 forced a cold source build of rocksdb@5.2.1 (Discontinued, no
+          # prebuilt for the 22 ABI), which fails on modern g++ (missing transitive
+          # <cstdint>). node 20 + the same cache ci.yml uses avoids the cold build.
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: agent-machine/package-lock.json
       - name: Install deps
         working-directory: agent-machine
         run: npm ci
