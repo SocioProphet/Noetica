@@ -120,6 +120,16 @@ async function postChat(body: unknown, timeoutMs = chatTimeoutMs(), path = '/v1/
 export const EMBED_MODEL = process.env['NOETICA_EMBED_MODEL'] ?? 'nomic-embed-text'
 
 /**
+ * The dimension the document corpus is indexed in — the SOVEREIGN vector space shared
+ * with prophet-platform apps/embeddings, pinned by the sourceos-spec EmbeddingRequest
+ * contract (see lib/contracts/sourceos/embedding-space.pin.json; the drift-guard test
+ * asserts they match). Corpus/query embeds pass this as `dims`, so embedText's dimension
+ * contract forces a sidecar answer in a DIFFERENT space (e.g. the bge-384 sidecar) to
+ * fall through to Ollama nomic-768 instead of silently forking the corpus space.
+ */
+export const CORPUS_EMBED_DIM = 768
+
+/**
  * Embed text → vector via Ollama. Returns [] on failure so callers degrade to
  * lexical retrieval rather than throwing. Uses the active Ollama base.
  */

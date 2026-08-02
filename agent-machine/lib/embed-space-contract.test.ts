@@ -10,16 +10,12 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { EMBED_MODEL } from './ollama.js';
+import { EMBED_MODEL, CORPUS_EMBED_DIM } from './ollama.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const pin = JSON.parse(
   readFileSync(join(HERE, 'contracts/sourceos/embedding-space.pin.json'), 'utf8'),
 ) as { model: string; dimension: number; modelAliases?: string[] };
-
-// The dimension Noetica embeds document chunks at. `nomic-embed-text` → 768-dim
-// (lib/ollama.ts: "Embedding model for document/chunk vectors. nomic-embed-text → 768-dim").
-const NOETICA_CORPUS_DIM = 768;
 
 test('doc-corpus embedding model conforms to the sovereign EmbeddingRequest pin', () => {
   const accepted = new Set([pin.model, ...(pin.modelAliases ?? [])]);
@@ -32,12 +28,35 @@ test('doc-corpus embedding model conforms to the sovereign EmbeddingRequest pin'
   );
 });
 
-test('doc-corpus embedding dimension equals the sovereign pin (768)', () => {
+test('the corpus-ENFORCED dimension equals the sovereign pin', () => {
+  // CORPUS_EMBED_DIM is the dims Noetica passes to embedText on the corpus/query paths,
+  // so embedText's dimension contract forces a foreign-dim sidecar answer to fall through
+  // to Ollama nomic-768. Asserting the *enforced* value (not a hard-coded assumption)
+  // catches drift in the value that actually pins the runtime space.
   assert.equal(
-    NOETICA_CORPUS_DIM,
+    CORPUS_EMBED_DIM,
     pin.dimension,
-    `Noetica corpus dimension ${NOETICA_CORPUS_DIM} != pinned ${pin.dimension} — a truncated or ` +
+    `Noetica CORPUS_EMBED_DIM ${CORPUS_EMBED_DIM} != pinned ${pin.dimension} — a truncated or ` +
       `foreign-dimension space is not comparable to prophet-platform apps/embeddings.`,
+  );
+});
+
+test('doc-store enforces the pinned dimension on every corpus/query embed (no bare embedText)', () => {
+  // The runtime space is only guaranteed if the corpus/query paths DECLARE dims — a bare
+  // embedText(text) could take the Rust sidecar's (bge-384) answer and silently fork the
+  // corpus. Guard against a regression that drops the dims argument on those paths.
+  const docStore = readFileSync(join(HERE, 'doc-store.ts'), 'utf8');
+  const corpusCalls = [...docStore.matchAll(/await embedText\(([^)]*)\)/g)].map((m) => m[1]);
+  const offenders = corpusCalls.filter(
+    (args) =>
+      !/dims:\s*CORPUS_EMBED_DIM/.test(args) && // must pin the space
+      !/dimension probe/.test(args), // the deliberate dimension-probe measures, so it is exempt
+  );
+  assert.deepEqual(
+    offenders,
+    [],
+    `doc-store has embedText call(s) that don't pin the corpus dimension: ${JSON.stringify(offenders)} — ` +
+      `pass { dims: CORPUS_EMBED_DIM } so the corpus can't silently fork to the sidecar's space.`,
   );
 });
 

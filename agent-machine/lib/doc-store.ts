@@ -13,7 +13,7 @@ import {
   getHellGraph, extractEntities, ingestEntities,
   putChunk as hgPutChunk, semanticSearch as hgSemanticSearch, cosineSim,
 } from '@socioprophet/hellgraph'
-import { embedText } from './ollama.js'
+import { embedText, CORPUS_EMBED_DIM } from './ollama.js'
 import { bm25 } from './hybrid-retrieve.js'
 import { isUserDoc, collectionIdOf } from './doc-scope.js'
 
@@ -283,7 +283,7 @@ export async function ingestDocument(filename: string, text: string, opts?: { pa
   const tierItems: Array<{ id: string; vec: number[]; meta: Record<string, unknown> }> = []
   for (let idx = 0; idx < spans.length; idx++) {
     const { text: chunk, start, end } = spans[idx]!
-    const vec = await embedText(chunk)
+    const vec = await embedText(chunk, { dims: CORPUS_EMBED_DIM })  // pin the corpus space
     if (vec.length) { embedded++; tierItems.push({ id: `${docId}#${idx}`, vec, meta: { docId, filename, idx, text: chunk, start, end } }) }
     // Store via HellGraph's canonical vector pipeline (one chunk representation everywhere).
     // putChunk is HellGraph's contract and is not extended here — the spans ride on the
@@ -518,7 +518,7 @@ export async function sheafSearch(query: string, opts: { charts?: number; k?: nu
   }
   if (nodes.length === 0) return []
 
-  const qvec = await embedText(query)
+  const qvec = await embedText(query, { dims: CORPUS_EMBED_DIM })  // query must share the corpus space
   const qTerms = new Set(query.toLowerCase().split(/\W+/).filter((t) => t.length > 2))
 
   // 1) hybrid-score every section (semantic cosine + lexical term coverage), by chart
@@ -710,7 +710,7 @@ export async function reindexDocVectors(): Promise<{ total: number; reembedded: 
     const docId = String(n.properties['doc_id'] ?? '')
     const idx = Number(n.properties['idx'] ?? 0)
     const filename = String(n.properties['filename'] ?? '')
-    const vec = await embedText(text)
+    const vec = await embedText(text, { dims: CORPUS_EMBED_DIM })  // reindex into the pinned corpus space
     if (vec.length) { hgPutChunk({ docId, idx, text, vec, filename }); reembedded++ } else failed++
   }
   return { total: chunks.length, reembedded, failed }
