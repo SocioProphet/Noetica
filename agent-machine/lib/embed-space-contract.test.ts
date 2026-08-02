@@ -6,13 +6,14 @@
 // sidecar with dimension guards); it guards the space the doc corpus is indexed in.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
 
 import { EMBED_MODEL, CORPUS_EMBED_DIM } from './ollama.js';
 
-const HERE = dirname(fileURLToPath(import.meta.url));
+// The test suite is compiled to CommonJS in this repo, so __dirname is available;
+// import.meta.url isn't accessible under that target (TS1470) — house pattern.
+const HERE = __dirname;
 const pin = JSON.parse(
   readFileSync(join(HERE, 'contracts/sourceos/embedding-space.pin.json'), 'utf8'),
 ) as { model: string; dimension: number; modelAliases?: string[] };
