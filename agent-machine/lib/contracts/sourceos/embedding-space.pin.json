@@ -1,0 +1,7 @@
+{
+  "$comment": "Pinned embedding-space constants from the sovereign EmbeddingRequest contract (SourceOS-Linux/sourceos-spec schemas/EmbeddingRequest.json, PR #239). Noetica's document/chunk corpus MUST embed into THIS space, or its vectors silently fork from prophet-platform apps/embeddings and cross-corpus retrieval is garbage. The drift-guard test (embed-space-contract.test.ts) fails if Noetica's EMBED_MODEL or corpus dimension stop conforming; keep this file in sync with the contract const.",
+  "source": "sourceos-spec:schemas/EmbeddingRequest.json#/properties",
+  "model": "nomic-ai/nomic-embed-text-v1.5",
+  "dimension": 768,
+  "modelAliases": ["nomic-embed-text"]
+}
