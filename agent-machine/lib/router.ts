@@ -7,6 +7,7 @@
  */
 
 import * as os from 'node:os'
+import { canModelSeeImages } from './model-vision.js'
 
 // ─── Task taxonomy (from prophet-mesh model-task-policy.yaml) ────────────────
 
@@ -266,9 +267,10 @@ export function buildRouterDecision(opts: {
   // is already there). But respect a deliberate vision choice: cloud models (Claude/GPT/Gemini)
   // see images themselves, and an explicitly-picked local VLM is already correct — don't override
   // either of those.
-  const CLOUD_MODEL_RE = /^(claude|gpt|o1|o3|gemini|mistral|deepseek|grok|command|sonar)/i
-  const VLM_RE = /(llava|vision|qwen2\.5vl|minicpm-v|moondream|-vl\b|vl:)/i
-  const explicitCanSeeImages = !!explicitModelId && (CLOUD_MODEL_RE.test(explicitModelId) || VLM_RE.test(explicitModelId))
+  // Capability from an allowlist, not a cloud-vs-local name proxy: deepseek-r1, mistral,
+  // command, sonar and o1-mini are text-only despite looking "cloud", so an explicit pick
+  // of one must still route an image to a real VLM (see model-vision.ts / Gus #3, B1-3).
+  const explicitCanSeeImages = !!explicitModelId && canModelSeeImages(explicitModelId)
   if (hasImages && ollamaAvailable && !explicitCanSeeImages) {
     // Prefer a stronger modern VLM if present, else fall back to LLaVA. First installed wins.
     const VISION_PREFS = ['qwen2.5vl:7b', 'qwen2.5vl', 'llama3.2-vision', 'minicpm-v', 'moondream', 'llava:13b', 'llava:7b', 'llava']
