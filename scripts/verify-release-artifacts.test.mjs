@@ -22,6 +22,20 @@ function run(args) {
   return { code, verdict: fs.existsSync(out) ? JSON.parse(fs.readFileSync(out, 'utf8')) : null }
 }
 
+function writeArArchive(dest, members) {
+  const pad = (s, n) => s.padEnd(n, ' ')
+  const parts = [Buffer.from('!<arch>\n', 'ascii')]
+  for (const m of members) {
+    const h =
+      pad(m.name + '/', 16) +   // BSD/GNU both accept a trailing slash on short names
+      pad('0', 12) + pad('0', 6) + pad('0', 6) + pad('100644', 8) +
+      pad(String(m.data.length), 10) + '`\n'
+    parts.push(Buffer.from(h, 'ascii'), m.data)
+    if (m.data.length % 2) parts.push(Buffer.from('\n', 'ascii'))
+  }
+  fs.writeFileSync(dest, Buffer.concat(parts))
+}
+
 function fixtureRepo(versions) {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'repo-'))
   fs.writeFileSync(path.join(d, 'package.json'), JSON.stringify({ version: versions.pkg }))
@@ -111,4 +125,28 @@ test('an unsigned PE is detected as TERMINAL', () => {
   const { verdict } = run(['--tag', 'v1.0.0', '--repo-root', repo, '--dir', dir])
   assert.ok(verdict.terminal.includes('windows.authenticode'))
   assert.equal(verdict.should_recut, false)
+})
+
+test('a REAL dependency list is not flagged — the false-positive regression', async () => {
+  // An earlier version asserted libwebkit2gtk-4.1-0 "does not exist before Ubuntu
+  // 23.04" and marked it TERMINAL. That is false: jammy (22.04) ships
+  // libwebkit2gtk-4.1-0 2.50.4-0, as do noble and bookworm. It would have fired a
+  // false terminal on EVERY release, permanently blocking the recut path and training
+  // everyone to ignore a red verdict. A confidently wrong gate is worse than no gate.
+  const { classifyDepends } = await import(SCRIPT)
+  const real = 'libayatana-appindicator3-1, libwebkit2gtk-4.1-0, libgtk-3-0'
+  assert.equal(classifyDepends(real).ok, true, 'the shipped dependency list is fine')
+})
+
+test('a package declaring no web engine IS terminal', async () => {
+  const { classifyDepends } = await import(SCRIPT)
+  const r = classifyDepends('libgtk-3-0, libc6')
+  assert.equal(r.ok, false)
+  assert.equal(r.klass, 'terminal')
+})
+
+test('a package declaring no dependencies at all is terminal', async () => {
+  const { classifyDepends } = await import(SCRIPT)
+  assert.equal(classifyDepends('').ok, false)
+  assert.equal(classifyDepends(undefined).ok, false)
 })
