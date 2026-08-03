@@ -89,6 +89,7 @@ import type { LiveTurn } from '@/components/rail/panels/LiveRailPanel'
 import type { PendingAttachment } from '@/lib/types/attachment'
 import type { McpTool } from '@/lib/types/mcp'
 import type { ChatMessage, ToolCallRecord, ToolResultRecord } from '@/lib/types/message'
+import { mergeTurnGovernance } from '@/lib/governance/turnGovernance'
 import type { Artifact } from '@/lib/types/artifact'
 import type { SteeringConfig } from '@/lib/types/steering'
 import type { NoeticaMode } from '@/lib/client/noeticaTransport'
@@ -517,6 +518,11 @@ export function AppShell() {
   const isLiveRef = useRef(false)
   const liveTurnRef = useRef<(t: string) => void>(() => {})
   const c2paCredRef = useRef<import('@/lib/types/governance').GovernanceTrace['credential']>(undefined)
+  // Model-sovereignty fields (model_requested / model_honored / route_overrides) arrive on the
+  // `meta` event but NOT on `done`. onDone rebuilds `governance` from the done result and the
+  // message merge is shallow, so without carrying these forward they get clobbered before render
+  // and the "you selected … honoured/overridden" + route-changes rows never show. Hold them here.
+  const metaGovernanceRef = useRef<import('@/lib/types/governance').GovernanceTrace | undefined>(undefined)
   // Stable callback reference — must be memoized to avoid recreating `startListening` on every
   // render, which would retrigger the wake-word useEffect and cause a rapid restart loop.
   const handleVoiceTranscript = useCallback((transcript: string) => {
@@ -1285,6 +1291,7 @@ export function AppShell() {
       attachments: attachments.length > 0 ? attachments : undefined,
     }
     const assistantId = crypto.randomUUID()
+    metaGovernanceRef.current = undefined // per-turn: don't carry a prior turn's routing decision
     const assistantMessage: ChatMessage = {
       id: assistantId,
       role: 'assistant',
@@ -1390,6 +1397,7 @@ export function AppShell() {
           {
             onMeta: (governance) => {
               c2paCredRef.current = undefined
+              metaGovernanceRef.current = governance // carry model_requested/honored/route_overrides to onDone
               updateAssistant(assistantId, { governance })
               if (settings.showRawEvents) {
                 setRawEventLog((prev) => [{ ts: new Date().toISOString(), kind: 'meta', payload: governance }, ...prev].slice(0, 80))
@@ -1473,7 +1481,10 @@ export function AppShell() {
               })
               updateAssistant(assistantId, {
                 content: result.content,
-                governance: {
+                // Carry the meta event's model-sovereignty fields (model_requested /
+                // model_honored / route_overrides) through the done rebuild — see
+                // mergeTurnGovernance. Without this they are clobbered before render.
+                governance: mergeTurnGovernance(metaGovernanceRef.current, {
                   run_id: result.run_id,
                   model_routed: result.model_routed,
                   provider: result.provider,
@@ -1499,7 +1510,7 @@ export function AppShell() {
                   ...(result.decidable !== undefined ? { decidable: result.decidable } : {}),
                   ...(result.replay_class !== undefined ? { replay_class: result.replay_class } : {}),
                   ...(c2paCredRef.current ? { credential: c2paCredRef.current } : {}),
-                },
+                }),
                 steering_result: result.steering_applied,
                 // The moat made visible — verification badge + inline citations from the done event.
                 ...(result.verification ? { verification: result.verification } : {}),
