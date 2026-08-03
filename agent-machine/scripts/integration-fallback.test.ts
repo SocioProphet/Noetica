@@ -23,6 +23,18 @@ const BASE = `http://127.0.0.1:${AM_PORT}`
 let server: ChildProcess
 let primary: http.Server
 let fallback: http.Server
+// Bounded ring buffer of the server's own stdout/stderr. A CI-only retrieval failure (e.g. the
+// query/corpus embedding-space mismatch that made this test flake) is undiagnosable when the server runs
+// with stdio:'ignore' — its embedText / dim-mismatch / hit-count logs never reach the CI transcript.
+// Capture them (capped so a long run can't grow unbounded) and dump the tail into a failing assertion.
+const serverLog: string[] = []
+function pushServerLog(d: Buffer): void {
+  serverLog.push(d.toString())
+  if (serverLog.length > 400) serverLog.splice(0, serverLog.length - 400)   // keep only the recent tail
+}
+function dumpServerLog(label: string): string {
+  return `\n----- ${label}: last server log lines -----\n${serverLog.slice(-80).join('')}\n----- end server log -----`
+}
 
 const TAGS = JSON.stringify({ models: [{ name: 'qwen2.5:7b' }, { name: 'llama3.2:3b' }] })
 
@@ -86,8 +98,11 @@ before(async () => {
       // its no-Origin mutating POSTs are 403'd. (Guard logic is covered by lib/origin-guard.test.ts.)
       NOETICA_ORIGIN_GUARD: '0',
     },
-    stdio: 'ignore',
+    // Capture the server's logs (was 'ignore') so a CI-only retrieval failure is inspectable from the transcript.
+    stdio: ['ignore', 'pipe', 'pipe'],
   })
+  server.stdout?.on('data', pushServerLog)
+  server.stderr?.on('data', pushServerLog)
   const deadline = Date.now() + 30_000
   while (Date.now() < deadline) {
     try { const r = await fetch(`${BASE}/api/status`, { signal: AbortSignal.timeout(1500) }); if (r.ok) return } catch { /* wait */ }
@@ -129,6 +144,7 @@ test('RAG: ingested document surfaces as hybrid-rerank-documents in chat', async
     body: JSON.stringify({ filename: 'baxter.txt', content: 'The Baxter facility shut down after Hurricane Helene flooding in September 2024.' }),
   })
   assert.equal(ing.status, 200)
+  const ingBody = await ing.text()   // DIAGNOSTIC: how many chunks embedded vs stored?
   // Embedding + indexing the freshly-ingested doc is async, so semantic retrieval can race the chat
   // request under CI load (the source of the flake). Poll the chat until the doc is indexed and
   // injected, or a deadline — same assertion, but robust to the indexing race instead of one shot.
@@ -144,5 +160,7 @@ test('RAG: ingested document surfaces as hybrid-rerank-documents in chat', async
     if (text.includes('hybrid-rerank-documents')) break
     await new Promise((res) => setTimeout(res, 1000))
   }
-  assert.ok(text.includes('hybrid-rerank-documents'), `chat should inject the ingested doc as hybrid-rerank-documents; got:\n${text.slice(0, 400)}`)
+  assert.ok(text.includes('hybrid-rerank-documents'),
+    `chat should inject the ingested doc as hybrid-rerank-documents; got:\n${text.slice(0, 400)}\n` +
+    `ingest response: ${ingBody}` + dumpServerLog('RAG ungrounded'))
 })
