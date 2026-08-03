@@ -1,0 +1,40 @@
+# Opt-in overlay: route agent-machine's model calls through the receipt-emitting gateway,
+# so every completion/embedding gets a governed InferenceReceipt — no app code change.
+#   docker compose -f docker-compose.yml -f docker-compose.receipts.yml up -d
+# The gateway forwards to ollama and passes non-inference endpoints (/api/tags, /api/show)
+# straight through, so agent-machine behaves identically.
+services:
+  receipt-gateway:
+    build:
+      # pinned to an immutable commit (reproducible; no silent supply-chain drift from main)
+      context: "https://github.com/SociOS-Linux/workstation-contracts.git#c7c1071e4d4adfbf8ed73efe4609e48a7d9e5f68"
+      dockerfile: deploy/receipt-gateway/Dockerfile
+    image: receipt-gateway:latest
+    environment:
+      RECEIPT_GATEWAY_BACKEND: http://ollama:11434
+      RECEIPT_GATEWAY_HOST: 0.0.0.0
+      RECEIPT_GATEWAY_PORT: "8898"
+      # real ollama registry model-layer digests for noetica's models
+      RECEIPT_GATEWAY_MODEL_DIGESTS: '{"qwen2.5:7b":"sha256:2bada8a7450677000f678be90653b85d364de7db25eb5ea54136ada5f3933730","deepseek-r1:8b":"sha256:e6a7edc1a4d7d9b2de136a221a57336b76316cfe53a252aeba814496c5ae439d","nomic-embed-text":"sha256:970aa74c0a90ef7482477cf803618e776e173c007bf957f635f1015bfcfef0e6"}'
+    depends_on:
+      ollama:
+        condition: service_healthy   # wait for ollama to be ready, not just started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8898/health',timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    volumes:
+      - receipt-ledger:/var/lib/receipt-gateway   # persistent receipt ledger
+    restart: unless-stopped
+
+  agent-machine:
+    environment:
+      - OLLAMA_HOST=http://receipt-gateway:8898
+    depends_on:
+      receipt-gateway:
+        condition: service_healthy   # only start once the gateway is actually serving
+
+volumes:
+  receipt-ledger:
