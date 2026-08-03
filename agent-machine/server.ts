@@ -3406,6 +3406,14 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
     routeOverrides.push({ layer, from, to, reason, kind })
   }
 
+  // Vision capability is a real override too: the router swaps an explicitly-picked TEXT
+  // model for a VLM when an image is attached (router.ts). Record it, or model_honored
+  // reports the explicit model as "honoured" while a different model actually saw the image.
+  if (explicitModelId && routerDecision.domain === 'vision' && explicitModelId !== model) {
+    recordOverride('vision-capability', explicitModelId, model,
+      routerDecision.rationale ?? `${explicitModelId} cannot process images — routed to a vision model`, 'capability')
+  }
+
   // ── Prophet Cloud Mesh opt-in ────────────────────────────────────────────────
   // When the operator opts in (Settings → Models → Prophet Cloud Mesh), route ALL
   // inference for this turn to their cloud mesh — an OpenAI-compatible vLLM endpoint
