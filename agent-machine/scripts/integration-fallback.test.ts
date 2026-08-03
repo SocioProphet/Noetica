@@ -64,11 +64,25 @@ function startFallback(): Promise<void> {
     // for a 768 corpus) and the broken primary 500s on /api/embeddings, so the corpus vector
     // tier — which retrieval prefers — is populated ONLY if THIS fallback answers embeddings.
     // Without it the doc is never semantically indexed and the RAG assertion below is ungrounded
-    // on shared CI runners (it stayed green locally only by lexical luck). Match both the classic
-    // /api/embeddings ({embedding}) and newer /api/embed ({embeddings}) shapes.
-    if (req.url?.startsWith('/api/embed')) {
+    // on shared CI runners (it stayed green locally only by lexical luck). Serve the two Ollama
+    // shapes distinctly, like a real Ollama: /api/embeddings (single → {embedding}) and
+    // /api/embed (multi → {embeddings} sized to the posted input[]).
+    const embVec = () => Array(768).fill(0.03)
+    const embPath = req.url ? req.url.split('?')[0] : ''
+    if (embPath === '/api/embeddings') {
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ embedding: Array(768).fill(0.03), embeddings: [Array(768).fill(0.03)] }))
+      res.end(JSON.stringify({ embedding: embVec() }))
+      return
+    }
+    if (embPath === '/api/embed') {
+      let raw = ''
+      req.on('data', (c) => { raw += c })
+      req.on('end', () => {
+        let n = 1
+        try { const inp = (JSON.parse(raw || '{}') as { input?: unknown }).input; n = Array.isArray(inp) ? Math.max(inp.length, 1) : 1 } catch { /* default 1 */ }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ embeddings: Array.from({ length: n }, embVec) }))
+      })
       return
     }
     // Valid OpenAI-compatible streaming completion.
