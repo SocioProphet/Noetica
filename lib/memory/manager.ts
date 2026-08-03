@@ -1,5 +1,5 @@
 import type { MemoryEntry, MemoryStore } from './types'
-import { cosineSimilarity, keywordScore } from './embeddings'
+import { cosineSimilarity, keywordScore, assertSameEmbeddingSpace } from './embeddings'
 
 export function addEntry(store: MemoryStore, entry: Omit<MemoryEntry, 'id' | 'created_at'>): MemoryStore {
   const newEntry: MemoryEntry = {
@@ -36,6 +36,12 @@ export function buildMemoryContext(store: MemoryStore, relevant?: MemoryEntry[])
 
 // Score and rank entries by semantic similarity to a query.
 // Uses cosine similarity when embeddings are available, keyword scoring otherwise.
+//
+// #602 / prophet-workspace#82: the corpus embedding dimension is PINNED and propagated onto the query
+// path. When the query was embedded but at a different dimension than the corpus, we FAIL LOUD
+// (EmbeddingSpaceMismatchError) rather than let every cosine collapse to 0 and silently degrade to
+// lexical keyword scoring. A query with NO embedding at all (embed backend unavailable) still keyword-
+// scores — that is an availability degrade, not a foreign-space mismatch.
 export function searchEntries(
   query: string,
   entries: MemoryEntry[],
@@ -44,9 +50,18 @@ export function searchEntries(
 ): MemoryEntry[] {
   if (entries.length === 0) return []
 
+  // Pin the corpus space from the first embedded entry and check the query against it up front, so
+  // the failure names query-vs-corpus dims instead of surfacing as a mid-scan zero.
+  if (queryEmbedding) {
+    const corpusVec = entries.find((e) => e.embedding)?.embedding
+    if (corpusVec) assertSameEmbeddingSpace(queryEmbedding, corpusVec, 'query')
+  }
+
   const scored = entries.map((e) => {
     let score: number
     if (queryEmbedding && e.embedding) {
+      // Both vectors are pinned to the corpus space above; cosineSimilarity additionally fails loud
+      // if a single corpus entry was embedded in a foreign space (contaminated corpus, #602).
       score = cosineSimilarity(queryEmbedding, e.embedding)
     } else {
       score = keywordScore(query, `${e.text} ${e.tags.join(' ')}`)
