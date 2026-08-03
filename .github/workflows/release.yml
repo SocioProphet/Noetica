@@ -77,6 +77,20 @@ jobs:
           # 0.4.24 six binaries share) — About box, /api/status, and bug reports all agree.
           V="${GITHUB_REF_NAME#v}"
           node -e "const fs=require('fs');for(const f of ['package.json','src-tauri/tauri.conf.json']){const j=JSON.parse(fs.readFileSync(f));j.version='$V';fs.writeFileSync(f,JSON.stringify(j,null,2))}"
+          # Cargo.toml too. It was omitted from every stamp step and drifted to
+          # 0.4.13 while releases shipped 0.4.24 -- eleven patch versions of silent
+          # disagreement, with the Rust binary reporting the stale one. Cargo rejects
+          # a prerelease suffix it did not author, so stamp the BASE version
+          # (0.4.24 from 0.4.24-nightly.20260731).
+          BASE="${V%%-*}"
+          python3 - "$BASE" <<'PYEOF'
+          import re, sys, pathlib
+          p = pathlib.Path('src-tauri/Cargo.toml')
+          t = p.read_text()
+          t2 = re.sub(r'^version\s*=\s*"[^"]+"', f'version = "{sys.argv[1]}"', t, count=1, flags=re.M)
+          assert t2 != t, 'Cargo.toml version line not found'
+          p.write_text(t2)
+          PYEOF
           echo "stamped $V"
 
       - name: Build agent-machine binary (universal)
@@ -292,6 +306,20 @@ jobs:
         run: |
           V="${GITHUB_REF_NAME#v}"
           node -e "const fs=require('fs');for(const f of ['package.json','src-tauri/tauri.conf.json']){const j=JSON.parse(fs.readFileSync(f));j.version='$V';fs.writeFileSync(f,JSON.stringify(j,null,2))}"
+          # Cargo.toml too. It was omitted from every stamp step and drifted to
+          # 0.4.13 while releases shipped 0.4.24 -- eleven patch versions of silent
+          # disagreement, with the Rust binary reporting the stale one. Cargo rejects
+          # a prerelease suffix it did not author, so stamp the BASE version
+          # (0.4.24 from 0.4.24-nightly.20260731).
+          BASE="${V%%-*}"
+          python3 - "$BASE" <<'PYEOF'
+          import re, sys, pathlib
+          p = pathlib.Path('src-tauri/Cargo.toml')
+          t = p.read_text()
+          t2 = re.sub(r'^version\s*=\s*"[^"]+"', f'version = "{sys.argv[1]}"', t, count=1, flags=re.M)
+          assert t2 != t, 'Cargo.toml version line not found'
+          p.write_text(t2)
+          PYEOF
           echo "stamped $V"
 
       - name: Build agent-machine binary (linux x64)
@@ -387,6 +415,20 @@ jobs:
         run: |
           V="${GITHUB_REF_NAME#v}"
           node -e "const fs=require('fs');for(const f of ['package.json','src-tauri/tauri.conf.json']){const j=JSON.parse(fs.readFileSync(f));j.version='$V';fs.writeFileSync(f,JSON.stringify(j,null,2))}"
+          # Cargo.toml too. It was omitted from every stamp step and drifted to
+          # 0.4.13 while releases shipped 0.4.24 -- eleven patch versions of silent
+          # disagreement, with the Rust binary reporting the stale one. Cargo rejects
+          # a prerelease suffix it did not author, so stamp the BASE version
+          # (0.4.24 from 0.4.24-nightly.20260731).
+          BASE="${V%%-*}"
+          python3 - "$BASE" <<'PYEOF'
+          import re, sys, pathlib
+          p = pathlib.Path('src-tauri/Cargo.toml')
+          t = p.read_text()
+          t2 = re.sub(r'^version\s*=\s*"[^"]+"', f'version = "{sys.argv[1]}"', t, count=1, flags=re.M)
+          assert t2 != t, 'Cargo.toml version line not found'
+          p.write_text(t2)
+          PYEOF
           echo "stamped $V"
 
       - name: Build agent-machine binary (windows x64)

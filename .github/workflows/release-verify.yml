@@ -1,0 +1,188 @@
+# Verify a published release is INSTALLABLE, beacon the verdict, recut only what a
+# rerun could fix.
+#
+# The gap this closes: `release` going green means the artifacts were produced, not
+# that anyone can install them. v0.4.24 built cleanly, published five assets, and was
+# uninstallable on macOS (ad-hoc signature, Gatekeeper rejects) and Windows (no
+# Authenticode) — invisible to every check that existed, and discovered only when a
+# person tried to install it.
+#
+# This runs as a CALLBACK on `release: published`, so it needs no coordination with the
+# release job and cannot be forgotten.
+#
+# ── Why the recut is conditional ─────────────────────────────────────────────
+# The verifier classifies each failure RETRIABLE (a dropped upload, a dead runner — a
+# rerun plausibly fixes it) or TERMINAL (no signing certificate configured, a version
+# source never stamped — a rerun reproduces it exactly). Only retriable failures recut.
+# Recutting a terminal failure is an infinite loop that burns runner minutes and buries
+# the real cause under identical red runs, which is worse than not retrying at all.
+#
+# The recut is additionally capped by RECUT_LIMIT so even a misclassification cannot
+# spin.
+name: release-verify
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to verify (e.g. v0.4.24)
+        required: true
+      allow_recut:
+        description: Permit an automatic recut if failures are retriable
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: write        # needed to re-dispatch the release workflow on a recut
+
+env:
+  RECUT_LIMIT: '2'
+
+jobs:
+  verify:
+    # macOS runner because Gatekeeper is the check that actually decides installability,
+    # and `spctl` exists nowhere else. Verifying the signature without asking Gatekeeper
+    # reports success on a build nobody can open.
+    runs-on: macos-latest
+    timeout-minutes: 30
+    outputs:
+      installable: ${{ steps.verify.outputs.installable }}
+      should_recut: ${{ steps.verify.outputs.should_recut }}
+      terminal: ${{ steps.verify.outputs.terminal }}
+      retriable: ${{ steps.verify.outputs.retriable }}
+      tag: ${{ steps.ctx.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag and previous release
+        id: ctx
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.tag || github.event.release.tag_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # Previous release of the same kind: a nightly is compared against the last
+          # nightly, a stable against the last stable. Comparing a nightly to a stable
+          # would report a spurious ordering failure on every nightly.
+          if [[ "$TAG" == *nightly* ]]; then FILTER='select(.isPrerelease)'; else FILTER='select(.isPrerelease|not)'; fi
+          PREV=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 30 --json tagName,isPrerelease \
+                  --jq "[.[] | $FILTER | .tagName] | map(select(. != \"$TAG\")) | .[0] // \"\"")
+          echo "previous=$PREV" >> "$GITHUB_OUTPUT"
+          echo "verifying $TAG against previous=$PREV"
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+
+      - name: Download every published asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p artifacts
+          gh release download "${{ steps.ctx.outputs.tag }}" --repo "$GITHUB_REPOSITORY" \
+            --dir artifacts --clobber
+          ls -la artifacts
+
+      - name: Unpack the macOS bundle for Gatekeeper
+        run: |
+          DMG=$(ls artifacts/*.dmg 2>/dev/null | head -1) || true
+          if [ -n "$DMG" ]; then
+            hdiutil attach -nobrowse -readonly "$DMG"
+            APP=$(ls -d /Volumes/*/*.app 2>/dev/null | head -1)
+            [ -n "$APP" ] && cp -R "$APP" artifacts/
+            hdiutil detach "$(dirname "$APP")" -quiet || true
+          else
+            echo "no dmg published — macOS checks will be skipped"
+          fi
+
+      - name: Verify installability
+        id: verify
+        run: |
+          set +e
+          node scripts/verify-release-artifacts.mjs \
+            --tag "${{ steps.ctx.outputs.tag }}" \
+            --previous "${{ steps.ctx.outputs.previous }}" \
+            --dir artifacts --repo-root . --json verdict.json
+          echo "exit=$?"
+          set -e
+          node -e "
+            const v = require('./verdict.json');
+            const out = process.env.GITHUB_OUTPUT;
+            const fs = require('fs');
+            fs.appendFileSync(out, 'installable=' + v.installable + '\n');
+            fs.appendFileSync(out, 'should_recut=' + v.should_recut + '\n');
+            fs.appendFileSync(out, 'terminal=' + (v.terminal.join(',') || 'none') + '\n');
+            fs.appendFileSync(out, 'retriable=' + (v.retriable.join(',') || 'none') + '\n');
+          "
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-verdict-${{ steps.ctx.outputs.tag }}
+          path: verdict.json
+
+      # The beacon: the verdict becomes a durable record, not just a red run that
+      # scrolls away. Written as a job summary AND an artifact so it survives log
+      # retention.
+      - name: Beacon the verdict
+        if: always()
+        run: |
+          {
+            echo "## Release installability — ${{ steps.ctx.outputs.tag }}"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| installable | ${{ steps.verify.outputs.installable }} |"
+            echo "| terminal (a rerun cannot fix) | ${{ steps.verify.outputs.terminal }} |"
+            echo "| retriable (a rerun might fix) | ${{ steps.verify.outputs.retriable }} |"
+            echo "| recut | ${{ steps.verify.outputs.should_recut }} |"
+            echo
+            if [ "${{ steps.verify.outputs.installable }}" != "true" ]; then
+              echo "> A green release job means the artifacts were produced. It does not mean"
+              echo "> they can be installed. This release cannot be, for the reasons above."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail the run when the release is not installable
+        if: steps.verify.outputs.installable != 'true'
+        run: |
+          echo "::error::${{ steps.ctx.outputs.tag }} is NOT installable — terminal: ${{ steps.verify.outputs.terminal }}; retriable: ${{ steps.verify.outputs.retriable }}"
+          exit 1
+
+  # The deferred: only reached when the failures are ALL retriable.
+  recut:
+    needs: verify
+    if: always() && needs.verify.outputs.installable != 'true' && needs.verify.outputs.should_recut == 'true' && (inputs.allow_recut == null || inputs.allow_recut)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Refuse to spin
+        id: budget
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Count prior verify runs for this same tag. Even a misclassified terminal
+          # failure cannot loop more than RECUT_LIMIT times.
+          N=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release-verify.yml \
+                --limit 50 --json displayTitle,conclusion \
+                --jq "[.[] | select(.displayTitle | contains(\"${{ needs.verify.outputs.tag }}\"))] | length")
+          echo "prior attempts for this tag: $N (limit ${{ env.RECUT_LIMIT }})"
+          if [ "$N" -gt "${{ env.RECUT_LIMIT }}" ]; then
+            echo "::error::recut budget exhausted for ${{ needs.verify.outputs.tag }} — a failure that survives ${{ env.RECUT_LIMIT }} reruns is not transient, whatever it was classified as. Investigate rather than retry."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Recut the release job
+        if: steps.budget.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "recutting release for ${{ needs.verify.outputs.tag }} (retriable: ${{ needs.verify.outputs.retriable }})"
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" \
+            --ref "${{ needs.verify.outputs.tag }}" || {
+              echo "::warning::could not dispatch release.yml — it may be tag-triggered only. Re-push the tag to recut."
+            }
