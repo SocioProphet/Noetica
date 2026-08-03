@@ -203,9 +203,47 @@ export function checkWindowsExe(exePath) {
 /** Sidecars missing from the payload is the classic Tauri externalBin failure. */
 const REQUIRED_SIDECARS = ['noetica', 'agent-machine', 'noetica-embed', 'noetica-operator']
 
-/** libwebkit2gtk-4.1 does not exist before Ubuntu 23.04 / Debian 12. */
-const NARROW_DEPS = {
-  'libwebkit2gtk-4.1-0': 'absent on Ubuntu 22.04 LTS (which has 4.0); dpkg fails with unmet dependencies',
+/**
+ * Dependency checks must be TRUE, or they are worse than absent.
+ *
+ * An earlier version of this file asserted that libwebkit2gtk-4.1-0 "does not exist
+ * before Ubuntu 23.04" and classified it TERMINAL. That was simply wrong --
+ * libwebkit2gtk-4.1-0 ships on Ubuntu 22.04 (jammy, 2.50.4-0), 24.04, and Debian 12.
+ * The check would have fired a false terminal on every single release, which
+ * permanently blocks the recut path for a non-reason and trains everyone to ignore a
+ * red verdict. A confidently wrong gate does more damage than no gate.
+ *
+ * So this no longer guesses at distro availability, which cannot be settled from
+ * inside the package anyway. It checks the thing the package can actually answer: that
+ * a dependency list exists and names a web engine at all. A .deb that declares no
+ * webkit dependency will install and then fail to launch, which presents to the user
+ * as a broken app rather than a broken package.
+ *
+ * Verifying real distro satisfiability needs an apt resolve against each target
+ * release. That belongs in a matrix job with containers, not in a static check that
+ * pretends to know.
+ */
+const WEB_ENGINE_HINT = /webkit|webview/i
+
+/**
+ * Pure judgement on a Depends line, kept separate from unpacking so it is directly
+ * testable. The distinction that matters: a MISSING web-engine dependency is a real
+ * defect, while the SPECIFIC version of an engine dependency is not something this
+ * check is entitled to have an opinion about.
+ */
+export function classifyDepends(depends) {
+  const d = (depends || '').trim()
+  if (!d) {
+    return { ok: false, klass: TERMINAL,
+      detail: 'the package declares no dependencies at all; a Tauri app needs a web ' +
+              'engine and GTK, so this installs and then fails to launch' }
+  }
+  if (!WEB_ENGINE_HINT.test(d)) {
+    return { ok: false, klass: TERMINAL,
+      detail: `Depends names no web engine (${d}); a Tauri app cannot render without ` +
+              'one, so this installs and then fails to launch' }
+  }
+  return { ok: true, klass: null, detail: `declares a web engine dependency (${d})` }
 }
 
 export function checkDeb(debPath) {
@@ -225,15 +263,8 @@ export function checkDeb(debPath) {
   const controlPath = fs.existsSync(path.join(ctl, 'control'))
     ? path.join(ctl, 'control') : path.join(ctl, './control')
   const control = fs.existsSync(controlPath) ? fs.readFileSync(controlPath, 'utf8') : ''
-  const depends = (control.match(/^Depends:\s*(.+)$/m) || [])[1] || ''
-  const narrow = Object.keys(NARROW_DEPS).filter((d) => depends.includes(d))
-  if (narrow.length === 0) {
-    record('linux.deb.deps', true, 'no known distro-narrowing dependency')
-  } else {
-    record('linux.deb.deps', false,
-      narrow.map((d) => `${d}: ${NARROW_DEPS[d]}`).join('; ') +
-      '. A rerun rebuilds the same dependency list.', TERMINAL)
-  }
+  const dep = classifyDepends((control.match(/^Depends:\s*(.+)$/m) || [])[1])
+  record('linux.deb.deps', dep.ok, dep.detail, dep.klass)
 
   // payload
   const list = sh('tar', ['tzf', path.join(tmp, 'data.tar.gz')])
