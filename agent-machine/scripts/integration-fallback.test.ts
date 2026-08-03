@@ -46,6 +46,19 @@ function startFallback(): Promise<void> {
   fallback = http.createServer((req, res) => {
     if (req.url?.startsWith('/api/tags')) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(TAGS); return }
     if (req.url?.startsWith('/api/show')) { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"model_info":{}}'); return }
+    // A working fallback Ollama also serves embeddings. Since PR #600 pinned the corpus to
+    // 768-dim (doc-store passes { dims: CORPUS_EMBED_DIM } to embedText), the ingested doc only
+    // gets a semantic vector if a 768-dim source is reachable: the sidecar is bge-384 (rejected
+    // for a 768 corpus) and the broken primary 500s on /api/embeddings, so the corpus vector
+    // tier — which retrieval prefers — is populated ONLY if THIS fallback answers embeddings.
+    // Without it the doc is never semantically indexed and the RAG assertion below is ungrounded
+    // on shared CI runners (it stayed green locally only by lexical luck). Match both the classic
+    // /api/embeddings ({embedding}) and newer /api/embed ({embeddings}) shapes.
+    if (req.url?.startsWith('/api/embed')) {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ embedding: Array(768).fill(0.03), embeddings: [Array(768).fill(0.03)] }))
+      return
+    }
     // Valid OpenAI-compatible streaming completion.
     res.writeHead(200, { 'content-type': 'text/event-stream' })
     res.write(`data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant' } }] })}\n\n`)
