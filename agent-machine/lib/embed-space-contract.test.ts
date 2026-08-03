@@ -11,6 +11,12 @@ import { test } from 'node:test';
 
 import { EMBED_MODEL, CORPUS_EMBED_DIM } from './ollama.js';
 
+/** Strip // line and block comments so the source-scanning guards match CODE, not prose that happens
+ *  to mention embedText/vecQuery (a comment naming a call must not trip — or defeat — a guard). */
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+}
+
 // The test suite is compiled to CommonJS in this repo, so __dirname is available;
 // import.meta.url isn't accessible under that target (TS1470) — house pattern.
 const HERE = __dirname;
@@ -46,7 +52,7 @@ test('doc-store enforces the pinned dimension on every corpus/query embed (no ba
   // The runtime space is only guaranteed if the corpus/query paths DECLARE dims — a bare
   // embedText(text) could take the Rust sidecar's (bge-384) answer and silently fork the
   // corpus. Guard against a regression that drops the dims argument on those paths.
-  const docStore = readFileSync(join(HERE, 'doc-store.ts'), 'utf8');
+  const docStore = stripComments(readFileSync(join(HERE, 'doc-store.ts'), 'utf8'));
   const corpusCalls = [...docStore.matchAll(/await embedText\(([^)]*)\)/g)].map((m) => m[1]);
   const offenders = corpusCalls.filter(
     (args) =>
@@ -58,6 +64,34 @@ test('doc-store enforces the pinned dimension on every corpus/query embed (no ba
     [],
     `doc-store has embedText call(s) that don't pin the corpus dimension: ${JSON.stringify(offenders)} — ` +
       `pass { dims: CORPUS_EMBED_DIM } so the corpus can't silently fork to the sidecar's space.`,
+  );
+});
+
+test('query paths embed in the pinned corpus space (no unpinned-reference / tier-by-text drift)', () => {
+  // The dims-on-embedText guard above only sees DIRECT `await embedText(...)` calls. This outage
+  // (CI retrieval "ungrounded", green locally) came from the two paths it CAN'T see, where the query
+  // gets embedded in the embedder's NATIVE space (bge-384) instead of the pinned 768 corpus space:
+  //   1) embedText passed BY REFERENCE as a search callback — e.g. hgSemanticSearch(q, k, embedText, …):
+  //      the helper embeds the query with the bare fn, no dims → sidecar's 384 space.
+  //   2) the ANN tier queried BY TEXT — vecQuery(col, { text: query }): the sidecar re-embeds the query
+  //      in its own 384 space, but chunks were upserted at CORPUS_EMBED_DIM (768) → every cosine
+  //      mismatches → zero hits. The tier must be queried by a pinned VECTOR, not text.
+  const docStore = stripComments(readFileSync(join(HERE, 'doc-store.ts'), 'utf8'));
+
+  const byReference = /hgSemanticSearch\([^)]*,\s*embedText\s*[,)]/.test(docStore);
+  assert.ok(
+    !byReference,
+    'doc-store passes bare `embedText` as a search embedder (by reference) — the query would embed in ' +
+      "the sidecar's native space and fork from the 768 corpus. Pass a dims-pinned wrapper " +
+      '(q) => embedText(q, { dims: CORPUS_EMBED_DIM }) instead.',
+  );
+
+  const tierByText = /vecQuery\([^)]*\{\s*text:/.test(docStore);
+  assert.ok(
+    !tierByText,
+    'doc-store queries the vector tier by { text } — the sidecar re-embeds in its native space while ' +
+      'chunks are stored at CORPUS_EMBED_DIM, so every hit mismatches. Embed the query at ' +
+      '{ dims: CORPUS_EMBED_DIM } and query by { vec }.',
   );
 });
 

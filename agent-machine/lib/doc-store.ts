@@ -388,7 +388,14 @@ export function chunkInScope(filename: string, scope?: DocScope): boolean {
 
 /** Top-k document chunks by cosine to the query — delegated to HellGraph's vector engine. */
 export async function semanticSearch(query: string, k = 5): Promise<ChunkHit[]> {
-  return hgSemanticSearch(query, k, embedText, { scope: process.env['NOETICA_DEMO_DOC'] || undefined })
+  // Embed the query in the PINNED corpus space (dims: CORPUS_EMBED_DIM), NOT the embedder's native
+  // space. Chunk vectors were stored at CORPUS_EMBED_DIM (embedText(dims:…) at ingest); a bare
+  // embedText here would embed the query in the sidecar's own space (e.g. bge-384) and every cosine
+  // against the 768-dim corpus mismatches → zero hits (the CI-only "ungrounded" retrieval). The
+  // embedder is passed to hgSemanticSearch BY REFERENCE (a callback), which the embed-space guard's
+  // text regex can't see — so the dimension pin must be applied explicitly right here.
+  const pinnedEmbed = (q: string) => embedText(q, { dims: CORPUS_EMBED_DIM })
+  return hgSemanticSearch(query, k, pinnedEmbed, { scope: process.env['NOETICA_DEMO_DOC'] || undefined })
 }
 
 /**
@@ -476,7 +483,15 @@ async function tierSemanticSearch(query: string, k: number, docScope?: DocScope)
       cols = cols.filter((c) => allow.has(c))
     }
     if (cols.length === 0) return scopedGraph(k)                      // tier empty / nothing in scope → graph
-    const merged = (await Promise.all(cols.map((c) => vecQuery(c, { text: query, k })))).flat()
+    // Query the ANN tier in the PINNED corpus space. The tier stores chunk vectors at CORPUS_EMBED_DIM
+    // (embedText(dims:…) at ingest), but vecQuery({text}) has the sidecar re-embed the query in ITS OWN
+    // space (e.g. bge-384) — a dimension mismatch that returns ZERO hits whenever the sidecar space !=
+    // the corpus space (the CI-only "ungrounded" retrieval, invisible locally where the sidecar falls
+    // back to the same space). Embed the query ourselves at CORPUS_EMBED_DIM and query BY VECTOR so both
+    // sides share one space; only fall back to text-embedding if the pinned embed is unavailable.
+    const qvec = await embedText(query, { dims: CORPUS_EMBED_DIM })
+    const q: { text?: string; vec?: number[]; k: number } = qvec.length ? { vec: qvec, k } : { text: query, k }
+    const merged = (await Promise.all(cols.map((c) => vecQuery(c, q)))).flat()
     if (merged.length === 0) return scopedGraph(k)
     const hits: ChunkHit[] = merged
       .map((h) => {

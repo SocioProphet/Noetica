@@ -23,6 +23,18 @@ const BASE = `http://127.0.0.1:${AM_PORT}`
 let server: ChildProcess
 let primary: http.Server
 let fallback: http.Server
+// Bounded ring buffer of the server's own stdout/stderr. A CI-only retrieval failure (e.g. the
+// query/corpus embedding-space mismatch that made this test flake) is undiagnosable when the server runs
+// with stdio:'ignore' — its embedText / dim-mismatch / hit-count logs never reach the CI transcript.
+// Capture them (capped so a long run can't grow unbounded) and dump the tail into a failing assertion.
+const serverLog: string[] = []
+function pushServerLog(d: Buffer): void {
+  serverLog.push(d.toString())
+  if (serverLog.length > 400) serverLog.splice(0, serverLog.length - 400)   // keep only the recent tail
+}
+function dumpServerLog(label: string): string {
+  return `\n----- ${label}: last server log lines -----\n${serverLog.slice(-80).join('')}\n----- end server log -----`
+}
 
 const TAGS = JSON.stringify({ models: [{ name: 'qwen2.5:7b' }, { name: 'llama3.2:3b' }] })
 
@@ -46,6 +58,33 @@ function startFallback(): Promise<void> {
   fallback = http.createServer((req, res) => {
     if (req.url?.startsWith('/api/tags')) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(TAGS); return }
     if (req.url?.startsWith('/api/show')) { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"model_info":{}}'); return }
+    // A working fallback Ollama also serves embeddings. Since PR #600 pinned the corpus to
+    // 768-dim (doc-store passes { dims: CORPUS_EMBED_DIM } to embedText), the ingested doc only
+    // gets a semantic vector if a 768-dim source is reachable: the sidecar is bge-384 (rejected
+    // for a 768 corpus) and the broken primary 500s on /api/embeddings, so the corpus vector
+    // tier — which retrieval prefers — is populated ONLY if THIS fallback answers embeddings.
+    // Without it the doc is never semantically indexed and the RAG assertion below is ungrounded
+    // on shared CI runners (it stayed green locally only by lexical luck). Serve the two Ollama
+    // shapes distinctly, like a real Ollama: /api/embeddings (single → {embedding}) and
+    // /api/embed (multi → {embeddings} sized to the posted input[]).
+    const embVec = () => Array(768).fill(0.03)
+    const embPath = req.url ? req.url.split('?')[0] : ''
+    if (embPath === '/api/embeddings') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ embedding: embVec() }))
+      return
+    }
+    if (embPath === '/api/embed') {
+      let raw = ''
+      req.on('data', (c) => { raw += c })
+      req.on('end', () => {
+        let n = 1
+        try { const inp = (JSON.parse(raw || '{}') as { input?: unknown }).input; n = Array.isArray(inp) ? Math.max(inp.length, 1) : 1 } catch { /* default 1 */ }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ embeddings: Array.from({ length: n }, embVec) }))
+      })
+      return
+    }
     // Valid OpenAI-compatible streaming completion.
     res.writeHead(200, { 'content-type': 'text/event-stream' })
     res.write(`data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant' } }] })}\n\n`)
@@ -73,8 +112,11 @@ before(async () => {
       // its no-Origin mutating POSTs are 403'd. (Guard logic is covered by lib/origin-guard.test.ts.)
       NOETICA_ORIGIN_GUARD: '0',
     },
-    stdio: 'ignore',
+    // Capture the server's logs (was 'ignore') so a CI-only retrieval failure is inspectable from the transcript.
+    stdio: ['ignore', 'pipe', 'pipe'],
   })
+  server.stdout?.on('data', pushServerLog)
+  server.stderr?.on('data', pushServerLog)
   const deadline = Date.now() + 30_000
   while (Date.now() < deadline) {
     try { const r = await fetch(`${BASE}/api/status`, { signal: AbortSignal.timeout(1500) }); if (r.ok) return } catch { /* wait */ }
@@ -116,6 +158,7 @@ test('RAG: ingested document surfaces as hybrid-rerank-documents in chat', async
     body: JSON.stringify({ filename: 'baxter.txt', content: 'The Baxter facility shut down after Hurricane Helene flooding in September 2024.' }),
   })
   assert.equal(ing.status, 200)
+  const ingBody = await ing.text()   // DIAGNOSTIC: how many chunks embedded vs stored?
   // Embedding + indexing the freshly-ingested doc is async, so semantic retrieval can race the chat
   // request under CI load (the source of the flake). Poll the chat until the doc is indexed and
   // injected, or a deadline — same assertion, but robust to the indexing race instead of one shot.
@@ -131,5 +174,7 @@ test('RAG: ingested document surfaces as hybrid-rerank-documents in chat', async
     if (text.includes('hybrid-rerank-documents')) break
     await new Promise((res) => setTimeout(res, 1000))
   }
-  assert.ok(text.includes('hybrid-rerank-documents'), `chat should inject the ingested doc as hybrid-rerank-documents; got:\n${text.slice(0, 400)}`)
+  assert.ok(text.includes('hybrid-rerank-documents'),
+    `chat should inject the ingested doc as hybrid-rerank-documents; got:\n${text.slice(0, 400)}\n` +
+    `ingest response: ${ingBody}` + dumpServerLog('RAG ungrounded'))
 })
