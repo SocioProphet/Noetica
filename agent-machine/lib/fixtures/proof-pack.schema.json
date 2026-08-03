@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://socioprophet.ai/contracts/proof-pack.schema.json",
+  "title": "ProofPack",
+  "description": "Canonical estate proof-pack: the one contract every provenance/attestation surface conforms to (unifies identity-is-prime proof_artifact, ProCybernetica lawful-learning ledger, synapseiq proof-pack, Noetica dispatch-ledger, meshrush/sp-attest compile-attestation). A high-consequence artifact carries an epistemic level, a hash-chained ledger head, a claim_mode (never mixed silently), gate/witness evidence, and signatures.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "proof_pack_id",
+    "subject_ref",
+    "claim_mode",
+    "epistemic_level",
+    "ledger",
+    "signatures",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1.0"
+    },
+    "proof_pack_id": {
+      "type": "string",
+      "pattern": "^proofpack_[a-z0-9][a-z0-9_.-]*$"
+    },
+    "subject_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref_type",
+        "ref_id"
+      ],
+      "properties": {
+        "ref_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ref_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "uri": {
+          "type": "string"
+        }
+      }
+    },
+    "claim_mode": {
+      "type": "string",
+      "enum": [
+        "formal_construction",
+        "illustrative",
+        "fixture_validated",
+        "experimental",
+        "independently_reproduced",
+        "audited"
+      ],
+      "description": "\u00a78.4: claim modes MUST NOT be silently mixed."
+    },
+    "epistemic_level": {
+      "type": "string",
+      "enum": [
+        "rejected",
+        "speculative",
+        "synthetic",
+        "empirical",
+        "bounded",
+        "proved"
+      ],
+      "description": "sp-core lattice (rejected<..<proved)."
+    },
+    "ledger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algo",
+        "head"
+      ],
+      "properties": {
+        "algo": {
+          "type": "string",
+          "enum": [
+            "blake3",
+            "blake2b",
+            "sha256"
+          ]
+        },
+        "head": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{16,128}$"
+        },
+        "prior": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{16,128}$",
+          "description": "prior digest in the hash chain; omitted at genesis."
+        }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "name",
+          "passed"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "number"
+          },
+          "threshold": {
+            "type": "number"
+          },
+          "passed": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "witnesses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "hash",
+          "sig"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "consent",
+              "adjudication",
+              "validator"
+            ]
+          },
+          "hash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{16,128}$"
+          },
+          "sig": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "signatures": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "producer": {
+          "type": "string"
+        },
+        "source_ref": {
+          "type": "string"
+        },
+        "policy_fingerprint": {
+          "type": "string"
+        }
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
