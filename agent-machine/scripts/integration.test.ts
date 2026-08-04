@@ -115,6 +115,26 @@ test('flags endpoint reports feature-flag state + graduation status', async () =
   assert.equal(body.auth_required, false)
 })
 
+test('POST /api/acquire records a governed action + fails closed when the worker URL is unset', async () => {
+  // ACQUIRE_WORKER_URL is not set in the test env, so acquisition MUST fail closed (503) rather than
+  // Noetica fetching the URL itself — and the action MUST still be recorded as a governed run.
+  const { status, body } = await post('/api/acquire', { url: 'https://example.com/', accountClass: 'sovereign', tier: 'T1' })
+  assert.equal(status, 503)
+  assert.equal(body.error, 'ACQUIRE_WORKER_URL not configured')
+  assert.ok(typeof body.actionId === 'string' && body.actionId.startsWith('acq-'), 'returns the governed actionId')
+  // The governed action is auditable in the same runs plane as /api/runs, marked failed.
+  const runs = await get('/api/runs')
+  const recorded = runs.body.runs.find((r: any) => r.id === body.actionId)
+  assert.ok(recorded, 'acquisition action is recorded in the runs plane')
+  assert.equal(recorded.role, 'acquire')
+  assert.equal(recorded.status, 'error')
+})
+
+test('POST /api/acquire rejects a missing/invalid url', async () => {
+  assert.equal((await post('/api/acquire', {})).status, 400)
+  assert.equal((await post('/api/acquire', { url: 'not-a-url' })).status, 400)
+})
+
 test('self/reset prunes learned state (auth disabled by default)', async () => {
   const { status, body } = await post('/api/self/reset', {})
   assert.equal(status, 200)
