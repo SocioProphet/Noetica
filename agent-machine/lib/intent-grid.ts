@@ -40,6 +40,8 @@ export const TOOL_SIGNATURE: Record<Tool, GridAction> = {
   // store:read — reading a persisted corpus, index or system record
   read_file: 'retrieve', list_directory: 'retrieve', find_symbol: 'retrieve',
   web_search: 'retrieve', registry_lookup: 'retrieve', brain_status: 'retrieve',
+  // acquire brings governed external public data INTO Noetica (like web_search, a network read) — retrieve.
+  acquire: 'retrieve',
   // store:write — persisting
   write_file: 'create', edit_file: 'create', remember: 'create',
   set_identity: 'create', update_self: 'create',
