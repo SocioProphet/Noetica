@@ -75,7 +75,7 @@ import { getAtomSpace } from '@socioprophet/hellgraph'
 import { decayAll } from '@socioprophet/hellgraph'
 import { consolidate } from '@socioprophet/hellgraph'
 import { recordAttentionSnapshot, pushSnapshotToPrometheusd, ingestPrometheusCandidate } from '@socioprophet/hellgraph'
-import { isOllamaRunning, listLocalModels, pullModel, streamOllama, getModelContextLength, ollamaBase, generateOllamaText } from './lib/ollama.js'
+import { isOllamaRunning, listLocalModels, listLoadedModels, pullModel, streamOllama, getModelContextLength, ollamaBase, generateOllamaText } from './lib/ollama.js'
 import { parseInlineToolCalls } from './lib/tool-calls.js'
 import { repairToolArgs } from './lib/tool-validate.js'
 import { containmentState, hydrateContainment, resolvePurpose, armKillSwitch, disarmKillSwitch, bindPurpose, PURPOSES } from './lib/agent-containment.js'
@@ -8972,6 +8972,25 @@ Question: ${question}`
   }
 
   // GET /api/models — model suite status for first-run UI
+  // GET /api/models/loaded — models RESIDENT in the runtime (Ollama /api/ps), i.e. the
+  // ones that will answer a first turn without a cold load. The composer polls this to
+  // show an honest "Loading <model>…" state and gate send until the model is actually
+  // ready, instead of inferring warm-up from a failed request after the fact.
+  if (req.method === 'GET' && url.pathname === '/api/models/loaded') {
+    void (async () => {
+      const ollamaUp = await isOllamaRunning()
+      // loaded = resident (will answer without a cold load); pulled = installed on disk.
+      // The client warms only a model that is pulled-but-not-loaded, so a cloud model
+      // (in neither list) never shows a warm-up that would never end.
+      const [loaded, pulled] = ollamaUp
+        ? await Promise.all([listLoadedModels(), listLocalModels()])
+        : [[], []]
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ollamaRunning: ollamaUp, loaded, pulled }))
+    })()
+    return
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/models') {
     void (async () => {
       const ollamaUp = await isOllamaRunning()

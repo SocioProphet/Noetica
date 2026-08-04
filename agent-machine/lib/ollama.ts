@@ -293,6 +293,23 @@ export async function listLocalModels(): Promise<string[]> {
   }
 }
 
+/**
+ * Models currently RESIDENT in the runtime (Ollama `/api/ps`) — the ones that will
+ * answer a first turn without a cold load. Distinct from listLocalModels (pulled, on
+ * disk). Best-effort: an empty/failed probe returns [] rather than throwing, so the
+ * readiness UI treats "unknown" as "not yet ready" and keeps counting.
+ */
+export async function listLoadedModels(): Promise<string[]> {
+  try {
+    const res = await fetch(`${ollamaBase()}/api/ps`, { signal: AbortSignal.timeout(2_000) })
+    if (!res.ok) return []
+    const json = (await res.json()) as { models?: Array<{ name?: string; model?: string }> }
+    return json.models?.map((m) => m.name ?? m.model ?? '').filter(Boolean) ?? []
+  } catch {
+    return []
+  }
+}
+
 // Per-model context length, read live from Ollama's /api/show and cached.
 // Without this we'd hardcode a one-size num_ctx — too small for modern local
 // models (qwen2.5/deepseek-r1 ship 32k–128k) and wasteful for tiny ones.

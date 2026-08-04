@@ -90,6 +90,7 @@ import type { PendingAttachment } from '@/lib/types/attachment'
 import type { McpTool } from '@/lib/types/mcp'
 import type { ChatMessage, ToolCallRecord, ToolResultRecord } from '@/lib/types/message'
 import { mergeTurnGovernance } from '@/lib/governance/turnGovernance'
+import { isModelReady, warmupLabel } from '@/lib/runtime/modelReadiness'
 import type { Artifact } from '@/lib/types/artifact'
 import type { SteeringConfig } from '@/lib/types/steering'
 import type { NoeticaMode } from '@/lib/client/noeticaTransport'
@@ -423,6 +424,33 @@ export function AppShell() {
       .catch(() => { /* agent machine not running yet */ })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings.agentMachineEndpoint])
+
+  // Model warm-up readiness (B1-9): poll the runtime for RESIDENT models and, while the
+  // selected LOCAL model isn't loaded yet, surface a named "Loading <model>… Ns" state and
+  // gate send — proactively, not inferred from a request that already failed. A cloud model
+  // (in neither the loaded nor the pulled list) never shows a warm-up that would never end.
+  const [modelWarmupLabel, setModelWarmupLabel] = useState<string | null>(null)
+  useEffect(() => {
+    if (settings.runtimeMode !== 'agent-machine' || !settings.agentMachineEndpoint || !modelId) {
+      setModelWarmupLabel(null); return
+    }
+    let cancelled = false
+    const started = Date.now()
+    const poll = async () => {
+      try {
+        const r = await fetch(`${settings.agentMachineEndpoint}/api/models/loaded`)
+        const data = r.ok ? (await r.json()) as { ollamaRunning?: boolean; loaded?: string[]; pulled?: string[] } : null
+        if (cancelled) return
+        const isLocalPulled = isModelReady(modelId, data?.pulled ?? [])
+        const resident = isModelReady(modelId, data?.loaded ?? [])
+        setModelWarmupLabel(data?.ollamaRunning && isLocalPulled && !resident ? warmupLabel(modelId, Date.now() - started) : null)
+      } catch { if (!cancelled) setModelWarmupLabel(null) }
+    }
+    void poll()
+    const iv = setInterval(poll, 1500)
+    return () => { cancelled = true; clearInterval(iv) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.agentMachineEndpoint, settings.runtimeMode, modelId])
 
   const activeModel = useMemo(
     () => models.find((m) => m.id === modelId) ?? models[0],
@@ -1908,6 +1936,7 @@ export function AppShell() {
               <SurfaceErrorBoundary key={activeSurface} surface={activeSurface}>
               <CenterWorkspace
                 activeSurface={activeSurface}
+                modelWarmupLabel={modelWarmupLabel}
                 sessionId={activeSession?.id}
                 activeProjectTitle={activeProject?.title}
                 projectDocCount={activeProject?.fileAttachments?.length ?? 0}
@@ -2155,6 +2184,7 @@ type CenterProps = {
   activeSurface: ActiveSurface
   messages: ChatMessage[]
   isStreaming: boolean
+  modelWarmupLabel: string | null
   workspaceMode: WorkspaceMode
   fanoutModelCount: number
   modelId: string
@@ -2205,7 +2235,7 @@ type CenterProps = {
   onStopSpeaking?: () => void
 }
 
-function CenterWorkspace({ activeSurface, sessionId, activeProjectTitle, projectDocCount, projectCollection, chatCollection, projects, activeProjectId, onSelectProject, messages, isStreaming, workspaceMode, fanoutModelCount, modelId, thinkingBudget, onSend, onFanout, onStop, onRegenerate, onResume, onFork, onEdit, onRecombine, onWorkspaceModeChange, onExtractArtifact, onModelChange, onOpenPalette, mcpTools, systemPrompt, onSystemPromptChange, activeArtifact, onCloseArtifact, onArtifactUpdate, onArtifactDelete, onAtomSelect, onOpenSettings, onNavigateToOperate, onNavigateToGovern, onSpeak, speakingMessageId, onFeedback, agentMode, onSetAgentMode, onPlanApprove, onPlanReject, onInspect, onStartDictation, onStopDictation, dictating, speaking, onStopSpeaking }: CenterProps) {
+function CenterWorkspace({ activeSurface, sessionId, activeProjectTitle, projectDocCount, projectCollection, chatCollection, projects, activeProjectId, onSelectProject, messages, isStreaming, modelWarmupLabel, workspaceMode, fanoutModelCount, modelId, thinkingBudget, onSend, onFanout, onStop, onRegenerate, onResume, onFork, onEdit, onRecombine, onWorkspaceModeChange, onExtractArtifact, onModelChange, onOpenPalette, mcpTools, systemPrompt, onSystemPromptChange, activeArtifact, onCloseArtifact, onArtifactUpdate, onArtifactDelete, onAtomSelect, onOpenSettings, onNavigateToOperate, onNavigateToGovern, onSpeak, speakingMessageId, onFeedback, agentMode, onSetAgentMode, onPlanApprove, onPlanReject, onInspect, onStartDictation, onStopDictation, dictating, speaking, onStopSpeaking }: CenterProps) {
   if (activeSurface === 'notes')        return <NotesSurface />
   if (activeSurface === 'canvas')       return <CanvasSurface />
   if (activeSurface === 'workrooms')    return <TabbedWorkspace tabs={[
@@ -2299,6 +2329,7 @@ function CenterWorkspace({ activeSurface, sessionId, activeProjectTitle, project
           onFanout={onFanout}
           onStop={onStop}
           disabled={isStreaming}
+          modelWarmupLabel={modelWarmupLabel}
           fanoutModelCount={fanoutModelCount}
           workspaceMode={workspaceMode}
           onWorkspaceModeChange={onWorkspaceModeChange}

@@ -43,6 +43,9 @@ type InputAreaProps = {
   speaking?: boolean
   onStopSpeaking?: () => void
   disabled?: boolean
+  /** Warm-up (B1-9): a "Loading <model>… Ns" label while the local model loads; send is
+   *  gated and a banner shown until it's null (ready). */
+  modelWarmupLabel?: string | null
   fanoutModelCount?: number
   workspaceMode: WorkspaceMode
   onWorkspaceModeChange: (mode: WorkspaceMode) => void
@@ -101,6 +104,7 @@ export function InputArea({
   onSend, onFanout, onStop,
   onStartDictation, onStopDictation, dictating = false, speaking = false, onStopSpeaking,
   disabled = false,
+  modelWarmupLabel = null,
   fanoutModelCount = 0,
   workspaceMode, onWorkspaceModeChange,
   mcpTools = [],
@@ -341,7 +345,7 @@ export function InputArea({
     }
   }
 
-  const canSend = (content.trim().length > 0 || attachments.length > 0 || ingestedDocs.length > 0) && !sending && !disabled
+  const canSend = (content.trim().length > 0 || attachments.length > 0 || ingestedDocs.length > 0) && !sending && !disabled && !modelWarmupLabel
   // Any non-default secondary option active? → show a dot on the ⚙ toggle so hidden state isn't invisible.
   const hasActiveOptions = !!systemPrompt || webMode || selectedTools.length > 0
     || retrievalScope === 'everything'
@@ -551,6 +555,20 @@ export function InputArea({
               placeholder="You are a helpful assistant…"
               className="w-full resize-none border-0 bg-transparent text-[12px] leading-5 text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)]"
             />
+          </div>
+        )}
+
+        {/* Model warm-up (B1-9): a named, counting readiness state while the local model
+            loads — send is gated (canSend) until it's ready, so the first message no
+            longer hits a cold model and fails. */}
+        {modelWarmupLabel && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="mx-3 mb-1 flex items-center gap-2 rounded-md bg-[var(--color-background-secondary)] px-2.5 py-1.5 text-[12px] text-[var(--color-text-secondary)]"
+          >
+            <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-[var(--color-text-tertiary)] border-t-transparent" aria-hidden />
+            {modelWarmupLabel}
           </div>
         )}
 
