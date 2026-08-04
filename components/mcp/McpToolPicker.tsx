@@ -2,6 +2,7 @@
 
 import { useRef, useState } from 'react'
 import type { McpTool } from '@/lib/types/mcp'
+import { useMenuMaxHeight } from '@/lib/ui/menuMaxHeight'
 
 type McpToolPickerProps = {
   tools: McpTool[]
@@ -12,6 +13,7 @@ type McpToolPickerProps = {
 export function McpToolPicker({ tools, selected, onToggle }: McpToolPickerProps) {
   const [open, setOpen] = useState(false)
   const btnRef = useRef<HTMLButtonElement>(null)
+  const menuMaxH = useMenuMaxHeight(open, btnRef)
 
   if (tools.length === 0) return null
 
@@ -50,7 +52,10 @@ export function McpToolPicker({ tools, selected, onToggle }: McpToolPickerProps)
               <p className="text-xs font-semibold text-[var(--color-text-primary)]">MCP Tools</p>
               <p className="text-[11px] text-[var(--color-text-secondary)]">Selected tools will be available to the model</p>
             </div>
-            <div className="max-h-64 overflow-y-auto p-2 space-y-1">
+            {/* Cap the scrollable list to the space above the trigger MINUS the menu's
+                fixed header + footer chrome (~96px), so the whole menu — not just the
+                list — stays within the viewport and nothing clips on a small window. */}
+            <div style={{ maxHeight: menuMaxH === undefined ? undefined : Math.max(80, menuMaxH - 96) }} className="max-h-64 overflow-y-auto p-2 space-y-1">
               {tools.map((t) => {
                 const key = `${t.serverId}:${t.name}`
                 const isOn = selected.includes(key)

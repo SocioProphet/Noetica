@@ -4,6 +4,7 @@ import { useRef, useState, useCallback, useEffect } from 'react'
 import type { PendingAttachment } from '@/lib/types/attachment'
 import { MAX_ATTACHMENTS } from '@/lib/types/attachment'
 import { readFilesAsAttachments, openNativeFilePicker } from '@/lib/attachments/reader'
+import { useMenuMaxHeight } from '@/lib/ui/menuMaxHeight'
 import { isTauri, amUrl } from '@/lib/tauri/bridge'
 import type { McpTool } from '@/lib/types/mcp'
 import { McpToolPicker } from '@/components/mcp/McpToolPicker'
@@ -84,18 +85,10 @@ function AttachmentChip({ attachment, onRemove }: { attachment: PendingAttachmen
   )
 }
 
-// Gus #4: composer dropdowns open UPWARD inside an overflow:hidden shell, so on a small window
-// a hardcoded max-height overruns the top edge and clips the top of the list. This measures the
-// trigger's viewport position on open and caps the menu to the space actually above it.
-function useMenuMaxHeight(open: boolean, triggerRef: React.RefObject<HTMLButtonElement | null>): number | undefined {
-  const [maxH, setMaxH] = useState<number | undefined>(undefined)
-  useEffect(() => {
-    if (!open || !triggerRef.current) { setMaxH(undefined); return }
-    const rect = triggerRef.current.getBoundingClientRect()
-    setMaxH(Math.max(140, Math.floor(rect.top - 16)))   // space above the trigger, minus a margin
-  }, [open, triggerRef])
-  return maxH
-}
+// Gus #4 / B1-4: composer dropdowns open UPWARD inside an overflow:hidden shell, so on a small
+// window a hardcoded max-height overruns the top edge and clips the top of the list. The shared
+// hook (lib/ui/menuMaxHeight) caps every such menu — the three here AND McpToolPicker — to the
+// space actually above the trigger, recomputed on resize, with a tested pure core.
 
 export function InputArea({
   onSend, onFanout, onStop,
