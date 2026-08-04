@@ -605,6 +605,9 @@ const TOOL_ACTION_CLASS: Record<string, ScopedActionClass> = {
   generate_image: 'network_call',
   public_data: 'network_call',
   update_self: 'network_call',
+  // acquire dispatches a governed WEB FETCH (to the sovereign acquire-worker) — a network action,
+  // so scope-d gates it the same as web_search/public_data: a read-only/no-net policy blocks it.
+  acquire: 'network_call',
   code_execute: 'write',
   run_command: 'write',
 }
@@ -1483,6 +1486,22 @@ const BUILTIN_TOOLS: ProviderTool[] = [
     },
   },
   {
+    name: 'acquire',
+    description:
+      "Governed web acquisition: fetch/crawl a URL through Noetica's policy/robots/rate/reputation/provenance plane and land it as evidence. Public data only; auth-gated targets are refused. The fetch runs in the sovereign acquire-worker (never inline), the run is recorded as a governed, cancellable action BEFORE execution, and if no worker is configured it fails closed (Noetica will not fetch the URL itself). Use to bring a public page/dataset into the user's knowledge under provenance, not for a quick lookup (use web_search for that).",
+    input_schema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'The http(s) URL to acquire (public data only).' },
+        accountClass: { type: 'string', enum: ['sovereign', 'research', 'own-estate', 'commercial'], description: 'Acquisition account class — governs which policy envelope applies (optional).' },
+        tier: { type: 'string', enum: ['T0', 'T1', 'T2', 'T3', 'T4'], description: 'Reference tier of the target (optional).' },
+        seeds: { type: 'array', items: { type: 'string' }, description: 'Additional seed URLs to crawl from the same target (optional).' },
+        enrich: { type: 'string', description: 'Optional SynapseIQ enrichment pass to run on the landed content.' },
+      },
+      required: ['url'],
+    },
+  },
+  {
     name: 'execute_action',
     description: "Execute a typed graph Action (the kinetic ontology) — e.g. record a stewardship decision (assign a keeper, acknowledge an abandonment signal). Pass the action name + its params object. Capability-gated + audited. Available actions: steward_entity.",
     input_schema: {
@@ -2091,6 +2110,77 @@ function tickRoutines(): void {
   }
 }
 
+// ─── Governed web acquisition (shared path) ────────────────────────────────────
+// The ONE governed acquire path, called by BOTH POST /api/acquire and the `acquire` built-in tool.
+// It records the acquisition as a governed, cancellable AgentRun (same store as /api/runs, so it lists
+// in Dispatch and is killable) AND a GovernanceRun (GovernSurface audit) BEFORE any execution, then hands
+// EXECUTION to the sovereign acquire-worker (which wraps the governed fetch: policy → robots → rate →
+// reputation → provenance → optional SynapseIQ enrich → sink). Noetica NEVER fetches the URL itself; if
+// ACQUIRE_WORKER_URL is unset we FAIL CLOSED so an unconfigured estate cannot silently egress. Returns a
+// discriminated result (outcome + httpCode) so the HTTP endpoint and the tool can each render it natively.
+interface GovernedAcquireInput { url: string; accountClass?: string; tier?: string; seeds?: string[]; enrich?: string }
+interface GovernedAcquireResult {
+  outcome: 'invalid_url' | 'no_worker' | 'worker_error' | 'worker_unreachable' | 'ok'
+  actionId: string          // '' only for invalid_url (no run is recorded before a valid URL)
+  httpCode: number          // 400 | 503 | 502 | 200 — the status the /api/acquire endpoint returns
+  admitted?: boolean        // ok: did the worker's policy admit the acquisition
+  status?: unknown; httpStatus?: unknown; landed?: unknown; sink?: unknown; provenance?: unknown; reason?: string
+  error?: string; detail?: string
+}
+async function runGovernedAcquire(input: GovernedAcquireInput): Promise<GovernedAcquireResult> {
+  const targetUrl = String(input.url ?? '').trim()
+  if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
+    return { outcome: 'invalid_url', actionId: '', httpCode: 400, error: 'url_required' }
+  }
+  const accountClass = typeof input.accountClass === 'string' ? input.accountClass : undefined
+  const tier = typeof input.tier === 'string' ? input.tier : undefined
+  const seeds = Array.isArray(input.seeds) ? input.seeds.map(String) : undefined
+  const enrich = typeof input.enrich === 'string' ? input.enrich : undefined
+  const now = Date.now()
+  const run_id = `acq-${now}-${Math.random().toString(36).slice(2, 8)}`
+  const timestamp = new Date(now).toISOString()
+  // (1) Record the governed action BEFORE any execution — auditable + cancellable from this instant.
+  const run: AgentRun = { id: run_id, title: `Acquire ${targetUrl}`.slice(0, 80), prompt: targetUrl, role: 'acquire', status: 'running', source: 'manual', createdAt: now, startedAt: now }
+  upsertRun(run)
+  // Fail closed: without a configured sovereign worker Noetica must NOT fetch the URL itself.
+  const workerBase = process.env['ACQUIRE_WORKER_URL']
+  if (!workerBase) {
+    const detail = 'ACQUIRE_WORKER_URL not configured'
+    run.status = 'error'; run.error = detail; run.finishedAt = Date.now(); upsertRun(run)
+    recordGovernanceRun({ run_id, model_routed: 'acquire-worker', provider: 'acquire', policy_admitted: false, memory_written: false, timestamp, latency_ms: Date.now() - now, task: 'acquire', session_id: run_id, error: detail })
+    return { outcome: 'no_worker', actionId: run_id, httpCode: 503, error: detail }
+  }
+  // (2) Dispatch EXECUTION to the sovereign worker — the real governed fetcher; never re-implemented here.
+  try {
+    const wr = await fetch(`${workerBase.replace(/\/$/, '')}/acquire`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ url: targetUrl, accountClass, tier, seeds, enrich }),
+      signal: AbortSignal.timeout(120_000),
+    })
+    const result = await wr.json().catch(() => ({})) as Record<string, unknown>
+    if (!wr.ok) {
+      const detail = typeof result['error'] === 'string' ? result['error'] : `worker_status_${wr.status}`
+      run.status = 'error'; run.error = detail; run.finishedAt = Date.now(); upsertRun(run)
+      recordGovernanceRun({ run_id, model_routed: 'acquire-worker', provider: 'acquire', policy_admitted: false, memory_written: false, timestamp, latency_ms: Date.now() - now, task: 'acquire', session_id: run_id, error: detail })
+      return { outcome: 'worker_error', actionId: run_id, httpCode: 502, error: 'acquire_worker_failed', detail }
+    }
+    const admitted = result['status'] === 'ok'
+    const reason = typeof result['reason'] === 'string' ? result['reason'] : undefined
+    run.status = admitted ? 'done' : 'error'
+    run.result = JSON.stringify({ status: result['status'], httpStatus: result['httpStatus'], landed: result['landed'], sink: result['sink'], provenance: result['provenance'], reason }).slice(0, 4000)
+    if (!admitted) run.error = reason ?? 'not_admitted'
+    run.finishedAt = Date.now(); upsertRun(run)
+    // (3) Governance plane: admitted reflects the worker's policy verdict; memory_written reflects the sink landing.
+    recordGovernanceRun({ run_id, model_routed: 'acquire-worker', provider: 'acquire', policy_admitted: admitted, memory_written: Boolean(result['landed']), timestamp, latency_ms: Date.now() - now, task: 'acquire', session_id: run_id, error: admitted ? undefined : (reason ?? 'not_admitted') })
+    return { outcome: 'ok', actionId: run_id, httpCode: 200, admitted, status: result['status'] ?? 'unknown', httpStatus: result['httpStatus'], landed: result['landed'], sink: result['sink'], provenance: result['provenance'], reason }
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : 'dispatch_failed'
+    run.status = 'error'; run.error = detail; run.finishedAt = Date.now(); upsertRun(run)
+    recordGovernanceRun({ run_id, model_routed: 'acquire-worker', provider: 'acquire', policy_admitted: false, memory_written: false, timestamp, latency_ms: Date.now() - now, task: 'acquire', session_id: run_id, error: detail })
+    return { outcome: 'worker_unreachable', actionId: run_id, httpCode: 502, error: 'acquire_worker_unreachable', detail }
+  }
+}
+
 async function executeTool(
   name: string,
   input: Record<string, unknown>,
@@ -2148,6 +2238,7 @@ async function executeTool(
       run_command: 'exec', code_execute: 'exec', write_file: 'fs-write', edit_file: 'fs-write',
       read_file: 'fs-read', list_directory: 'fs-read', remember: 'memory-write',
       web_search: 'net', public_data: 'net', generate_image: 'net', ocr: 'fs-read',
+      acquire: 'net',
     }
     const cap = TOOL_CAP[name]
     if (cap) {
@@ -2473,6 +2564,23 @@ async function executeTool(
         const next = setUserIdentity({ displayName, email })
         return `Profile updated — you're now set as ${next.displayName}${next.email ? ` <${next.email}>` : ''}. The UI and how I refer to you will use this.`
       } catch (e) { return `Could not set profile: ${e instanceof Error ? e.message : String(e)}` }
+    }
+    case 'acquire': {
+      // Governed web acquisition via the SHARED path (same as POST /api/acquire): records the governed run,
+      // dispatches to the sovereign acquire-worker, fails closed when unconfigured. Never fetches inline.
+      const r = await runGovernedAcquire({
+        url: String(input['url'] ?? ''),
+        accountClass: typeof input['accountClass'] === 'string' ? input['accountClass'] as string : undefined,
+        tier: typeof input['tier'] === 'string' ? input['tier'] as string : undefined,
+        seeds: Array.isArray(input['seeds']) ? (input['seeds'] as unknown[]).map(String) : undefined,
+        enrich: typeof input['enrich'] === 'string' ? input['enrich'] as string : undefined,
+      })
+      if (r.outcome === 'invalid_url') return 'Error: acquire needs a valid http(s) `url` (public data only).'
+      if (r.outcome === 'no_worker') return `Acquisition refused — failing closed: ${r.error}. Noetica will not fetch the URL itself without a configured sovereign acquire-worker (set ACQUIRE_WORKER_URL). Governed action ${r.actionId} recorded as failed.`
+      if (r.outcome === 'worker_error' || r.outcome === 'worker_unreachable') return `Acquisition failed: ${r.error}${r.detail ? ` — ${r.detail}` : ''}. Governed action ${r.actionId} recorded as failed.`
+      const prov = r.provenance && typeof r.provenance === 'object' ? JSON.stringify(r.provenance).slice(0, 300) : (r.provenance != null ? String(r.provenance) : 'n/a')
+      if (!r.admitted) return `Acquisition NOT admitted by governance for that URL: ${r.reason ?? 'not_admitted'}. Governed action ${r.actionId}. Nothing was landed.`
+      return `Acquired (governed): status=${String(r.status)}${r.httpStatus != null ? `, http=${String(r.httpStatus)}` : ''}, landed=${r.landed ? 'yes' : 'no'}${r.sink != null ? ` → ${String(r.sink)}` : ''}. Provenance: ${prov}. actionId=${r.actionId}.`
     }
     default:
       return `Unknown built-in tool: ${name}`
@@ -6139,59 +6247,19 @@ const server = http.createServer((req, res) => {
     void (async () => {
       try {
         const p = JSON.parse(await readBody(req) || '{}') as Record<string, unknown>
-        const targetUrl = String(p['url'] ?? '').trim()
-        if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'url_required' })); return }
-        const accountClass = typeof p['accountClass'] === 'string' ? p['accountClass'] as string : undefined
-        const tier = typeof p['tier'] === 'string' ? p['tier'] as string : undefined
-        const seeds = Array.isArray(p['seeds']) ? (p['seeds'] as unknown[]).map(String) : undefined
-        const enrich = typeof p['enrich'] === 'string' ? p['enrich'] as string : undefined
-        const now = Date.now()
-        const run_id = `acq-${now}-${Math.random().toString(36).slice(2, 8)}`
-        const timestamp = new Date(now).toISOString()
-        // (1) Record the governed action BEFORE any execution — auditable + cancellable from this instant
-        // (same store as /api/runs, so it lists in Dispatch and is killable via POST /api/runs/:id/cancel).
-        const run: AgentRun = { id: run_id, title: `Acquire ${targetUrl}`.slice(0, 80), prompt: targetUrl, role: 'acquire', status: 'running', source: 'manual', createdAt: now, startedAt: now }
-        upsertRun(run)
-        // Fail closed: without a configured sovereign worker Noetica must NOT fetch the URL itself.
-        const workerBase = process.env['ACQUIRE_WORKER_URL']
-        if (!workerBase) {
-          const detail = 'ACQUIRE_WORKER_URL not configured'
-          run.status = 'error'; run.error = detail; run.finishedAt = Date.now(); upsertRun(run)
-          recordGovernanceRun({ run_id, model_routed: 'acquire-worker', provider: 'acquire', policy_admitted: false, memory_written: false, timestamp, latency_ms: Date.now() - now, task: 'acquire', session_id: run_id, error: detail })
-          res.writeHead(503, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: detail, actionId: run_id }))
-          return
-        }
-        // (2) Dispatch EXECUTION to the sovereign worker — the real governed fetcher; never re-implemented here.
-        try {
-          const wr = await fetch(`${workerBase.replace(/\/$/, '')}/acquire`, {
-            method: 'POST', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ url: targetUrl, accountClass, tier, seeds, enrich }),
-            signal: AbortSignal.timeout(120_000),
-          })
-          const result = await wr.json().catch(() => ({})) as Record<string, unknown>
-          if (!wr.ok) {
-            const detail = typeof result['error'] === 'string' ? result['error'] : `worker_status_${wr.status}`
-            run.status = 'error'; run.error = detail; run.finishedAt = Date.now(); upsertRun(run)
-            recordGovernanceRun({ run_id, model_routed: 'acquire-worker', provider: 'acquire', policy_admitted: false, memory_written: false, timestamp, latency_ms: Date.now() - now, task: 'acquire', session_id: run_id, error: detail })
-            res.writeHead(502, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'acquire_worker_failed', detail, actionId: run_id }))
-            return
-          }
-          const admitted = result['status'] === 'ok'
-          const reason = typeof result['reason'] === 'string' ? result['reason'] : undefined
-          run.status = admitted ? 'done' : 'error'
-          run.result = JSON.stringify({ status: result['status'], httpStatus: result['httpStatus'], landed: result['landed'], sink: result['sink'], provenance: result['provenance'], reason }).slice(0, 4000)
-          if (!admitted) run.error = reason ?? 'not_admitted'
-          run.finishedAt = Date.now(); upsertRun(run)
-          // (3) Governance plane: admitted reflects the worker's policy verdict; memory_written reflects the sink landing.
-          recordGovernanceRun({ run_id, model_routed: 'acquire-worker', provider: 'acquire', policy_admitted: admitted, memory_written: Boolean(result['landed']), timestamp, latency_ms: Date.now() - now, task: 'acquire', session_id: run_id, error: admitted ? undefined : (reason ?? 'not_admitted') })
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ actionId: run_id, status: result['status'] ?? 'unknown', httpStatus: result['httpStatus'], landed: result['landed'], sink: result['sink'], provenance: result['provenance'], reason }))
-        } catch (e) {
-          const detail = e instanceof Error ? e.message : 'dispatch_failed'
-          run.status = 'error'; run.error = detail; run.finishedAt = Date.now(); upsertRun(run)
-          recordGovernanceRun({ run_id, model_routed: 'acquire-worker', provider: 'acquire', policy_admitted: false, memory_written: false, timestamp, latency_ms: Date.now() - now, task: 'acquire', session_id: run_id, error: detail })
-          res.writeHead(502, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'acquire_worker_unreachable', detail, actionId: run_id }))
-        }
+        // ONE governed acquire path — shared with the `acquire` built-in tool (runGovernedAcquire).
+        const r = await runGovernedAcquire({
+          url: String(p['url'] ?? ''),
+          accountClass: typeof p['accountClass'] === 'string' ? p['accountClass'] as string : undefined,
+          tier: typeof p['tier'] === 'string' ? p['tier'] as string : undefined,
+          seeds: Array.isArray(p['seeds']) ? (p['seeds'] as unknown[]).map(String) : undefined,
+          enrich: typeof p['enrich'] === 'string' ? p['enrich'] as string : undefined,
+        })
+        res.writeHead(r.httpCode, { 'Content-Type': 'application/json' })
+        if (r.outcome === 'invalid_url') { res.end(JSON.stringify({ error: 'url_required' })); return }
+        if (r.outcome === 'no_worker') { res.end(JSON.stringify({ error: r.error, actionId: r.actionId })); return }
+        if (r.outcome === 'worker_error' || r.outcome === 'worker_unreachable') { res.end(JSON.stringify({ error: r.error, detail: r.detail, actionId: r.actionId })); return }
+        res.end(JSON.stringify({ actionId: r.actionId, status: r.status ?? 'unknown', httpStatus: r.httpStatus, landed: r.landed, sink: r.sink, provenance: r.provenance, reason: r.reason }))
       } catch { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'internal_error' })) }
     })()
     return

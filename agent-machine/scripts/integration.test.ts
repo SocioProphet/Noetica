@@ -135,6 +135,31 @@ test('POST /api/acquire rejects a missing/invalid url', async () => {
   assert.equal((await post('/api/acquire', { url: 'not-a-url' })).status, 400)
 })
 
+test('acquire is advertised as a first-class built-in tool (the MCP/tool surface)', async () => {
+  // /api/status maps over BUILTIN_TOOLS — the single tool-advertisement surface the tool plane serves,
+  // so a first-class built-in MUST appear here, not only in the internal dispatch switch.
+  const { body } = await get('/api/status')
+  assert.ok(Array.isArray(body.tools), 'status advertises a tools list')
+  assert.ok(body.tools.includes('acquire'), 'acquire is advertised in the tool list')
+})
+
+test('acquire tool handler fails closed (no worker) via POST /api/tool — never fetches inline', async () => {
+  // The tool must reuse the SAME governed path as POST /api/acquire: with ACQUIRE_WORKER_URL unset it
+  // fails closed (a clear tool error) rather than fetching the URL itself, and records a governed run.
+  const { status, body } = await post('/api/tool', { name: 'acquire', input: { url: 'https://example.com/' } })
+  assert.equal(status, 200)
+  assert.equal(typeof body.result, 'string')
+  assert.match(body.result, /failing closed|ACQUIRE_WORKER_URL not configured/i)
+  const m = /\bacq-[a-z0-9-]+/i.exec(body.result)
+  assert.ok(m, 'tool result names the governed actionId')
+  // The governed action is recorded in the same runs plane as POST /api/acquire, marked failed.
+  const runs = await get('/api/runs')
+  const recorded = runs.body.runs.find((r: any) => r.id === m![0])
+  assert.ok(recorded, 'acquire tool run is recorded in the runs plane')
+  assert.equal(recorded.role, 'acquire')
+  assert.equal(recorded.status, 'error')
+})
+
 test('self/reset prunes learned state (auth disabled by default)', async () => {
   const { status, body } = await post('/api/self/reset', {})
   assert.equal(status, 200)
