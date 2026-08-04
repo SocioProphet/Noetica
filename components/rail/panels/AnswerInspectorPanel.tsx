@@ -275,6 +275,11 @@ export function AnswerInspectorPanel({ message }: { message: ChatMessage | null 
               {message.retrieval_trace.knowledge_boundary.memories}
             </dd>
           </dl>
+          {message.retrieval_trace.knowledge_boundary.degraded && (
+            <p className="mt-2 rounded-md bg-[#fef3c7] px-2 py-1.5 text-[11px] text-[#b45309]">
+              ⚠ {message.retrieval_trace.knowledge_boundary.degraded}
+            </p>
+          )}
         </Section>
       )}
 

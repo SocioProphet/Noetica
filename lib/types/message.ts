@@ -233,5 +233,7 @@ export interface RetrievalTrace {
     collection: string | null
     sessions: number | null
     memories: 'cross-project'
+    /** B2-3: set when document retrieval errored — the answer is ungrounded, said plainly. */
+    degraded?: string
   }
 }
