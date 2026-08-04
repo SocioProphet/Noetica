@@ -5,6 +5,7 @@ import type { PendingAttachment } from '@/lib/types/attachment'
 import { MAX_ATTACHMENTS } from '@/lib/types/attachment'
 import { readFilesAsAttachments, openNativeFilePicker } from '@/lib/attachments/reader'
 import { useMenuMaxHeight } from '@/lib/ui/menuMaxHeight'
+import { enqueueAttaching, dequeueAttaching } from '@/lib/ui/attachingQueue'
 import { isTauri, amUrl } from '@/lib/tauri/bridge'
 import type { McpTool } from '@/lib/types/mcp'
 import { McpToolPicker } from '@/components/mcp/McpToolPicker'
@@ -262,7 +263,16 @@ export function InputArea({
           filters: [{ name: 'Documents & code', extensions: ['pdf', 'docx', 'txt', 'md', 'csv', 'json', 'ts', 'js', 'py', 'rs', 'go', 'yaml', 'yml', 'sql'] }],
         })
         const paths = Array.isArray(selected) ? selected : selected ? [selected] : []
-        for (const p of paths) await postIngest('/api/ingest/path', { path: p, collection: uploadCollection }, p.split('/').pop() ?? p)
+        // B1-8: show a progress chip per file the instant they're picked — the shipping
+        // Tauri app went through here and previously showed nothing until ingestion finished.
+        const names = paths.map((p) => p.split('/').pop() ?? p)
+        setAttaching((prev) => enqueueAttaching(prev, names))
+        // Sequential on purpose: parallel ingests can overload the sidecar (see addFiles).
+        for (const p of paths) {
+          const name = p.split('/').pop() ?? p
+          try { await postIngest('/api/ingest/path', { path: p, collection: uploadCollection }, name) }
+          finally { setAttaching((prev) => dequeueAttaching(prev, name)) }
+        }
       } catch (e) {
         setAttachError(`Couldn't open file picker: ${e instanceof Error ? e.message : String(e)}`)
       }
