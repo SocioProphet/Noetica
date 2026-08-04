@@ -1,0 +1,82 @@
+# Builds + signs the Noetica agent-machine container image in its CANONICAL repo (not vendored),
+# because the Dockerfile builds from the repo root and reaches across the agent-machine boundary into
+# lib/governance, lib/pricing, canon/academy/data, python (requirements.txt) and a native rocksdb
+# compile — vendoring that elsewhere would be huge and drift-prone. prophet-platform's
+# infra/k8s/noetica-agent-machine just references the published image (same as sherlock-search).
+#
+# ⚠️ HUMAN REVIEW REQUIRED: this workflow holds `packages: write` (ghcr push) + `id-token: write`
+# (keyless cosign OIDC). Per estate policy, workflow/permission changes are reviewed before merge.
+name: agent-machine-image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "agent-machine/**"
+      - "lib/governance/**"
+      - "lib/pricing/**"
+      - ".github/workflows/agent-machine-image.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-machine-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/socioprophet/noetica-agent-machine
+
+jobs:
+  build-sign-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write      # push to ghcr
+      id-token: write      # keyless cosign (sigstore OIDC) — no stored key
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long
+
+      # Build from the REPO ROOT (context '.') so the Dockerfile's cross-boundary COPYs resolve.
+      # Provenance + SBOM attestations are SOTA supply-chain hygiene.
+      - name: Build + push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: agent-machine/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # Keyless (OIDC) signature — verifiable against this workflow's identity, no key to leak.
+      - name: Sign the image (keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
