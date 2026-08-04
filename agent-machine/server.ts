@@ -76,6 +76,7 @@ import { decayAll } from '@socioprophet/hellgraph'
 import { consolidate } from '@socioprophet/hellgraph'
 import { recordAttentionSnapshot, pushSnapshotToPrometheusd, ingestPrometheusCandidate } from '@socioprophet/hellgraph'
 import { isOllamaRunning, listLocalModels, listLoadedModels, pullModel, streamOllama, getModelContextLength, ollamaBase, generateOllamaText } from './lib/ollama.js'
+import { ragDegradationMessage, RAG_DEGRADED_NOTICE } from './lib/rag-degradation.js'
 import { parseInlineToolCalls } from './lib/tool-calls.js'
 import { repairToolArgs } from './lib/tool-validate.js'
 import { containmentState, hydrateContainment, resolvePurpose, armKillSwitch, disarmKillSwitch, bindPurpose, PURPOSES } from './lib/agent-containment.js'
@@ -3272,6 +3273,11 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
   const narrate = (n: import('./lib/narration.js').Narration) => sse(res, 'narration', { narration: n })
   let docHitCount = 0  // chunks pulled by semantic RAG — surfaced in the retrieve step
   let docHits: import('./lib/doc-store.js').ChunkHit[] = [] // captured for extractive QA
+  // B2-3: RAG is best-effort, but when the user HAS documents a retrieval failure must
+  // not be swallowed silently — the answer proceeds ungrounded and they should be told,
+  // instead of a degraded answer that looks identical to a grounded one.
+  let ragDegraded: string | null = null
+  let docsPresent = false
 
   // ── Glossary-grounded NLU (Rasa-style lookup tables, already worked out) ─────
   // Overlap the turn against our induced GlossaryTerm vocabulary (Domain→Topic×22→
@@ -3996,7 +4002,8 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
     // intents (greetings/confirmations) nor for the reason lane (ensureRetrieve is false there by construction).
     const ensureRetrieveNow = grounding.ensureRetrieve && intentPlan.retrieval !== 'none' && !useReasonLane
     const retrievalGate = intentPlan.retrieval !== 'none' && !useReasonLane
-    if (documentChunkCount() > 0 && (retrievalGate || ensureRetrieveNow)) {
+    docsPresent = documentChunkCount() > 0
+    if (docsPresent && (retrievalGate || ensureRetrieveNow)) {
       if (ensureRetrieveNow && !retrievalGate) console.log('[grounding] ungrounded turn → ensure-retrieve binding kept retrieval on')
       // Intent-aware retrieval. Doc-focused intents (summarize_doc / qa_over_doc /
       // research) get a tight top-k of the MOST relevant chunks instead of stuffing
@@ -4063,7 +4070,14 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
         })
       }
     }
-  } catch { /* document RAG is best-effort */ }
+  } catch (e) {
+    // Best-effort, but NOT silent when the user has documents: a retrieval failure means
+    // their docs couldn't be searched and the answer proceeds ungrounded — surface it
+    // (retrieve step + knowledge boundary) rather than returning a degraded answer that
+    // looks identical to a grounded one.
+    ragDegraded = ragDegradationMessage(docsPresent, e)
+    if (ragDegraded) console.warn(`[rag] retrieval degraded — answering without document grounding: ${ragDegraded}`.replace(/[\r\n]/g, ''))
+  }
 
   // ── Self-model grounding ────────────────────────────────────────────────────
   // When the user asks about the agent itself / how it works, inject the verified
@@ -4210,6 +4224,9 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
     collection: boundaryCollection,
     sessions: projectSessionIds ? projectSessionIds.length : null,
     memories: 'cross-project' as const,   // explicit "remember this" facts are deliberately not scoped
+    // B2-3: when document retrieval errored (docs present but unsearchable), the answer is
+    // ungrounded — say so in the boundary the provenance panel renders, not silently.
+    ...(ragDegraded ? { degraded: RAG_DEGRADED_NOTICE } : {}),
   }
   if (recalledMems.length > 0 || recalledEpisodes.length > 0) {
     sse(res, 'retrieval', { trace: { patterns: [], timings: [], sources: [], token_estimate: 0, beliefs_injected: 0, memory_sources: recalledMems, episode_sources: recalledEpisodes, knowledge_boundary: knowledgeBoundary } })
@@ -4231,7 +4248,9 @@ async function handleChat(body: ChatRequest, res: http.ServerResponse): Promise<
   }
 
   // Context assembled — close out the retrieve step.
-  step('retrieve', 'done', docHitCount > 0 ? `${docHitCount} passage${docHitCount === 1 ? '' : 's'}` : (graphContext ? 'memory grounding' : 'no extra context'))
+  step('retrieve', 'done', ragDegraded
+    ? RAG_DEGRADED_NOTICE
+    : (docHitCount > 0 ? `${docHitCount} passage${docHitCount === 1 ? '' : 's'}` : (graphContext ? 'memory grounding' : 'no extra context')))
   if (docHitCount > 0 || wantsVectorRag(intentPlan.retrieval)) { try { const { narrateRetrieve } = await import('./lib/narration.js'); narrate(narrateRetrieve(docHitCount)) } catch { /* best-effort */ } }
 
   // ── Logic-first front (NOETICA_LOGIC_FIRST, default-on): RECALL ─────────────
