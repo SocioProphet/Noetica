@@ -9,17 +9,29 @@ import { ingestRunsJsonl } from '../../../../lib/impair/ingest'
 const ROOT = fs.realpathSync(os.homedir())
 const real = path.join(ROOT, '.noetica/impair/runs.jsonl')
 
-test('the default path resolves inside the confinement root', () => {
-  const rel = path.relative(ROOT, path.resolve(ROOT, '.noetica/impair/runs.jsonl'))
-  assert.ok(!rel.startsWith('..') && !path.isAbsolute(rel))
+test('the route takes NO user-supplied path', () => {
+  // The strongest version of the confinement argument: there is no input to confine.
+  // An earlier version accepted ?path= and guarded it; a guarded injection surface is
+  // still an injection surface, and reading request.url also broke the static export.
+  const raw = fs.readFileSync(
+    path.join(process.cwd(), 'app/api/impair/runs/route.ts'), 'utf8')
+  // Strip comments before asserting — the file DOCUMENTS why it avoids request.url,
+  // and matching that prose would fail the test for saying the right thing.
+  const code = raw
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n').filter((l) => !l.trim().startsWith('//')).join('\n')
+  assert.ok(!/searchParams|request\.url|req\.url/.test(code),
+    'the route must not read a user-supplied path')
+  assert.match(code, /const RUNS_PATH = /)
+  assert.match(code, /export async function GET\(\)/, 'GET takes no request arg')
 })
 
-test('an escaping path is rejected by the lexical barrier', () => {
-  for (const bad of ['../../etc/passwd', '/etc/passwd', '~/../../etc/passwd']) {
-    const expanded = bad.startsWith('~/') ? path.join(ROOT, bad.slice(2)) : bad
-    const rel = path.relative(ROOT, path.resolve(ROOT, expanded))
-    assert.ok(rel.startsWith('..') || path.isAbsolute(rel), `${bad} should escape`)
-  }
+test('the route is statically exportable', () => {
+  // force-dynamic broke the whole Tauri build, not just this route.
+  const src = fs.readFileSync(
+    path.join(process.cwd(), 'app/api/impair/runs/route.ts'), 'utf8')
+  assert.match(src, /export const dynamic = 'force-static'/)
+  assert.ok(!/force-dynamic/.test(src))
 })
 
 test('the committed REAL run fixture ingests and verifies end to end', () => {
