@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import { GraphRailPanel }   from './panels/GraphRailPanel'
 import { AnswerInspectorPanel } from './panels/AnswerInspectorPanel'
 import { LiveRailPanel, type LiveTurn } from './panels/LiveRailPanel'
+import { ImpairTrailPanel } from './panels/ImpairTrailPanel'
 import { ContextSlot }      from '@/components/shell/RightSidebar'
 import type { ChatMessage } from '@/lib/types/message'
 
@@ -15,6 +16,7 @@ export type UtilityPanelId =
   | 'live'
   | 'context'
   | 'graph'
+  | 'impair'
 
 // Icons are thunks (rendered at map time), NOT inline elements: a module-level const that referenced the
 // icon components directly hit a forward-reference — under React Fast Refresh the component declarations
@@ -25,6 +27,7 @@ const RAIL_ITEMS: { id: UtilityPanelId; label: string; icon: () => React.ReactNo
   { id: 'live',     label: 'Live',     icon: () => <IconLive /> },
   { id: 'graph',    label: 'Graph',    icon: () => <IconGraph /> },
   { id: 'context',  label: 'Activity', icon: () => <IconContext /> },
+  { id: 'impair',   label: 'Evidence', icon: () => <IconImpair /> },
 ]
 
 type ContextData = {
@@ -41,6 +44,7 @@ function renderPanel(id: UtilityPanelId, ctx: ContextData, inspectMessage: ChatM
     case 'live':     return <LiveRailPanel turns={live.turns} isLive={live.isLive} onCommit={live.onCommit} onClear={live.onClear} />
     case 'context':  return <ContextSlot inScopeFiles={ctx.inScopeFiles} activity={ctx.toolActivity} changes={ctx.fileChanges} />
     case 'graph':    return <GraphRailPanel />
+    case 'impair':   return <ImpairTrailPanel />
   }
 }
 
@@ -144,6 +148,17 @@ export function UtilityRail({ activePanel, onSelect, inspectMessage = null, live
 // Icons
 function IconContext() {
   return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M8 2l5.5 3L8 8 2.5 5 8 2z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/><path d="M2.5 8L8 11l5.5-3M2.5 11L8 14l5.5-3" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/></svg>
+}
+
+// Flask: impairment evidence. Same 16x16 stroke grammar as its siblings.
+function IconImpair() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
+      <path d="M6.5 2v4L3 12.5A1 1 0 0 0 3.9 14h8.2a1 1 0 0 0 .9-1.5L9.5 6V2" />
+      <path d="M5.5 2h5" />
+      <path d="M5 10h6" />
+    </svg>
+  )
 }
 function IconCalendar() {
   return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden><rect x="2" y="3" width="12" height="11" rx="1.5" stroke="currentColor" strokeWidth="1.4"/><path d="M5 2v2M11 2v2M2 7h12" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>
